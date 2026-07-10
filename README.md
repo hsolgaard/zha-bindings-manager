@@ -18,13 +18,13 @@ bound to what.
 **Map view** — every device and its bindings, colour-coded by cluster type.
 <img width="1201" height="625" alt="Screenshot 2026-07-10 at 22 10 02" src="https://github.com/user-attachments/assets/2f452e56-cea5-4527-ae1b-9ea1ef92de10" />
 
-**Bindings view** — a flat, searchable, sortable table of every binding. → drag in the Bindings tab screenshot.
+**Bindings view** — a flat, searchable, sortable table of every binding.
 <img width="1201" height="372" alt="Screenshot 2026-07-10 at 22 10 52" src="https://github.com/user-attachments/assets/5af7e6e5-e8c1-4929-8fe4-4c65809e7042" />
 
-**Devices view** — every ZHA device with manufacturer, model, and binding count. → drag in the Devices tab screenshot.
+**Devices view** — every ZHA device with manufacturer, model, and binding count.
 <img width="1201" height="454" alt="Screenshot 2026-07-10 at 22 11 25" src="https://github.com/user-attachments/assets/80c632c5-d7b5-4218-a520-b4e8b996d571" />
 
-**Advanced view** — endpoint- and cluster-aware manual bind/unbind, with existing-binding context. → drag in the Advanced tab screenshot.
+**Advanced view** — endpoint- and cluster-aware manual bind/unbind, with existing-binding context.
 <img width="1201" height="519" alt="Screenshot 2026-07-10 at 22 12 15" src="https://github.com/user-attachments/assets/00b993ac-eee0-42be-a2e9-b439267b3f75" />
 
 

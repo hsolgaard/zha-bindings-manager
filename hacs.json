@@ -1,0 +1,6 @@
+{
+  "name": "ZHA Bindings Manager",
+  "filename": "zha-binding-map-card.js",
+  "render_readme": true,
+  "content_in_root": true
+}

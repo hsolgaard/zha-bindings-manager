@@ -1,0 +1,38 @@
+# Example dashboard for the ZHA Binding Map card, pre-configured as a
+# "panel" view (single card, edge-to-edge, no sidebar squeeze).
+#
+# Home Assistant does not currently let a Lovelace resource / custom card
+# register a dashboard on its own — this file plus a few lines in
+# configuration.yaml is the closest practical equivalent, and it's fully
+# scripted/repeatable rather than something you click through in the UI.
+#
+# Setup:
+#   1. Copy this file into your Home Assistant config directory (the same
+#      folder as configuration.yaml — NOT inside www/).
+#   2. Add the snippet below to configuration.yaml (or merge into an
+#      existing "lovelace:" block if you already have one).
+#   3. Restart Home Assistant.
+#   4. A new "ZHA Bindings" entry appears in your sidebar, already full width.
+#
+# configuration.yaml:
+#
+#   lovelace:
+#     dashboards:
+#       zha-bindings:
+#         mode: yaml
+#         title: ZHA Bindings
+#         icon: mdi:led-strip-variant
+#         show_in_sidebar: true
+#         filename: zha-binding-map-dashboard.yaml
+#
+# Note: this file only takes effect through that configuration.yaml
+# registration above — Home Assistant won't pick it up automatically just by
+# being present in the config folder.
+
+title: ZHA Bindings
+views:
+  - title: ZHA Bindings
+    path: zha-bindings
+    type: panel
+    cards:
+      - type: custom:zha-binding-map-card

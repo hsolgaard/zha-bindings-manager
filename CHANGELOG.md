@@ -2,7 +2,7 @@
 
 All notable changes to ZHA Bindings Manager are documented here.
 
-## [0.9.0] — 2026-07-11
+## [0.9.0] - 11 July 2026
 
 ### Added
 
@@ -57,7 +57,7 @@ All notable changes to ZHA Bindings Manager are documented here.
   and verified-outcome behavior above both help this self-correct instead
   of leaving stale, confusing entries in the table.
 
-## [0.7.1] — 2026-07 (initial public release)
+## [0.7.1] — 10 July 2026 (initial public release)
 
 - First HACS/GitHub release: Map, Floor Plan, Bindings, Devices, and
   Advanced tabs; drag-and-drop bind/unbind; stale-binding flagging (later

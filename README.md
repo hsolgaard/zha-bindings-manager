@@ -462,6 +462,17 @@ one-off UI click-through that's easy to get wrong.)
   native print dialog; if pop-ups are blocked for Home Assistant's URL,
   allow them first.
 
+## Why use Zigbee bindings?
+Direct Zigbee bindings allow compatible devices to communicate directly without requiring Home Assistant to process every button press.
+Benefits include:
+- Lights continue working if Home Assistant is unavailable.
+- Lower latency.
+- Reduced dependence on Wi-Fi and network connectivity.
+- Reduced automation overhead for simple switch-to-light control.
+
+ZHA Bindings Manager doesn't create these capabilities—it simply makes them easier to understand and manage.
+
+
 ## Related projects
 
 - Native ZHA "Manage Zigbee Device → Bindings" tab — lets you create one

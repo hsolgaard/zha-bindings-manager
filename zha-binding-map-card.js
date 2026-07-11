@@ -22,10 +22,21 @@
  * zha_toolkit MUST be installed (via HACS) and working for bind/unbind/scan
  * to function. See README.md for details.
  *
- * Version: 0.7.1
+ * Version: 0.9.0
  */
 
 /* eslint-disable no-console */
+
+const CARD_VERSION = "0.9.0";
+// Logged once per script load (not per card instance) so you can confirm
+// which build is actually active straight from the browser console —
+// useful given HACS caches a pre-gzipped copy of this file that can go
+// stale if you ever drop a replacement in manually.
+console.info(
+  `%c ZHA-BINDING-MAP-CARD %c v${CARD_VERSION} `,
+  "color: white; background: #039be5; font-weight: 700; border-radius: 3px 0 0 3px;",
+  "color: #039be5; background: white; font-weight: 700; border-radius: 0 3px 3px 0;"
+);
 
 const ZTK_DOMAIN = "zha_toolkit";
 
@@ -63,6 +74,29 @@ const CAT_COLOR = {
   security: "#ff5c5c",
   misc: "#9aa4b2",
 };
+
+// Plain-English capability phrases for the small set of clusters bindings
+// actually control, used in Binding Health messages so they read like
+// "brightness control" instead of "Level Control cluster". Anything not
+// listed here falls back to "<cluster name> control".
+const CLUSTER_FRIENDLY_PHRASE = {
+  0x0005: "scene control",
+  0x0006: "on/off control",
+  0x0008: "brightness control",
+  0x0102: "open/close control",
+  0x0201: "temperature control",
+  0x0300: "color control",
+};
+function clusterFriendlyPhrase(id) {
+  const n = Number(id);
+  return CLUSTER_FRIENDLY_PHRASE[n] || `${clusterName(n)} control`;
+}
+
+// Binding Health: icon/label per status level, used by the Bindings-table
+// Health column, its detail popover, and the summary card.
+const HEALTH_ICON = { ok: "✅", info: "ℹ", warning: "⚠", error: "❌" };
+const HEALTH_LABEL = { ok: "OK", info: "Info", warning: "Warning", error: "Error" };
+const HEALTH_RANK = { error: 0, warning: 1, info: 2, ok: 3 };
 
 // Friendly labels for the HA entity-domain "types" we classify devices by
 // (derived from the domain prefix of each entity a device exposes, e.g.
@@ -299,7 +333,12 @@ class ZhaApi {
     });
   }
 
-  /** Calls a zha_toolkit service and returns the event_data response object. */
+  /** Calls a zha_toolkit service and returns the event_data response object.
+   *  On any failure, logs the full request + raw response to the browser
+   *  console before throwing — the toast/error message the UI shows is
+   *  necessarily short, but the console has everything zha_toolkit sent
+   *  back (useful for diagnosing failures with no human-readable "warning"
+   *  attached, e.g. a bare `success: false`). */
   async callToolkit(service, data) {
     if (!this.hass.services || !this.hass.services[ZTK_DOMAIN] || !this.hass.services[ZTK_DOMAIN][service]) {
       throw new Error(
@@ -311,19 +350,26 @@ class ZhaApi {
     try {
       result = await this.hass.callService(ZTK_DOMAIN, service, data, undefined, true, true);
     } catch (err) {
+      console.error(`[ZHA Bindings Manager] ${service} call threw`, { request: data, error: err });
       throw new Error(`${service} failed: ${extractErrorMessage(err)}`);
     }
     const response = result && result.response ? result.response : result;
     if (!response) {
+      console.error(`[ZHA Bindings Manager] ${service} returned no response data`, { request: data, result });
       throw new Error(
         `${service} returned no data. Your Home Assistant core version may be older than ` +
           `2023.7 (response data support) or zha-toolkit needs updating.`
       );
     }
     if (response.errors && response.errors.length) {
+      console.error(`[ZHA Bindings Manager] ${service} reported errors`, { request: data, response });
       throw new Error(`${service}: ${response.errors.join("; ")}`);
     }
     if (response.success === false) {
+      console.error(`[ZHA Bindings Manager] ${service} reported failure (full response below)`, {
+        request: data,
+        response,
+      });
       throw new Error(`${service} reported failure${response.warning ? `: ${response.warning}` : ""}`);
     }
     return response;
@@ -348,7 +394,11 @@ class ZhaApi {
     return this.callToolkit("bind_ieee", data);
   }
 
-  /** Remove binding(s) matching source/target/cluster filters (precise unbind). */
+  /** Remove binding(s) matching source/target/cluster filters (precise unbind).
+   *  dst_endpoint is required to identify the exact binding-table entry on a
+   *  target that has more than one endpoint — without it, zha_toolkit can't
+   *  tell which entry to remove and reports failure even when the source,
+   *  target, and cluster are all correct (see v0.8.1 bug report). */
   async unbindIeee(sourceIeee, targetIeee, clusterIds, opts = {}) {
     const data = {
       ieee: sourceIeee,
@@ -356,6 +406,7 @@ class ZhaApi {
     };
     if (clusterIds && clusterIds.length) data.cluster = clusterIds;
     if (opts.endpoint != null) data.endpoint = opts.endpoint;
+    if (opts.dstEndpoint != null) data.dst_endpoint = opts.dstEndpoint;
     return this.callToolkit("binds_remove_all", data);
   }
 
@@ -388,6 +439,22 @@ function normalizeBinding(sourceIeee, raw) {
     targetEndpoint: isGroup ? null : dst.dst_ep,
     groupId: isGroup ? parseInt(String(dst.group).replace(/^0x/i, ""), 16) : null,
   };
+}
+
+/** True if a normalized binding `b` matches the given source/target
+ *  identity, comparing on normalized IEEE fields rather than raw ID-string
+ *  prefixes (which aren't guaranteed to share exactly the same casing/format
+ *  across different call paths). Used to verify bind/unbind outcomes against
+ *  a fresh rescan instead of trusting zha_toolkit's own success/failure
+ *  report — see the v0.8.2 diagnosis, where that report was misleading in
+ *  both directions. `target` is `{isGroup:true, groupId}` or
+ *  `{isGroup:false, ieee, endpoint}`. */
+function bindingMatches(b, sourceIeee, sourceEp, clusterId, target) {
+  if (normIeee(b.sourceIeee) !== normIeee(sourceIeee)) return false;
+  if (Number(b.sourceEndpoint) !== Number(sourceEp)) return false;
+  if (Number(b.clusterId) !== Number(clusterId)) return false;
+  if (target.isGroup) return b.isGroup && Number(b.groupId) === Number(target.groupId);
+  return !b.isGroup && normIeee(b.targetIeee) === normIeee(target.ieee) && Number(b.targetEndpoint) === Number(target.endpoint);
 }
 
 // ---------------------------------------------------------------------------
@@ -429,6 +496,13 @@ class ZhaBindingMapCard extends HTMLElement {
     this._tableSourceFilter = null; // ieee — set by clicking a source device in the Bindings table
     this._tableSort = { key: null, dir: 1 };
     this._devicesSort = { key: null, dir: 1 };
+
+    // Binding Health: which devices failed to respond on the *most recent*
+    // scan attempt (in-memory only, per session — never persisted, and never
+    // compared against older scans; see _evalBindingHealth's Rule 7).
+    this._scanFailures = new Set();
+    this._tableHealthFilter = "all"; // "all" | "problems" | "error" | "warning" | "info"
+    this._healthReqId = 0; // guards _ensureHealthData against out-of-order fetches
 
     // Floor plan tab state
     this._fpImageUrl = "";
@@ -614,6 +688,72 @@ class ZhaBindingMapCard extends HTMLElement {
     return clusters;
   }
 
+  /** Devices worth rescanning after a bind/unbind attempt — source always,
+   *  plus the target if it's a device (not a group, and not the same IEEE
+   *  as the source). Capped at 2, so this stays fast regardless of outcome. */
+  _impactedIeees(sourceIeee, targetIeee) {
+    const out = [sourceIeee];
+    if (targetIeee && normIeee(targetIeee) !== normIeee(sourceIeee)) out.push(targetIeee);
+    return out;
+  }
+
+  // -------------------------------------------------------------------
+  // Verified bind/unbind outcomes — compares cached state before the
+  // attempt against a fresh rescan afterwards, rather than trusting
+  // zha_toolkit's own success/failure report (which the v0.8.2 diagnosis
+  // showed can be wrong in both directions: reporting failure for a binding
+  // that never existed to begin with, or reporting failure when the action
+  // actually went through).
+  // -------------------------------------------------------------------
+
+  /** Call before the API request, using whatever's currently cached. */
+  _bindingPresent(sourceIeee, sourceEp, clusterId, target) {
+    return this._rawBindings().some((b) => bindingMatches(b, sourceIeee, sourceEp, clusterId, target));
+  }
+
+  /** Call after the post-action rescan completes. */
+  _verifyBindOutcome(sourceIeee, sourceEp, clusterId, target) {
+    const after = this._bindingPresent(sourceIeee, sourceEp, clusterId, target);
+    return after
+      ? { ok: true, message: "Binding confirmed on the device." }
+      : { ok: false, message: "Bind failed — this binding is not on the device after rescanning." };
+  }
+
+  /** Call after the post-action rescan completes; `before` must have been
+   *  captured (via _bindingPresent) prior to the unbind API call. */
+  _verifyUnbindOutcome(before, sourceIeee, sourceEp, clusterId, target) {
+    const after = this._bindingPresent(sourceIeee, sourceEp, clusterId, target);
+    if (!after) {
+      return before
+        ? { ok: true, message: "Binding confirmed removed." }
+        : { ok: true, message: "This binding didn't actually exist on the device — table refreshed." };
+    }
+    return { ok: false, message: "Unbind failed — this binding is still on the device after rescanning." };
+  }
+
+  /** Coordinator unbind can target one explicit cluster or (if none is
+   *  selected) every coordinator binding currently cached for this source
+   *  endpoint — so instead of one true/false outcome, report how many of
+   *  the targeted bindings are actually gone after rescanning.
+   *  `beforeList` is an array of {clusterId, target} captured before the
+   *  API call, for whichever bindings were in scope. */
+  _verifyCoordinatorUnbindOutcome(beforeList, sourceIeee, sourceEp) {
+    if (!beforeList.length) {
+      return { ok: true, message: "No matching coordinator bindings were cached for this endpoint — table refreshed." };
+    }
+    const stillPresent = beforeList.filter((item) =>
+      this._bindingPresent(sourceIeee, sourceEp, item.clusterId, item.target)
+    );
+    const removedCount = beforeList.length - stillPresent.length;
+    if (stillPresent.length === 0) {
+      return { ok: true, message: `Confirmed removed: ${removedCount} of ${beforeList.length} coordinator binding(s).` };
+    }
+    return {
+      ok: false,
+      message: `Only ${removedCount} of ${beforeList.length} coordinator binding(s) were removed — ${stillPresent.length} still present after rescanning.`,
+    };
+  }
+
   async _scanBindings(ieeeList) {
     if (this._scanState.running) return;
     const targets = ieeeList && ieeeList.length ? ieeeList : this._devices.map((d) => d.ieee);
@@ -625,9 +765,13 @@ class ZhaBindingMapCard extends HTMLElement {
       try {
         const bindings = await this._api.getDeviceBindings(ieee);
         this._bindings.set(ieee, bindings);
+        this._scanFailures.delete(normIeee(ieee));
         okCount++;
       } catch (err) {
         failCount++;
+        // Tracked for Binding Health's Rule 7 ("unable to verify") — in-memory
+        // only, reflects just this most recent attempt for this device.
+        this._scanFailures.add(normIeee(ieee));
         console.warn(`ZHA Binding Map: could not read bindings for ${ieee}:`, err.message || err);
       }
       this._scanState.done++;
@@ -664,15 +808,172 @@ class ZhaBindingMapCard extends HTMLElement {
     return raw;
   }
 
-  /** True if a binding's source/target device (or group) no longer exists. */
-  _isStaleBinding(b) {
-    if (!this._devices.some((d) => d.ieee === b.sourceIeee)) return true;
-    if (b.isGroup) return !this._groups.some((g) => g.group_id === b.groupId);
-    return !this._devices.some((d) => d.ieee === b.targetIeee);
+  // -------------------------------------------------------------------
+  // Binding Health — structural validation of bindings (see project spec).
+  // Deliberately checks structure only: does the source/target/endpoint/
+  // cluster referenced by a binding currently exist? It never sends Zigbee
+  // commands, never compares against a previous scan, and never persists
+  // anything — it's recomputed fresh from whatever's currently loaded.
+  // -------------------------------------------------------------------
+
+  /** Fetches endpoint/cluster metadata (cheap local ZHA reads, not a Zigbee
+   *  radio operation) for every device referenced by a binding, so Rules 2/3
+   *  (missing endpoint / missing cluster) can be evaluated. Safe to call
+   *  often — _ensureClusters() is a no-op for anything already cached. */
+  async _ensureHealthData() {
+    const reqId = (this._healthReqId = this._healthReqId + 1);
+    const ieees = new Set();
+    this._rawBindings().forEach((b) => {
+      if (this._devices.some((d) => d.ieee === b.sourceIeee)) ieees.add(b.sourceIeee);
+      if (!b.isGroup && b.targetIeee && this._devices.some((d) => d.ieee === b.targetIeee)) {
+        ieees.add(b.targetIeee);
+      }
+    });
+    const toFetch = [...ieees].filter((ieee) => !this._clusterCache.has(ieee));
+    if (!toFetch.length) return;
+    await Promise.all(toFetch.map((ieee) => this._ensureClusters(ieee).catch(() => {})));
+    if (reqId !== this._healthReqId) return; // a newer bindings set has since superseded this fetch
+    if (this._view === "table") this._renderTable();
   }
 
-  _staleBindingCount() {
-    return this._rawBindings().filter((b) => this._isStaleBinding(b)).length;
+  /** Health for every currently-scanned binding, keyed by binding id. Computed
+   *  fresh each call (cheap — O(n) over already-loaded data) rather than
+   *  cached, per the "no historical data" design principle. */
+  _computeHealthMap() {
+    const bindings = this._rawBindings();
+    const dupCounts = new Map();
+    bindings.forEach((b) => {
+      const key = this._healthDupKey(b);
+      dupCounts.set(key, (dupCounts.get(key) || 0) + 1);
+    });
+    const coord = this._coordinatorIeee();
+    const map = new Map();
+    bindings.forEach((b) => map.set(b.id, this._evalBindingHealth(b, coord, dupCounts)));
+    return map;
+  }
+
+  _healthDupKey(b) {
+    const target = b.isGroup ? `g:${b.groupId}` : `d:${normIeee(b.targetIeee)}:${b.targetEndpoint}`;
+    return `${normIeee(b.sourceIeee)}|${b.sourceEndpoint}|${target}|${b.clusterId}`;
+  }
+
+  /** The rules engine itself. Checked in order from most definitive to most
+   *  contextual; the first match wins (see the spec's precedence notes —
+   *  Rule 7 in particular must never be overridden by a Warning/Error). */
+  _evalBindingHealth(b, coord, dupCounts) {
+    const sourceIeeeN = normIeee(b.sourceIeee);
+
+    // Rule 7 — source didn't respond to the most recent scan attempt. Short-
+    // circuits everything else: we're looking at possibly-stale cached data,
+    // so no other rule is allowed to escalate this to Warning/Error.
+    if (this._scanFailures.has(sourceIeeeN)) {
+      return {
+        level: "info",
+        code: "unable_to_verify",
+        message: "This device did not respond during the scan.",
+        why: "Without a fresh response from this device, we can't confirm this binding is still valid — but it may well be fine.",
+        recommendation: "Wake the device and rescan.",
+      };
+    }
+
+    // Mirrors Rule 1, for the source side (implied by "source device exists"
+    // being an OK condition) — reachable when a device is removed/re-paired
+    // after being scanned, since scan results are cached across reloads.
+    if (!this._devices.some((d) => normIeee(d.ieee) === sourceIeeeN)) {
+      return {
+        level: "error",
+        code: "source_missing",
+        message: "The source device no longer exists.",
+        why: "This binding was read from a device that's since been removed or re-paired, so it's leftover data rather than something currently controllable.",
+        recommendation: "Remove the binding or recreate it.",
+      };
+    }
+
+    if (b.isGroup) {
+      const groupExists = this._groups.some((g) => g.group_id === b.groupId);
+      if (!groupExists) {
+        return {
+          level: "warning",
+          code: "missing_group",
+          message: "Referenced Zigbee group no longer exists.",
+          why: "This binding sends commands to a Zigbee group that Home Assistant no longer knows about, so nothing receives them.",
+          recommendation: "Recreate the group or remove the binding.",
+        };
+      }
+    } else {
+      const targetIeeeN = normIeee(b.targetIeee);
+      if (coord && targetIeeeN === normIeee(coord)) {
+        return {
+          level: "info",
+          code: "coordinator_binding",
+          message: "Standard coordinator reporting binding.",
+          why: "Most Zigbee devices automatically bind a reporting cluster to the coordinator so Home Assistant gets status updates — this is normal and not something you created.",
+          recommendation: null,
+        };
+      }
+      const targetDevice = this._devices.find((d) => normIeee(d.ieee) === targetIeeeN);
+      if (!targetDevice) {
+        return {
+          level: "error",
+          code: "target_missing",
+          message: "Target device no longer exists.",
+          why: "A binding sends commands from the source straight to this target over Zigbee. Since the target no longer exists, those commands go nowhere.",
+          recommendation: "Remove the binding or recreate it.",
+        };
+      }
+      const targetClusters = this._clusterCache.get(targetDevice.ieee);
+      if (!targetClusters) {
+        // _ensureHealthData() hasn't finished fetching this target's clusters
+        // yet — say so rather than guessing OK or Warning.
+        return {
+          level: "info",
+          code: "checking",
+          message: "Checking this binding's target…",
+          why: "Still confirming the target device's current capabilities.",
+          recommendation: null,
+        };
+      }
+      const targetEndpoints = new Set(targetClusters.map((c) => c.endpoint_id));
+      if (!targetEndpoints.has(Number(b.targetEndpoint))) {
+        return {
+          level: "warning",
+          code: "missing_endpoint",
+          message: "The target endpoint no longer exists.",
+          why: "This binding refers to a part of the target device that no longer exists — likely because the device was re-paired or reconfigured.",
+          recommendation: "Recreate the binding using a valid endpoint.",
+        };
+      }
+      const hasCluster = targetClusters.some(
+        (c) => c.type === "in" && c.endpoint_id === Number(b.targetEndpoint) && c.id === b.clusterId
+      );
+      if (!hasCluster) {
+        return {
+          level: "warning",
+          code: "missing_cluster",
+          message: `The destination no longer supports ${clusterFriendlyPhrase(b.clusterId)}.`,
+          why: "The target device no longer exposes the specific capability this binding relies on, so commands sent to it won't be understood.",
+          recommendation: "Verify the device capabilities or recreate the binding.",
+        };
+      }
+    }
+
+    if ((dupCounts.get(this._healthDupKey(b)) || 0) > 1) {
+      return {
+        level: "warning",
+        code: "duplicate",
+        message: "Duplicate binding detected.",
+        why: "Having the same binding twice doesn't break anything, but it's redundant and can make the bindings list harder to read.",
+        recommendation: "Consider removing duplicate entries.",
+      };
+    }
+
+    return {
+      level: "ok",
+      code: "ok",
+      message: "This binding looks structurally valid.",
+      why: "The source and target devices, the endpoint, and the required capability all check out.",
+      recommendation: null,
+    };
   }
 
   _deviceBindingCount(ieee) {
@@ -798,6 +1099,14 @@ class ZhaBindingMapCard extends HTMLElement {
       downloadFile(`zha-bindings-${Date.now()}.json`, JSON.stringify(this._exportRowsData(), null, 2), "application/json");
     });
     this._q("#btn-export-print").addEventListener("click", () => this._printBindings());
+
+    this._qa("[data-health-filter]").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        this._tableHealthFilter = btn.dataset.healthFilter;
+        this._qa("[data-health-filter]").forEach((b) => b.classList.toggle("active", b === btn));
+        this._renderTable();
+      });
+    });
 
     // Floor plan tab
     this._q("#fp-set-image").addEventListener("click", () => {
@@ -1420,6 +1729,13 @@ class ZhaBindingMapCard extends HTMLElement {
     this._q("#unbind-confirm").addEventListener("click", async () => {
       this._closeDialog();
       this._setStatus("info", "Removing binding…", 0);
+      const bindTarget = binding.isGroup
+        ? { isGroup: true, groupId: binding.groupId }
+        : { isGroup: false, ieee: binding.targetIeee, endpoint: binding.targetEndpoint };
+      const before = this._bindingPresent(binding.sourceIeee, binding.sourceEndpoint, binding.clusterId, bindTarget);
+      const rescanTargets = binding.isGroup
+        ? [binding.sourceIeee]
+        : this._impactedIeees(binding.sourceIeee, binding.targetIeee);
       try {
         if (binding.isGroup) {
           await this._api.unbindDeviceFromGroup(binding.sourceIeee, binding.groupId, [
@@ -1428,12 +1744,23 @@ class ZhaBindingMapCard extends HTMLElement {
         } else {
           await this._api.unbindIeee(binding.sourceIeee, binding.targetIeee, [binding.clusterId], {
             endpoint: binding.sourceEndpoint,
+            dstEndpoint: binding.targetEndpoint,
           });
         }
-        this._setStatus("success", "Binding removed.");
-        await this._scanBindings([binding.sourceIeee]);
       } catch (err) {
-        this._setStatus("error", err.message || String(err), 0);
+        // Not trusted alone — the outcome below is verified against a fresh
+        // rescan instead (see v0.8.2 diagnosis).
+        console.warn("[ZHA Bindings Manager] unbind call raised, verifying against rescan anyway", err);
+      } finally {
+        await this._scanBindings(rescanTargets);
+        const outcome = this._verifyUnbindOutcome(
+          before,
+          binding.sourceIeee,
+          binding.sourceEndpoint,
+          binding.clusterId,
+          bindTarget
+        );
+        this._setStatus(outcome.ok ? "success" : "error", outcome.message, outcome.ok ? undefined : 0);
       }
     });
   }
@@ -1458,10 +1785,22 @@ class ZhaBindingMapCard extends HTMLElement {
     });
   }
 
-  _filteredBindingRows() {
+  /** `healthMap` is optional — pass the one _renderTable() already computed
+   *  to avoid a redundant pass; callers like _exportRowsData() that don't
+   *  have one handy get a freshly-computed one for free. */
+  _filteredBindingRows(healthMap) {
+    const map = healthMap || this._computeHealthMap();
     const s = this._filters.search;
     return this._allBindings().filter((b) => {
       if (this._tableSourceFilter && b.sourceIeee !== this._tableSourceFilter) return false;
+      if (this._tableHealthFilter !== "all") {
+        const level = (map.get(b.id) || {}).level;
+        if (this._tableHealthFilter === "problems") {
+          if (level !== "warning" && level !== "error") return false;
+        } else if (level !== this._tableHealthFilter) {
+          return false;
+        }
+      }
       if (!s) return true;
       const source = this._devices.find((d) => d.ieee === b.sourceIeee);
       const target = b.isGroup
@@ -1479,6 +1818,11 @@ class ZhaBindingMapCard extends HTMLElement {
   _renderTable() {
     const wrap = this._q("#table-body");
     if (!wrap) return;
+
+    // Fire-and-forget: fetches target endpoint/cluster metadata needed for
+    // Rules 2/3 (cheap local reads, not Zigbee radio calls) and re-renders
+    // itself once done. No-ops instantly if everything's already cached.
+    this._ensureHealthData();
 
     const filterInfo = this._q("#table-filter-info");
     if (filterInfo) {
@@ -1499,20 +1843,12 @@ class ZhaBindingMapCard extends HTMLElement {
       }
     }
 
-    const staleWarning = this._q("#stale-warning");
-    if (staleWarning) {
-      const staleCount = this._staleBindingCount();
-      if (staleCount > 0) {
-        staleWarning.style.display = "inline";
-        staleWarning.innerHTML = `⚠ ${staleCount} stale binding${staleCount === 1 ? "" : "s"} (target no longer exists)`;
-      } else {
-        staleWarning.style.display = "none";
-      }
-    }
+    const healthMap = this._computeHealthMap();
+    this._renderHealthSummary(healthMap);
 
     this._updateSortIndicators("#view-table", this._tableSort);
 
-    let rows = this._filteredBindingRows().map((b) => {
+    let rows = this._filteredBindingRows(healthMap).map((b) => {
       const source = this._devices.find((d) => d.ieee === b.sourceIeee);
       const target = b.isGroup
         ? this._groups.find((g) => g.group_id === b.groupId)
@@ -1527,6 +1863,13 @@ class ZhaBindingMapCard extends HTMLElement {
       const typeFull = source ? this._deviceTypeTags(source).join(", ") : "";
       const areaLabel = source ? this._areaName(source.area_id) : "—";
       const manModel = source ? [source.manufacturer, source.model].filter(Boolean).join(" / ") || "—" : "—";
+      const health = healthMap.get(b.id) || {
+        level: "ok",
+        code: "ok",
+        message: "",
+        why: "",
+        recommendation: null,
+      };
       return {
         binding: b,
         sourceLabel,
@@ -1536,21 +1879,23 @@ class ZhaBindingMapCard extends HTMLElement {
         areaLabel,
         manModel,
         clusterLabel: clusterName(b.clusterId),
-        stale: this._isStaleBinding(b),
+        health,
+        healthRank: HEALTH_RANK[health.level] ?? 9,
       };
     });
     rows = this._sortRows(rows, this._tableSort);
 
     if (!rows.length) {
-      wrap.innerHTML = `<tr><td colspan="7" class="muted">No bindings loaded yet. Click "Scan bindings" above.</td></tr>`;
+      wrap.innerHTML = `<tr><td colspan="8" class="muted">No bindings loaded yet. Click "Scan bindings" above.</td></tr>`;
       return;
     }
 
     wrap.innerHTML = rows
       .map((r) => {
         const b = r.binding;
+        const h = r.health;
         return `
-        <tr data-id="${b.id}" class="${r.stale ? "stale-row" : ""}">
+        <tr data-id="${b.id}">
           <td><a href="#" class="src-link" data-ieee="${escapeHtml(b.sourceIeee)}">${escapeHtml(
           r.sourceLabel
         )}</a> <span class="muted">(ep ${b.sourceEndpoint})</span></td>
@@ -1560,9 +1905,12 @@ class ZhaBindingMapCard extends HTMLElement {
           <td><span class="dot" style="background:${clusterColor(b.clusterId)}"></span> ${escapeHtml(
           r.clusterLabel
         )}</td>
-          <td>${escapeHtml(r.targetLabel)}${b.isGroup ? " (group)" : ""}${
-          r.stale ? ' <span class="stale-badge" title="Target no longer exists in ZHA">⚠ stale</span>' : ""
+          <td>${escapeHtml(r.targetLabel)} ${
+          b.isGroup ? "(group)" : `<span class="muted">(ep ${b.targetEndpoint})</span>`
         }</td>
+          <td><button class="health-badge health-${h.level}" data-health="${b.id}" title="${escapeHtml(
+          h.message
+        )}">${HEALTH_ICON[h.level]} ${escapeHtml(HEALTH_LABEL[h.level])}</button></td>
           <td><button class="btn btn-small btn-danger" data-unbind="${b.id}">Unbind</button></td>
         </tr>`;
       })
@@ -1582,6 +1930,92 @@ class ZhaBindingMapCard extends HTMLElement {
         this._renderTable();
       });
     });
+
+    this._qa("[data-health]").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        const binding = this._allBindings().find((b) => b.id === btn.dataset.health);
+        const health = healthMap.get(btn.dataset.health);
+        if (binding && health) this._openHealthDetail(binding, health);
+      });
+    });
+  }
+
+  /** Summary card above the Bindings table — counts across every scanned
+   *  binding (not just what's currently filtered/searched), so it always
+   *  reflects overall network health. */
+  _renderHealthSummary(healthMap) {
+    const el = this._q("#health-summary");
+    if (!el) return;
+    const bindings = this._rawBindings();
+    if (!bindings.length) {
+      el.style.display = "none";
+      return;
+    }
+    const counts = { ok: 0, info: 0, warning: 0, error: 0 };
+    bindings.forEach((b) => {
+      const h = healthMap.get(b.id);
+      if (h) counts[h.level] = (counts[h.level] || 0) + 1;
+    });
+    el.style.display = "flex";
+    el.innerHTML = `
+      <span class="health-summary-title">Binding Health</span>
+      <span class="muted">${bindings.length} binding${bindings.length === 1 ? "" : "s"} scanned</span>
+      <span class="health-chip health-ok">${HEALTH_ICON.ok} ${counts.ok} OK</span>
+      ${
+        counts.warning
+          ? `<span class="health-chip health-warning">${HEALTH_ICON.warning} ${counts.warning} Warning${
+              counts.warning === 1 ? "" : "s"
+            }</span>`
+          : ""
+      }
+      ${
+        counts.error
+          ? `<span class="health-chip health-error">${HEALTH_ICON.error} ${counts.error} Error${
+              counts.error === 1 ? "" : "s"
+            }</span>`
+          : ""
+      }
+      ${counts.info ? `<span class="health-chip health-info">${HEALTH_ICON.info} ${counts.info} Info</span>` : ""}
+    `;
+  }
+
+  /** Detail popover for a Health badge — answers what's wrong, why it
+   *  matters, and what to do next, reusing the generic dialog. */
+  _openHealthDetail(binding, health) {
+    const source = this._devices.find((d) => d.ieee === binding.sourceIeee);
+    const target = binding.isGroup
+      ? this._groups.find((g) => g.group_id === binding.groupId)
+      : this._devices.find((d) => d.ieee === binding.targetIeee);
+    const sourceLabel = source ? this._deviceLabel(source) : binding.sourceIeee;
+    const targetLabel = binding.isGroup
+      ? (target && target.name) || `Group ${binding.groupId}`
+      : target
+      ? this._deviceLabel(target)
+      : binding.targetIeee;
+    this._q("#dialog-title").textContent = `${HEALTH_ICON[health.level]} ${HEALTH_LABEL[health.level]}`;
+    // OK bindings have nothing "wrong" to report, so they skip the
+    // What's wrong / Why it matters / Next steps framing used for the
+    // other three statuses and just get a single plain confirmation line.
+    const detailHtml =
+      health.level === "ok"
+        ? `<p>${escapeHtml(health.message)}</p>`
+        : `
+      <p><strong>What's wrong:</strong> ${escapeHtml(health.message)}</p>
+      <p><strong>Why it matters:</strong> ${escapeHtml(health.why)}</p>
+      ${health.recommendation ? `<p><strong>Next steps:</strong> ${escapeHtml(health.recommendation)}</p>` : ""}`;
+    this._q("#dialog-body").innerHTML = `
+      <table class="detail-table">
+        <tr><td>Binding</td><td>${escapeHtml(sourceLabel)} (ep ${binding.sourceEndpoint}) → ${escapeHtml(
+      targetLabel
+    )}${binding.isGroup ? " (group)" : ` (ep ${binding.targetEndpoint})`}</td></tr>
+        <tr><td>Cluster</td><td>${clusterName(binding.clusterId)} (${hex4(binding.clusterId)})</td></tr>
+      </table>
+      ${detailHtml}
+      <div class="dialog-actions">
+        <button class="btn" id="health-detail-close">Close</button>
+      </div>`;
+    this._q("#dialog").classList.add("open");
+    this._q("#health-detail-close").addEventListener("click", () => this._closeDialog());
   }
 
   /** "+ Add binding" from a filtered Bindings-tab source device now jumps straight to the
@@ -1598,11 +2032,13 @@ class ZhaBindingMapCard extends HTMLElement {
    *  every export format. Includes IEEE addresses, which the visible table
    *  doesn't show but which you need for manual zha_toolkit calls. */
   _exportRowsData() {
-    return this._filteredBindingRows().map((b) => {
+    const healthMap = this._computeHealthMap();
+    return this._filteredBindingRows(healthMap).map((b) => {
       const source = this._devices.find((d) => d.ieee === b.sourceIeee);
       const target = b.isGroup
         ? this._groups.find((g) => g.group_id === b.groupId)
         : this._devices.find((d) => d.ieee === b.targetIeee);
+      const health = healthMap.get(b.id) || { level: "ok", message: "" };
       return {
         source_name: source ? this._deviceLabel(source) : "",
         source_ieee: b.sourceIeee,
@@ -1616,7 +2052,8 @@ class ZhaBindingMapCard extends HTMLElement {
         target_name: b.isGroup ? (target && target.name) || `Group ${b.groupId}` : target ? this._deviceLabel(target) : "",
         target_ieee_or_group: b.isGroup ? `group:${b.groupId}` : b.targetIeee,
         target_endpoint: b.isGroup ? "" : b.targetEndpoint,
-        stale: this._isStaleBinding(b) ? "yes" : "no",
+        health_status: HEALTH_LABEL[health.level] || health.level,
+        health_details: health.message || "",
       };
     });
   }
@@ -1638,7 +2075,8 @@ class ZhaBindingMapCard extends HTMLElement {
       "cluster",
       "target_name",
       "target_ieee_or_group",
-      "stale",
+      "health_status",
+      "health_details",
     ];
     const titles = {
       source_name: "Source",
@@ -1650,7 +2088,8 @@ class ZhaBindingMapCard extends HTMLElement {
       cluster: "Cluster",
       target_name: "Target",
       target_ieee_or_group: "Target IEEE / Group",
-      stale: "Stale?",
+      health_status: "Health",
+      health_details: "Health details",
     };
     const html = `<!DOCTYPE html><html><head><title>ZHA Bindings</title><meta charset="utf-8"><style>
       body { font-family: sans-serif; padding: 20px; color: #111; }
@@ -2155,24 +2594,54 @@ class ZhaBindingMapCard extends HTMLElement {
       const sourceIeee = this._q("#adv-source").value;
       const type = this._q("#adv-target-type").value;
       const clusters = getClusterIds();
+      const opts = getOpts();
       this._setStatus("info", "Binding…", 0);
+      // Group targets have no device IEEE of their own to rescan; coordinator
+      // and device targets do — resolve it up front so the finally block can
+      // rescan both ends regardless of how the bind call turns out.
+      let targetIeeeForRescan = null;
+      if (type === "coordinator") targetIeeeForRescan = this._coordinatorIeee();
+      else if (type === "device") targetIeeeForRescan = this._q("#adv-target-device").value;
+      let callErr = null;
       try {
         if (type === "group") {
           const groupId = Number(this._q("#adv-target-group").value);
-          await this._api.bindGroup(sourceIeee, groupId, clusters, getOpts());
-        } else if (type === "coordinator") {
-          const coord = this._coordinatorIeee();
-          await this._api.bindIeee(sourceIeee, coord, clusters, getOpts());
+          await this._api.bindGroup(sourceIeee, groupId, clusters, opts);
         } else {
-          const targetIeee = this._q("#adv-target-device").value;
-          await this._api.bindIeee(sourceIeee, targetIeee, clusters, getOpts());
+          await this._api.bindIeee(sourceIeee, targetIeeeForRescan, clusters, opts);
         }
-        this._setStatus("success", "Bind command sent.");
-        await this._scanBindings([sourceIeee]);
+      } catch (err) {
+        callErr = err;
+        console.warn("[ZHA Bindings Manager] bind call raised, verifying against rescan anyway", err);
+      } finally {
+        // Rescan regardless of outcome — see v0.8.2 diagnosis: a failure here
+        // often just means the cache was already stale, so refreshing both
+        // ends clears phantom entries instead of leaving a confusing error.
+        await this._scanBindings(this._impactedIeees(sourceIeee, targetIeeeForRescan));
         this._advRenderSourceBindings();
         this._advRenderTargetBindings();
-      } catch (err) {
-        this._setStatus("error", err.message || String(err), 0);
+
+        // Precise verification only makes sense when exactly one cluster and
+        // a complete target (endpoint included) were specified — otherwise
+        // ("bind default clusters", or a target endpoint zha_toolkit picked
+        // on its own) we don't know exactly what to check, so fall back to
+        // relaying zha_toolkit's own report instead of guessing.
+        const bindTarget =
+          type === "group"
+            ? { isGroup: true, groupId: Number(this._q("#adv-target-group").value) }
+            : { isGroup: false, ieee: targetIeeeForRescan, endpoint: opts.dstEndpoint };
+        const canVerify =
+          clusters.length === 1 && opts.endpoint != null && (bindTarget.isGroup || bindTarget.endpoint != null);
+        if (canVerify) {
+          const outcome = this._verifyBindOutcome(sourceIeee, opts.endpoint, clusters[0], bindTarget);
+          this._setStatus(outcome.ok ? "success" : "error", outcome.message, outcome.ok ? undefined : 0);
+        } else {
+          this._setStatus(
+            callErr ? "error" : "success",
+            callErr ? callErr.message || String(callErr) : "Bind command sent.",
+            callErr ? 0 : undefined
+          );
+        }
       }
     });
 
@@ -2180,26 +2649,80 @@ class ZhaBindingMapCard extends HTMLElement {
       const sourceIeee = this._q("#adv-source").value;
       const type = this._q("#adv-target-type").value;
       const clusters = getClusterIds();
+      const opts = getOpts();
       this._setStatus("info", "Unbinding…", 0);
+      let targetIeeeForRescan = null;
+      if (type === "coordinator") targetIeeeForRescan = sourceIeee; // no separate device to add
+      else if (type === "device") targetIeeeForRescan = this._q("#adv-target-device").value;
+
+      // Capture "before" state ahead of the call so the finally block can
+      // verify what actually changed, instead of trusting zha_toolkit's own
+      // report (see v0.8.2 diagnosis). Coordinator unbind is a bulk op — it
+      // can hit every cluster bound to the coordinator on this endpoint if
+      // no single cluster was chosen — so its "before" is a list, not one
+      // binding.
+      const coord = this._coordinatorIeee();
+      const beforeCoordList =
+        type === "coordinator"
+          ? this._rawBindings()
+              .filter(
+                (b) =>
+                  normIeee(b.sourceIeee) === normIeee(sourceIeee) &&
+                  !b.isGroup &&
+                  normIeee(b.targetIeee) === normIeee(coord) &&
+                  (opts.endpoint == null || Number(b.sourceEndpoint) === Number(opts.endpoint)) &&
+                  (clusters.length === 0 || clusters.includes(b.clusterId))
+              )
+              .map((b) => ({
+                clusterId: b.clusterId,
+                target: { isGroup: false, ieee: b.targetIeee, endpoint: b.targetEndpoint },
+              }))
+          : null;
+      const bindTarget =
+        type === "group"
+          ? { isGroup: true, groupId: Number(this._q("#adv-target-group").value) }
+          : type === "device"
+          ? { isGroup: false, ieee: targetIeeeForRescan, endpoint: opts.dstEndpoint }
+          : null;
+      const before =
+        bindTarget && clusters.length === 1 && opts.endpoint != null && (bindTarget.isGroup || bindTarget.endpoint != null)
+          ? this._bindingPresent(sourceIeee, opts.endpoint, clusters[0], bindTarget)
+          : null;
+
+      let callErr = null;
       try {
         if (type === "group") {
           const groupId = Number(this._q("#adv-target-group").value);
-          await this._api.unbindGroup(sourceIeee, groupId, clusters, getOpts());
+          await this._api.unbindGroup(sourceIeee, groupId, clusters, opts);
         } else if (type === "coordinator") {
           await this._api.callToolkit("unbind_coordinator", {
             ieee: sourceIeee,
             ...(clusters.length ? { cluster: clusters } : {}),
           });
         } else {
-          const targetIeee = this._q("#adv-target-device").value;
-          await this._api.unbindIeee(sourceIeee, targetIeee, clusters, getOpts());
+          await this._api.unbindIeee(sourceIeee, targetIeeeForRescan, clusters, opts);
         }
-        this._setStatus("success", "Unbind command sent.");
-        await this._scanBindings([sourceIeee]);
+      } catch (err) {
+        callErr = err;
+        console.warn("[ZHA Bindings Manager] unbind call raised, verifying against rescan anyway", err);
+      } finally {
+        await this._scanBindings(this._impactedIeees(sourceIeee, targetIeeeForRescan));
         this._advRenderSourceBindings();
         this._advRenderTargetBindings();
-      } catch (err) {
-        this._setStatus("error", err.message || String(err), 0);
+
+        if (type === "coordinator") {
+          const outcome = this._verifyCoordinatorUnbindOutcome(beforeCoordList, sourceIeee, opts.endpoint);
+          this._setStatus(outcome.ok ? "success" : "error", outcome.message, outcome.ok ? undefined : 0);
+        } else if (before !== null) {
+          const outcome = this._verifyUnbindOutcome(before, sourceIeee, opts.endpoint, clusters[0], bindTarget);
+          this._setStatus(outcome.ok ? "success" : "error", outcome.message, outcome.ok ? undefined : 0);
+        } else {
+          this._setStatus(
+            callErr ? "error" : "success",
+            callErr ? callErr.message || String(callErr) : "Unbind command sent.",
+            callErr ? 0 : undefined
+          );
+        }
       }
     });
   }
@@ -2521,9 +3044,16 @@ const SHELL_HTML = `
   </div>
 
   <div id="view-table" class="view">
+    <div id="health-summary" class="health-summary" style="display:none"></div>
     <div id="table-filter-info" class="table-filter-info" style="display:none"></div>
     <div class="table-toolbar">
-      <span id="stale-warning" class="stale-warning" style="display:none"></span>
+      <span class="health-filters" id="health-filters">
+        <button class="chip active" data-health-filter="all">All</button>
+        <button class="chip" data-health-filter="problems">Problems Only</button>
+        <button class="chip" data-health-filter="error">Errors</button>
+        <button class="chip" data-health-filter="warning">Warnings</button>
+        <button class="chip" data-health-filter="info">Info</button>
+      </span>
       <span class="spacer"></span>
       <button class="btn btn-small" id="btn-export-csv">Export CSV</button>
       <button class="btn btn-small" id="btn-export-json">Export JSON</button>
@@ -2538,6 +3068,7 @@ const SHELL_HTML = `
         <th data-sort="manModel">Manufacturer / Model</th>
         <th data-sort="clusterLabel">Cluster</th>
         <th data-sort="targetLabel">Target</th>
+        <th data-sort="healthRank">Health</th>
         <th></th>
       </tr></thead>
       <tbody id="table-body"></tbody>
@@ -2704,16 +3235,24 @@ const STYLE = `
 .edge:hover { stroke-width: 4; opacity: 1; }
 .table-filter-info { display:flex; align-items:center; gap:10px; margin-bottom:8px; padding:6px 10px;
   border-radius:8px; background: rgba(76,154,255,0.12); font-size:0.85em; }
-.table-toolbar { display:flex; align-items:center; gap:8px; margin-bottom:8px; font-size:0.85em; }
-.stale-warning { color: #b26a00; font-size: 0.9em; }
+.table-toolbar { display:flex; align-items:center; gap:8px; margin-bottom:8px; font-size:0.85em; flex-wrap:wrap; }
+.health-filters { display:flex; gap:6px; flex-wrap:wrap; }
 .bindings-table { width:100%; border-collapse: collapse; font-size: 0.9em; }
 .bindings-table th, .bindings-table td { text-align:left; padding: 8px 10px; border-bottom: 1px solid var(--divider-color, #eee); }
 .bindings-table th[data-sort] { cursor: pointer; user-select: none; white-space: nowrap; }
 .bindings-table th[data-sort]:hover { color: var(--primary-color); }
 .bindings-table th.sort-asc::after { content: " \\25B2"; font-size: 0.75em; }
 .bindings-table th.sort-desc::after { content: " \\25BC"; font-size: 0.75em; }
-.bindings-table tr.stale-row { background: rgba(255,152,0,0.08); }
-.stale-badge { color: #b26a00; font-size: 0.8em; white-space: nowrap; }
+.health-summary { display:flex; align-items:center; gap:10px; margin-bottom:10px; padding:8px 12px;
+  border-radius:8px; background: var(--secondary-background-color, #fafafa); border:1px solid var(--divider-color, #eee);
+  font-size:0.85em; flex-wrap:wrap; }
+.health-summary-title { font-weight:600; }
+.health-chip { display:inline-flex; align-items:center; gap:4px; padding:3px 9px; border-radius:12px; font-size:0.9em; }
+.health-badge { border:none; border-radius:12px; padding:4px 10px; font-size:0.85em; cursor:pointer; white-space:nowrap; }
+.health-ok, .health-badge.health-ok, .health-chip.health-ok { background: rgba(76,206,172,0.15); color: #2e9e83; }
+.health-info, .health-badge.health-info, .health-chip.health-info { background: rgba(76,154,255,0.15); color: #2f6fce; }
+.health-warning, .health-badge.health-warning, .health-chip.health-warning { background: rgba(255,179,0,0.18); color: #b26a00; }
+.health-error, .health-badge.health-error, .health-chip.health-error { background: rgba(219,68,55,0.15); color: var(--error-color, #db4437); }
 .src-link { color: var(--primary-color); cursor: pointer; text-decoration: none; }
 .src-link:hover { text-decoration: underline; }
 .muted { color: var(--secondary-text-color); }

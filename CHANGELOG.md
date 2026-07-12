@@ -2,6 +2,27 @@
 
 All notable changes to ZHA Bindings Manager are documented here.
 
+
+## [0.9.1] — 12 July 2026
+
+### Fixed
+
+- **Fresh browser sessions could show zero bindings even though real
+  bindings existed and worked**, caused by a change in how newer
+  `zha_toolkit`/`zigpy` versions report a `binds_get` scan. When a device's
+  binding table is large enough to need multiple "pages," a later page can
+  time out (`success: false`, `errors: ["TimeoutError()"]`) even though an
+  earlier page already returned valid entries in `response.replies`. The
+  card previously discarded the entire response on any reported failure,
+  losing that valid data. It now keeps whatever bindings were actually
+  returned and marks the device as a "partial" read (shown as an Info
+  status in Binding Health) instead of showing nothing. Also added support
+  for parsing the newer `response.replies` format directly, alongside the
+  older `response.result` format the card already understood. Root-caused
+  and reported by a user testing against a real Hue network with large
+  binding tables — thank you!
+
+
 ## [0.9.0] - 11 July 2026
 
 ### Added

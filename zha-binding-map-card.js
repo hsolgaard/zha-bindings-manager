@@ -22,12 +22,12 @@
  * zha_toolkit MUST be installed (via HACS) and working for bind/unbind/scan
  * to function. See README.md for details.
  *
- * Version: 0.9.0
+ * Version: 0.9.1
  */
 
 /* eslint-disable no-console */
 
-const CARD_VERSION = "0.9.0";
+const CARD_VERSION = "0.9.1";
 // Logged once per script load (not per card instance) so you can confirm
 // which build is actually active straight from the browser console —
 // useful given HACS caches a pre-gzipped copy of this file that can go
@@ -339,7 +339,7 @@ class ZhaApi {
    *  necessarily short, but the console has everything zha_toolkit sent
    *  back (useful for diagnosing failures with no human-readable "warning"
    *  attached, e.g. a bare `success: false`). */
-  async callToolkit(service, data) {
+  async callToolkit(service, data, opts = {}) {
     if (!this.hass.services || !this.hass.services[ZTK_DOMAIN] || !this.hass.services[ZTK_DOMAIN][service]) {
       throw new Error(
         `Service ${ZTK_DOMAIN}.${service} is not available. Is the "zha-toolkit" ` +
@@ -361,25 +361,66 @@ class ZhaApi {
           `2023.7 (response data support) or zha-toolkit needs updating.`
       );
     }
-    if (response.errors && response.errors.length) {
-      console.error(`[ZHA Bindings Manager] ${service} reported errors`, { request: data, response });
-      throw new Error(`${service}: ${response.errors.join("; ")}`);
-    }
-    if (response.success === false) {
-      console.error(`[ZHA Bindings Manager] ${service} reported failure (full response below)`, {
-        request: data,
-        response,
-      });
-      throw new Error(`${service} reported failure${response.warning ? `: ${response.warning}` : ""}`);
+    const hasErrors = response.errors && response.errors.length;
+    const failed = hasErrors || response.success === false;
+    // Callers that can make use of partial data (currently just
+    // getDeviceBindings — a later page of a binding table can time out
+    // while an earlier page already has valid entries) opt in via
+    // allowPartial instead of losing the whole response to a throw. Every
+    // other caller (bind/unbind/etc.) keeps the original all-or-nothing
+    // behavior, since a partial bind/unbind isn't a meaningful concept.
+    if (failed) {
+      if (opts.allowPartial) {
+        console.warn(`[ZHA Bindings Manager] ${service} reported failure — continuing with any partial data`, {
+          request: data,
+          response,
+        });
+      } else if (hasErrors) {
+        console.error(`[ZHA Bindings Manager] ${service} reported errors`, { request: data, response });
+        throw new Error(`${service}: ${response.errors.join("; ")}`);
+      } else {
+        console.error(`[ZHA Bindings Manager] ${service} reported failure (full response below)`, {
+          request: data,
+          response,
+        });
+        throw new Error(`${service} reported failure${response.warning ? `: ${response.warning}` : ""}`);
+      }
     }
     return response;
   }
 
-  /** Reads the on-device binding table for one device via zha_toolkit.binds_get. */
+  /** Reads the on-device binding table for one device via zha_toolkit.binds_get.
+   *  Merges both response shapes zha_toolkit versions have used —
+   *  `response.result` (a keyed dict) and `response.replies` (raw ZDO pages,
+   *  seen on newer zha_toolkit/zigpy) — and keeps whatever valid entries
+   *  come back even if the overall call reports failure (e.g. a later page
+   *  timing out shouldn't discard an earlier page that already succeeded).
+   *  Returns `{bindings, partial}`; `partial` means the read may be
+   *  incomplete even though the entries returned are valid. */
   async getDeviceBindings(ieee) {
-    const response = await this.callToolkit("binds_get", { ieee });
-    const result = response.result || {};
-    return Object.values(result).map((b) => normalizeBinding(ieee, b));
+    const response = await this.callToolkit("binds_get", { ieee }, { allowPartial: true });
+    const failed = (response.errors && response.errors.length) || response.success === false;
+    const fromResult =
+      response.result && Object.keys(response.result).length
+        ? Object.values(response.result).map((b) => normalizeBinding(ieee, b))
+        : [];
+    const fromReplies = extractBindingsFromReplies(ieee, response.replies);
+    const seen = new Set();
+    const bindings = [...fromResult, ...fromReplies].filter((b) => {
+      if (seen.has(b.id)) return false;
+      seen.add(b.id);
+      return true;
+    });
+    if (failed && !bindings.length) {
+      // Nothing usable came back at all — this is a real failure (e.g. a
+      // sleepy device that never replied), not a partial success.
+      throw new Error(
+        `binds_get reported failure${response.warning ? `: ${response.warning}` : ""}${
+          response.errors && response.errors.length ? ` (${response.errors.join("; ")})` : ""
+        }`
+      );
+    }
+    return { bindings, partial: failed };
   }
 
   /** Create a device -> device binding for one or more clusters. */
@@ -457,6 +498,63 @@ function bindingMatches(b, sourceIeee, sourceEp, clusterId, target) {
   return !b.isGroup && normIeee(b.targetIeee) === normIeee(target.ieee) && Number(b.targetEndpoint) === Number(target.endpoint);
 }
 
+/** Parses zha_toolkit's newer `response.replies` shape — raw ZDO
+ *  Mgmt_Bind_rsp pages, `[Status, BindingTableEntries, StartIndex,
+ *  BindingTableList]` per zigpy's zdo/types.py — into the same normalized
+ *  shape normalizeBinding() produces from the older `response.result`
+ *  shape. Needed because a later page can time out (reporting `success:
+ *  false` for the whole call) while an earlier page already contains valid
+ *  entries that would otherwise be discarded entirely.
+ *  Field names below are confirmed against zigpy's actual `Binding` /
+ *  `MultiAddress` Struct definitions (SrcAddress/SrcEndpoint/ClusterId/
+ *  DstAddress, and addrmode/nwk/ieee/endpoint on the nested address) —
+ *  listed first in each lookup. Alternate-cased fallbacks are kept only in
+ *  case Home Assistant's websocket JSON layer ever re-cases these when
+ *  serializing zigpy Struct instances; unrecognized shapes are skipped
+ *  (and logged) per-entry rather than crashing the whole scan. */
+function extractBindingsFromReplies(sourceIeee, replies) {
+  const out = [];
+  if (!Array.isArray(replies)) return out;
+  for (const page of replies) {
+    let entries = null;
+    if (Array.isArray(page)) {
+      const last = page[page.length - 1];
+      if (Array.isArray(last)) entries = last;
+      else if (page.length && page.every((p) => p && typeof p === "object" && !Array.isArray(p))) entries = page;
+    }
+    if (!entries) continue;
+    for (const raw of entries) {
+      try {
+        const srcEp = raw.SrcEndpoint ?? raw.src_ep ?? raw.srcEndpoint;
+        const clusterIdRaw = raw.ClusterId ?? raw.cluster_id ?? raw.clusterId;
+        const dst = raw.DstAddress ?? raw.dst ?? {};
+        // MultiAddress.addrmode: 0x01 = group (nwk), 0x03 = extended (ieee+endpoint).
+        const addrMode = Number(dst.addrmode ?? dst.AddrMode ?? dst.addr_mode ?? raw.DstAddrMode ?? 3);
+        const isGroup = addrMode === 1;
+        const dstIeee = dst.ieee ?? dst.IEEE ?? dst.dst_ieee;
+        const dstEp = dst.endpoint ?? dst.Endpoint ?? dst.dst_ep;
+        const group = dst.nwk ?? dst.NWK ?? dst.group ?? dst.Group ?? dst.group_id;
+        if (srcEp == null || clusterIdRaw == null) continue;
+        const clusterId =
+          typeof clusterIdRaw === "string" ? parseInt(clusterIdRaw.replace(/^0x/i, ""), 16) : Number(clusterIdRaw);
+        out.push({
+          id: `${sourceIeee}|${srcEp}|${clusterId}|${isGroup ? "g" + group : `${dstIeee}:${dstEp}`}`,
+          sourceIeee: normIeee(sourceIeee),
+          sourceEndpoint: srcEp,
+          clusterId,
+          isGroup,
+          targetIeee: isGroup ? null : normIeee(String(dstIeee || "").replace(/^0x/i, "")),
+          targetEndpoint: isGroup ? null : dstEp,
+          groupId: isGroup ? Number(group) : null,
+        });
+      } catch (err) {
+        console.warn("[ZHA Bindings Manager] skipped an unparseable binds_get reply entry", raw, err);
+      }
+    }
+  }
+  return out;
+}
+
 // ---------------------------------------------------------------------------
 // The card itself
 // ---------------------------------------------------------------------------
@@ -501,6 +599,11 @@ class ZhaBindingMapCard extends HTMLElement {
     // scan attempt (in-memory only, per session — never persisted, and never
     // compared against older scans; see _evalBindingHealth's Rule 7).
     this._scanFailures = new Set();
+    // Devices whose most recent binds_get succeeded but only partially — a
+    // later page of the binding table timed out while an earlier page
+    // already had valid entries (see v0.9.1). The bindings shown for these
+    // devices are real, just possibly incomplete.
+    this._scanPartial = new Set();
     this._tableHealthFilter = "all"; // "all" | "problems" | "error" | "warning" | "info"
     this._healthReqId = 0; // guards _ensureHealthData against out-of-order fetches
 
@@ -761,17 +864,25 @@ class ZhaBindingMapCard extends HTMLElement {
     this._renderStatus();
     let okCount = 0;
     let failCount = 0;
+    let partialCount = 0;
     for (const ieee of targets) {
       try {
-        const bindings = await this._api.getDeviceBindings(ieee);
+        const { bindings, partial } = await this._api.getDeviceBindings(ieee);
         this._bindings.set(ieee, bindings);
         this._scanFailures.delete(normIeee(ieee));
+        if (partial) {
+          this._scanPartial.add(normIeee(ieee));
+          partialCount++;
+        } else {
+          this._scanPartial.delete(normIeee(ieee));
+        }
         okCount++;
       } catch (err) {
         failCount++;
         // Tracked for Binding Health's Rule 7 ("unable to verify") — in-memory
         // only, reflects just this most recent attempt for this device.
         this._scanFailures.add(normIeee(ieee));
+        this._scanPartial.delete(normIeee(ieee));
         console.warn(`ZHA Binding Map: could not read bindings for ${ieee}:`, err.message || err);
       }
       this._scanState.done++;
@@ -780,10 +891,12 @@ class ZhaBindingMapCard extends HTMLElement {
     }
     this._scanState.running = false;
     this._saveCachedBindings();
+    const summary = [`${okCount} device(s) read`];
+    if (partialCount) summary.push(`${partialCount} partial (a later page timed out — rescan for the rest)`);
+    if (failCount) summary.push(`${failCount} did not respond (sleepy/offline devices are normal)`);
     this._setStatus(
-      failCount ? "error" : "success",
-      `Scan complete: ${okCount} device(s) read` +
-        (failCount ? `, ${failCount} did not respond (sleepy/offline devices are normal).` : ".")
+      failCount ? "error" : partialCount ? "info" : "success",
+      `Scan complete: ${summary.join(", ")}.`
     );
     this._renderGraph();
     this._renderTable();
@@ -873,6 +986,20 @@ class ZhaBindingMapCard extends HTMLElement {
         message: "This device did not respond during the scan.",
         why: "Without a fresh response from this device, we can't confirm this binding is still valid — but it may well be fine.",
         recommendation: "Wake the device and rescan.",
+      };
+    }
+
+    // Same short-circuit tier as Rule 7, but for a device that partially
+    // responded — an earlier page of its binding table came back fine (so
+    // the bindings shown here are real), but a later page timed out, so
+    // there may be more bindings on this device that aren't shown yet.
+    if (this._scanPartial.has(sourceIeeeN)) {
+      return {
+        level: "info",
+        code: "partial_scan",
+        message: "Only part of this device's binding table could be read.",
+        why: "A later page of this device's binding table timed out during the scan, so there may be additional bindings on it that aren't shown yet — the bindings that were read are still valid.",
+        recommendation: "Rescan this device to try retrieving the rest of its binding table.",
       };
     }
 

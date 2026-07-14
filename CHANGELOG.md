@@ -2,6 +2,16 @@
 
 All notable changes to ZHA Bindings Manager are documented here.
 
+## [0.9.4] — 15 July 2026
+
+### Changed
+
+- The scan-complete status message (e.g. "Scan complete: 59 device(s) read,
+  5 did not respond...") now stays on screen until you dismiss it with the
+  new × button, instead of auto-hiding after a few seconds — easy to miss
+  if you looked away while a larger scan was still running. Other status
+  messages are unchanged, but can now also be dismissed early the same way.
+
 ## [0.9.3] — 14 July 2026
 
 ### Fixed

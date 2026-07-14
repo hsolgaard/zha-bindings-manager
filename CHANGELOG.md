@@ -2,6 +2,54 @@
 
 All notable changes to ZHA Bindings Manager are documented here.
 
+## [0.9.3] — 14 July 2026
+
+### Fixed
+
+- **False "duplicate binding" Health warnings**, found immediately after
+  testing the 0.9.2 fix above. zha_toolkit can return the same real binding
+  in both `response.result` and `response.replies` on a fully successful
+  scan; the card is supposed to merge these into one entry, but the two
+  parsers formatted their internal `.id` string differently (one used the
+  cluster id as a hex string, the other as a plain number), so the merge
+  step never recognized them as the same binding. Both copies survived,
+  and Binding Health correctly — but misleadingly — flagged them as
+  duplicates of each other. Deduplication now uses a normalized identity
+  key built from each binding's already-normalized fields instead of the
+  inconsistently-formatted `.id` string.
+- **Home Assistant's own generic "Failed to perform the action
+  zha_toolkit/binds_get. unknown error" toast** was popping up for every
+  sleepy/offline device during a scan, on top of the card's own accurate
+  status reporting ("N did not respond — sleepy/offline devices are
+  normal"). This came from `notifyOnError: true` on the underlying service
+  call, which asks Home Assistant to show its own error toast regardless
+  of how the calling code handles the failure. Now set to `false` — the
+  card has handled and reported these failures itself since Binding
+  Health shipped in 0.9.0, so the extra toast was redundant noise at best.
+
+## [0.9.2] — 14 July 2026
+
+### Fixed
+
+- **Every binding read via the newer `response.replies` format (added in
+  0.9.1) incorrectly showed "target device no longer exists"**, even for
+  perfectly healthy bindings. Root cause: a target device's IEEE address in
+  this response shape is serialized as an array of 8 raw bytes in
+  little-endian order (e.g. `[255, 255, 21, 126, ...]`), not as a hex
+  string like `a4:c1:38:...` — the 0.9.1 parser assumed the latter. This is
+  now converted correctly. Confirmed against a real `binds_get` response
+  captured directly from a live device (via Developer Tools → Actions)
+  rather than inferred from source code alone.
+- As a side effect of the fix above, entries whose target IEEE still can't
+  be resolved for any reason are now skipped and logged to the console
+  instead of being shown as a false "missing device" error.
+
+### Added
+
+- Partial-scan Binding Health messages now show how much of a device's
+  binding table was actually retrieved (e.g. "3 of 12 binding table
+  entries retrieved") instead of just flagging that the read was
+  incomplete — using the page-count metadata `binds_get` already returns.
 
 ## [0.9.1] — 12 July 2026
 

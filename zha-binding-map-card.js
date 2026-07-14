@@ -22,12 +22,12 @@
  * zha_toolkit MUST be installed (via HACS) and working for bind/unbind/scan
  * to function. See README.md for details.
  *
- * Version: 0.9.1
+ * Version: 0.9.3
  */
 
 /* eslint-disable no-console */
 
-const CARD_VERSION = "0.9.1";
+const CARD_VERSION = "0.9.3";
 // Logged once per script load (not per card instance) so you can confirm
 // which build is actually active straight from the browser console —
 // useful given HACS caches a pre-gzipped copy of this file that can go
@@ -348,7 +348,12 @@ class ZhaApi {
     }
     let result;
     try {
-      result = await this.hass.callService(ZTK_DOMAIN, service, data, undefined, true, true);
+      // notifyOnError=false: we always catch and report failures ourselves
+      // (status bar, console diagnostics, Binding Health) — HA's own generic
+      // "Failed to perform the action..." toast was firing on top of that
+      // for every expected sleepy/offline device, which is redundant noise
+      // at best and misleading ("unknown error") at worst.
+      result = await this.hass.callService(ZTK_DOMAIN, service, data, undefined, false, true);
     } catch (err) {
       console.error(`[ZHA Bindings Manager] ${service} call threw`, { request: data, error: err });
       throw new Error(`${service} failed: ${extractErrorMessage(err)}`);
@@ -395,8 +400,10 @@ class ZhaApi {
    *  seen on newer zha_toolkit/zigpy) — and keeps whatever valid entries
    *  come back even if the overall call reports failure (e.g. a later page
    *  timing out shouldn't discard an earlier page that already succeeded).
-   *  Returns `{bindings, partial}`; `partial` means the read may be
-   *  incomplete even though the entries returned are valid. */
+   *  Returns `{bindings, partial, retrievedCount, totalCount}`; `partial`
+   *  means the read may be incomplete even though the entries returned are
+   *  valid, and `totalCount` (when known) is the device's own reported
+   *  binding-table size, so the UI can show "X of Y retrieved". */
   async getDeviceBindings(ieee) {
     const response = await this.callToolkit("binds_get", { ieee }, { allowPartial: true });
     const failed = (response.errors && response.errors.length) || response.success === false;
@@ -404,11 +411,16 @@ class ZhaApi {
       response.result && Object.keys(response.result).length
         ? Object.values(response.result).map((b) => normalizeBinding(ieee, b))
         : [];
-    const fromReplies = extractBindingsFromReplies(ieee, response.replies);
+    const { entries: fromReplies, total: repliesTotal } = extractBindingsFromReplies(ieee, response.replies);
     const seen = new Set();
+    // Dedup on normalized identity, not the raw .id string — result-path and
+    // replies-path entries for the same real binding format their .id
+    // differently (see bindingIdentityKey) and would otherwise both survive
+    // as a false "duplicate binding" Health warning.
     const bindings = [...fromResult, ...fromReplies].filter((b) => {
-      if (seen.has(b.id)) return false;
-      seen.add(b.id);
+      const key = bindingIdentityKey(b);
+      if (seen.has(key)) return false;
+      seen.add(key);
       return true;
     });
     if (failed && !bindings.length) {
@@ -420,7 +432,7 @@ class ZhaApi {
         }`
       );
     }
-    return { bindings, partial: failed };
+    return { bindings, partial: failed, retrievedCount: bindings.length, totalCount: repliesTotal };
   }
 
   /** Create a device -> device binding for one or more clusters. */
@@ -466,6 +478,26 @@ class ZhaApi {
   }
 }
 
+/** Stable identity key for a normalized binding — same source/target/
+ *  endpoint/cluster identity no matter which raw response shape it was
+ *  parsed from. zha_toolkit can (and on a fully successful call, usually
+ *  does) return the *same* real binding in both `response.result` (older
+ *  dict shape) and `response.replies` (newer ZDO-page shape) at once. The
+ *  two parsers' raw `.id` strings format the cluster id differently (a hex
+ *  string like "0x0006" from normalizeBinding vs a plain number like "6"
+ *  from extractBindingsFromReplies), so they never matched as "the same
+ *  entry" for dedup purposes — meaning one real binding could survive into
+ *  the list twice and get flagged as a false "duplicate binding" by Binding
+ *  Health (found via testing immediately after the 0.9.2 IEEE-parsing fix,
+ *  which is what made the two copies' targets finally resolve to the same
+ *  real device instead of one being garbled). This key uses each binding's
+ *  already-normalized object fields (both parsers agree on those) instead
+ *  of the inconsistently-formatted `.id` string. */
+function bindingIdentityKey(b) {
+  const target = b.isGroup ? `g:${Number(b.groupId)}` : `d:${normIeee(b.targetIeee)}:${Number(b.targetEndpoint)}`;
+  return `${normIeee(b.sourceIeee)}|${Number(b.sourceEndpoint)}|${Number(b.clusterId)}|${target}`;
+}
+
 /** Normalize a raw binds_get entry into a stable shape used throughout the card. */
 function normalizeBinding(sourceIeee, raw) {
   const dst = raw.dst || {};
@@ -498,6 +530,34 @@ function bindingMatches(b, sourceIeee, sourceEp, clusterId, target) {
   return !b.isGroup && normIeee(b.targetIeee) === normIeee(target.ieee) && Number(b.targetEndpoint) === Number(target.endpoint);
 }
 
+/** Converts a Zigbee IEEE address serialized as an array of 8 decimal bytes
+ *  in little-endian (wire) order — e.g. [255,255,21,126,16,56,193,164] — into
+ *  the standard colon-hex string (e.g. "a4:c1:38:10:7e:15:ff:ff") that
+ *  normIeee() and every device's own `ieee` field elsewhere use. Confirmed
+ *  against a real captured binds_get response (2026-07-14): the same
+ *  payload's top-level `ieee_org` array reverses to exactly its own `ieee`
+ *  string field. The earlier assumption that DstAddress.ieee was already a
+ *  hex string was the root cause of every reply-path binding showing
+ *  "target device no longer exists" — this replaces that assumption.
+ *  Returns null for anything that isn't exactly 8 bytes. */
+function ieeeBytesToString(bytes) {
+  if (!Array.isArray(bytes) || bytes.length !== 8) return null;
+  return bytes
+    .slice()
+    .reverse()
+    .map((b) => Number(b).toString(16).padStart(2, "0"))
+    .join(":");
+}
+
+/** Same byte-order idea for a 2-byte little-endian value (e.g. a group/NWK
+ *  id). Not yet confirmed against a real group-bound reply — kept as a
+ *  defensive fallback since it's the same Struct-serialization layer that
+ *  turned out to array-ify the 8-byte IEEE case. */
+function le16ToNumber(bytes) {
+  if (!Array.isArray(bytes) || bytes.length !== 2) return null;
+  return Number(bytes[0]) + Number(bytes[1]) * 256;
+}
+
 /** Parses zha_toolkit's newer `response.replies` shape — raw ZDO
  *  Mgmt_Bind_rsp pages, `[Status, BindingTableEntries, StartIndex,
  *  BindingTableList]` per zigpy's zdo/types.py — into the same normalized
@@ -505,22 +565,29 @@ function bindingMatches(b, sourceIeee, sourceEp, clusterId, target) {
  *  shape. Needed because a later page can time out (reporting `success:
  *  false` for the whole call) while an earlier page already contains valid
  *  entries that would otherwise be discarded entirely.
- *  Field names below are confirmed against zigpy's actual `Binding` /
+ *  Field names are confirmed against zigpy's actual `Binding` /
  *  `MultiAddress` Struct definitions (SrcAddress/SrcEndpoint/ClusterId/
- *  DstAddress, and addrmode/nwk/ieee/endpoint on the nested address) —
- *  listed first in each lookup. Alternate-cased fallbacks are kept only in
- *  case Home Assistant's websocket JSON layer ever re-cases these when
- *  serializing zigpy Struct instances; unrecognized shapes are skipped
- *  (and logged) per-entry rather than crashing the whole scan. */
+ *  DstAddress, and addrmode/nwk/ieee/endpoint on the nested address) AND
+ *  against a real captured response — IEEE addresses come across as 8-byte
+ *  arrays, not hex strings (see ieeeBytesToString above). Alternate-cased
+ *  fallbacks are kept only in case Home Assistant's websocket JSON layer
+ *  ever re-cases these; unrecognized shapes are skipped (and logged)
+ *  per-entry rather than crashing the whole scan.
+ *  Returns `{entries, total}` — `total` is the device's own reported
+ *  binding-table size (`BindingTableEntries`), used to show "X of Y
+ *  retrieved" when a later page times out. */
 function extractBindingsFromReplies(sourceIeee, replies) {
   const out = [];
-  if (!Array.isArray(replies)) return out;
+  let total = null;
+  if (!Array.isArray(replies)) return { entries: out, total };
   for (const page of replies) {
     let entries = null;
     if (Array.isArray(page)) {
       const last = page[page.length - 1];
       if (Array.isArray(last)) entries = last;
       else if (page.length && page.every((p) => p && typeof p === "object" && !Array.isArray(p))) entries = page;
+      // page shape: [Status, BindingTableEntries, StartIndex, BindingTableList]
+      if (page.length >= 2 && typeof page[1] === "number") total = page[1];
     }
     if (!entries) continue;
     for (const raw of entries) {
@@ -531,10 +598,19 @@ function extractBindingsFromReplies(sourceIeee, replies) {
         // MultiAddress.addrmode: 0x01 = group (nwk), 0x03 = extended (ieee+endpoint).
         const addrMode = Number(dst.addrmode ?? dst.AddrMode ?? dst.addr_mode ?? raw.DstAddrMode ?? 3);
         const isGroup = addrMode === 1;
-        const dstIeee = dst.ieee ?? dst.IEEE ?? dst.dst_ieee;
+        const dstIeeeRaw = dst.ieee ?? dst.IEEE ?? dst.dst_ieee;
+        const dstIeee = Array.isArray(dstIeeeRaw) ? ieeeBytesToString(dstIeeeRaw) : dstIeeeRaw;
         const dstEp = dst.endpoint ?? dst.Endpoint ?? dst.dst_ep;
-        const group = dst.nwk ?? dst.NWK ?? dst.group ?? dst.Group ?? dst.group_id;
+        const groupRaw = dst.nwk ?? dst.NWK ?? dst.group ?? dst.Group ?? dst.group_id;
+        const group = Array.isArray(groupRaw) ? le16ToNumber(groupRaw) : groupRaw;
         if (srcEp == null || clusterIdRaw == null) continue;
+        if (!isGroup && !dstIeee) {
+          // Couldn't resolve a usable target IEEE — skip rather than show a
+          // confusing "target device no longer exists" for a device that's
+          // actually fine (this is what the byte-array bug used to do).
+          console.warn("[ZHA Bindings Manager] skipped a binds_get reply entry with an unparseable target IEEE", raw);
+          continue;
+        }
         const clusterId =
           typeof clusterIdRaw === "string" ? parseInt(clusterIdRaw.replace(/^0x/i, ""), 16) : Number(clusterIdRaw);
         out.push({
@@ -552,7 +628,7 @@ function extractBindingsFromReplies(sourceIeee, replies) {
       }
     }
   }
-  return out;
+  return { entries: out, total };
 }
 
 // ---------------------------------------------------------------------------
@@ -603,7 +679,7 @@ class ZhaBindingMapCard extends HTMLElement {
     // later page of the binding table timed out while an earlier page
     // already had valid entries (see v0.9.1). The bindings shown for these
     // devices are real, just possibly incomplete.
-    this._scanPartial = new Set();
+    this._scanPartial = new Map(); // ieee(lower) -> {retrieved, total}
     this._tableHealthFilter = "all"; // "all" | "problems" | "error" | "warning" | "info"
     this._healthReqId = 0; // guards _ensureHealthData against out-of-order fetches
 
@@ -867,11 +943,11 @@ class ZhaBindingMapCard extends HTMLElement {
     let partialCount = 0;
     for (const ieee of targets) {
       try {
-        const { bindings, partial } = await this._api.getDeviceBindings(ieee);
+        const { bindings, partial, retrievedCount, totalCount } = await this._api.getDeviceBindings(ieee);
         this._bindings.set(ieee, bindings);
         this._scanFailures.delete(normIeee(ieee));
         if (partial) {
-          this._scanPartial.add(normIeee(ieee));
+          this._scanPartial.set(normIeee(ieee), { retrieved: retrievedCount, total: totalCount });
           partialCount++;
         } else {
           this._scanPartial.delete(normIeee(ieee));
@@ -994,10 +1070,15 @@ class ZhaBindingMapCard extends HTMLElement {
     // the bindings shown here are real), but a later page timed out, so
     // there may be more bindings on this device that aren't shown yet.
     if (this._scanPartial.has(sourceIeeeN)) {
+      const counts = this._scanPartial.get(sourceIeeeN);
+      const countText =
+        counts && counts.total != null && counts.retrieved != null
+          ? ` (${counts.retrieved} of ${counts.total} binding table entries retrieved)`
+          : "";
       return {
         level: "info",
         code: "partial_scan",
-        message: "Only part of this device's binding table could be read.",
+        message: `Only part of this device's binding table could be read.${countText}`,
         why: "A later page of this device's binding table timed out during the scan, so there may be additional bindings on it that aren't shown yet — the bindings that were read are still valid.",
         recommendation: "Rescan this device to try retrieving the rest of its binding table.",
       };

@@ -22,12 +22,12 @@
  * zha_toolkit MUST be installed (via HACS) and working for bind/unbind/scan
  * to function. See README.md for details.
  *
- * Version: 0.9.4
+ * Version: 0.10.1
  */
 
 /* eslint-disable no-console */
 
-const CARD_VERSION = "0.9.4";
+const CARD_VERSION = "0.10.1";
 // Logged once per script load (not per card instance) so you can confirm
 // which build is actually active straight from the browser console —
 // useful given HACS caches a pre-gzipped copy of this file that can go
@@ -42,6 +42,16 @@ const ZTK_DOMAIN = "zha_toolkit";
 
 // Clusters zha-toolkit binds by default when no explicit cluster is given.
 const DEFAULT_BINDABLE_OUT_CLUSTERS = [0x0005, 0x0006, 0x0008, 0x0102, 0x0300];
+
+// How many recent binds_get attempts we remember per device for the learned
+// response-time/outcome history (see _recordScanOutcome).
+const HISTORY_LIMIT = 10;
+// Default extra attempts for a deliberate single-device rescan (not the bulk
+// network scan, which stays at zha_toolkit's own default of 1 try). Each
+// extra try costs ~45s when a device genuinely doesn't respond — confirmed
+// via live testing on 2026-07-15 (45s for 1 try, 222s for 5 tries) — so this
+// is a real time cost, not a free safety net, and is user-configurable.
+const DEFAULT_RETRY_COUNT = 2;
 const DEFAULT_BINDABLE_IN_CLUSTERS = [0x0402];
 
 // Friendly names + rough category for clusters we know how to talk about.
@@ -253,6 +263,29 @@ function relTime(iso) {
   return `${days}d ago`;
 }
 
+/** Median of successful response durations (ms) — used instead of mean as
+ *  the headline number since it resists being skewed by one freak slow
+ *  reading. Returns null for an empty list. */
+function medianMs(values) {
+  if (!values || !values.length) return null;
+  const sorted = [...values].sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  return sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
+}
+
+function meanMs(values) {
+  if (!values || !values.length) return null;
+  return values.reduce((a, b) => a + b, 0) / values.length;
+}
+
+/** Formats a millisecond duration the way a person would say it — "~1s",
+ *  "~4s" — never fake precision like "1243ms". */
+function formatDurationMs(ms) {
+  if (ms == null) return null;
+  const s = ms / 1000;
+  return s < 1 ? "<1s" : `~${Math.round(s)}s`;
+}
+
 /**
  * hass.callService() rejections aren't always plain Error objects — depending
  * on whether it's a websocket-level failure, an auth/connection issue, or a
@@ -403,9 +436,17 @@ class ZhaApi {
    *  Returns `{bindings, partial, retrievedCount, totalCount}`; `partial`
    *  means the read may be incomplete even though the entries returned are
    *  valid, and `totalCount` (when known) is the device's own reported
-   *  binding-table size, so the UI can show "X of Y retrieved". */
-  async getDeviceBindings(ieee) {
-    const response = await this.callToolkit("binds_get", { ieee }, { allowPartial: true });
+   *  binding-table size, so the UI can show "X of Y retrieved".
+   *  `opts.tries` (optional) is passed straight through to zha_toolkit's
+   *  `tries` parameter — confirmed via live testing (2026-07-15) that each
+   *  try costs ~45s when a device doesn't respond at all, and that it's a
+   *  real sequential retry loop, not a no-op. Left unset (zha_toolkit's own
+   *  default of 1) for the bulk network scan; callers doing a deliberate
+   *  single-device rescan can opt into more. */
+  async getDeviceBindings(ieee, opts = {}) {
+    const data = { ieee };
+    if (opts.tries != null) data.tries = opts.tries;
+    const response = await this.callToolkit("binds_get", data, { allowPartial: true });
     const failed = (response.errors && response.errors.length) || response.success === false;
     const fromResult =
       response.result && Object.keys(response.result).length
@@ -680,6 +721,12 @@ class ZhaBindingMapCard extends HTMLElement {
     // already had valid entries (see v0.9.1). The bindings shown for these
     // devices are real, just possibly incomplete.
     this._scanPartial = new Map(); // ieee(lower) -> {retrieved, total}
+    // Learned per-device response-time/outcome history, persisted across
+    // sessions — see _historyFor()/_recordScanOutcome(). Used to set
+    // realistic scan-time expectations and to override the power_source-
+    // based sleepy-device guess once we have real observed behavior.
+    this._responseHistory = new Map(); // ieee(lower) -> {successMs:[], outcomes:[bool]}
+    this._retryCount = DEFAULT_RETRY_COUNT; // single-device rescan only; bulk scan is unaffected
     this._tableHealthFilter = "all"; // "all" | "problems" | "error" | "warning" | "info"
     this._healthReqId = 0; // guards _ensureHealthData against out-of-order fetches
 
@@ -823,6 +870,116 @@ class ZhaBindingMapCard extends HTMLElement {
     }
   }
 
+  // Learned per-device response-time/outcome history — see the constructor
+  // comment and _recordScanOutcome/_historyFor below. Persisted the same way
+  // the bindings cache is, so it builds up knowledge across sessions.
+  _historyStorageKey() {
+    return `zha-binding-map-card:${this._config.id || "default"}:history`;
+  }
+  _loadHistory() {
+    try {
+      const raw = JSON.parse(localStorage.getItem(this._historyStorageKey()) || "null");
+      this._responseHistory = raw && typeof raw === "object" ? new Map(Object.entries(raw)) : new Map();
+    } catch (e) {
+      this._responseHistory = new Map();
+    }
+  }
+  _saveHistory() {
+    try {
+      localStorage.setItem(this._historyStorageKey(), JSON.stringify(Object.fromEntries(this._responseHistory)));
+    } catch (e) {
+      /* ignore quota errors */
+    }
+  }
+
+  /** Records one binds_get attempt's outcome for a device. Caps each list at
+   *  HISTORY_LIMIT so this can't grow without bound and so old, possibly-
+   *  stale conditions (e.g. a device that used to be far from a router)
+   *  matter less than recent ones. */
+  _recordScanOutcome(ieee, { success, durationMs }) {
+    const key = normIeee(ieee);
+    const entry = this._responseHistory.get(key) || {
+      successMs: [],
+      outcomes: [],
+      lastAttemptAt: null,
+      lastSuccessAt: null,
+    };
+    if (success && durationMs != null) {
+      entry.successMs.push(durationMs);
+      if (entry.successMs.length > HISTORY_LIMIT) entry.successMs.shift();
+      entry.lastSuccessAt = new Date().toISOString();
+    }
+    entry.outcomes.push(success);
+    if (entry.outcomes.length > HISTORY_LIMIT) entry.outcomes.shift();
+    entry.lastAttemptAt = new Date().toISOString();
+    this._responseHistory.set(key, entry);
+    this._saveHistory();
+  }
+
+  /** Summary used for display and for the sleepy-detection override: median
+   *  response time from successful attempts, success rate across all
+   *  attempts, and when we last tried/last succeeded. Returns null if we've
+   *  never attempted this device — callers should fall back to the
+   *  power_source/device_type guess in that case. */
+  _historyFor(ieee) {
+    const entry = this._responseHistory.get(normIeee(ieee));
+    if (!entry || !entry.outcomes.length) return null;
+    const successCount = entry.outcomes.filter(Boolean).length;
+    return {
+      medianMs: medianMs(entry.successMs),
+      successCount,
+      attemptCount: entry.outcomes.length,
+      successRate: successCount / entry.outcomes.length,
+      lastAttemptAt: entry.lastAttemptAt,
+      lastSuccessAt: entry.lastSuccessAt,
+    };
+  }
+
+  /** Whether "press a button to wake it" is physically meaningful advice for
+   *  this device — purely a hardware fact from power_source (including the
+   *  ambiguous "Battery or Unknown" ZHA sometimes reports — see the earlier
+   *  "heuristic not certainty" discussion), never inferred from success-rate
+   *  history. Deliberately NOT history-based: an early version treated a
+   *  single failed attempt (successRate 0/1) as "confidently sleepy"
+   *  regardless of power_source, which wrongly told Hans to "press a button"
+   *  on mains-powered devices he'd physically unplugged for testing — a
+   *  mains device can't be asleep, no matter how it's been responding.
+   *  Response-time history is still shown as context (see _lastScanCellInfo)
+   *  — it just doesn't drive whether wake-advice is physically sensible. */
+  _isBatteryDevice(device) {
+    return !!(device.power_source && /battery/i.test(device.power_source));
+  }
+
+  // Retry-count setting for a deliberate single-device rescan — see
+  // DEFAULT_RETRY_COUNT for the reasoning. A small, explicit user setting
+  // rather than something baked in, since more retries is a real time cost
+  // (~45s each against an unresponsive device), not a free improvement.
+  _retryCountStorageKey() {
+    return `zha-binding-map-card:${this._config.id || "default"}:retry-count`;
+  }
+  _loadRetryCount() {
+    try {
+      const raw = parseInt(localStorage.getItem(this._retryCountStorageKey()), 10);
+      this._retryCount = Number.isFinite(raw) && raw >= 1 ? raw : DEFAULT_RETRY_COUNT;
+    } catch (e) {
+      this._retryCount = DEFAULT_RETRY_COUNT;
+    }
+    // _render() (which wires the input and sets its initial value) runs
+    // before _loadAll() calls this, so the input needs updating here too —
+    // otherwise it's stuck showing the constructor default until something
+    // else happens to re-render it.
+    const el = this._q("#rescan-retry-count");
+    if (el) el.value = this._retryCount;
+  }
+  _saveRetryCount(value) {
+    this._retryCount = clamp(Number(value) || DEFAULT_RETRY_COUNT, 1, 10);
+    try {
+      localStorage.setItem(this._retryCountStorageKey(), String(this._retryCount));
+    } catch (e) {
+      /* ignore quota errors */
+    }
+  }
+
   _setStatus(level, text, timeout = 6000) {
     this._status = { level, text };
     this._renderStatus();
@@ -841,6 +998,8 @@ class ZhaBindingMapCard extends HTMLElement {
   async _loadAll() {
     this._loadPositions();
     this._loadCachedBindings();
+    this._loadHistory();
+    this._loadRetryCount();
     this._loadFloorplan();
     if (this._fpImageUrl) this._loadFpImage(this._fpImageUrl);
     this._setStatus("info", "Loading ZHA devices…", 0);
@@ -933,7 +1092,10 @@ class ZhaBindingMapCard extends HTMLElement {
     };
   }
 
-  async _scanBindings(ieeeList) {
+  /** opts.tries: extra attempts for a deliberate single-device rescan (see
+   *  DEFAULT_RETRY_COUNT). Left unset for the bulk network scan so it stays
+   *  at zha_toolkit's own default rather than getting slower for everyone. */
+  async _scanBindings(ieeeList, opts = {}) {
     if (this._scanState.running) return;
     const targets = ieeeList && ieeeList.length ? ieeeList : this._devices.map((d) => d.ieee);
     this._scanState = { running: true, done: 0, total: targets.length };
@@ -942,8 +1104,13 @@ class ZhaBindingMapCard extends HTMLElement {
     let failCount = 0;
     let partialCount = 0;
     for (const ieee of targets) {
+      const startedAt = Date.now();
       try {
-        const { bindings, partial, retrievedCount, totalCount } = await this._api.getDeviceBindings(ieee);
+        const { bindings, partial, retrievedCount, totalCount } = await this._api.getDeviceBindings(
+          ieee,
+          opts.tries != null ? { tries: opts.tries } : {}
+        );
+        this._recordScanOutcome(ieee, { success: true, durationMs: Date.now() - startedAt });
         this._bindings.set(ieee, bindings);
         this._scanFailures.delete(normIeee(ieee));
         if (partial) {
@@ -955,6 +1122,7 @@ class ZhaBindingMapCard extends HTMLElement {
         okCount++;
       } catch (err) {
         failCount++;
+        this._recordScanOutcome(ieee, { success: false });
         // Tracked for Binding Health's Rule 7 ("unable to verify") — in-memory
         // only, reflects just this most recent attempt for this device.
         this._scanFailures.add(normIeee(ieee));
@@ -980,6 +1148,7 @@ class ZhaBindingMapCard extends HTMLElement {
     );
     this._renderGraph();
     this._renderTable();
+    this._renderDevicesTab();
     this._renderStatus();
   }
 
@@ -1232,6 +1401,17 @@ class ZhaBindingMapCard extends HTMLElement {
 
     this._q("#btn-scan").addEventListener("click", () => this._scanBindings());
     this._q("#btn-refresh-devices").addEventListener("click", () => this._loadAll());
+    this._q("#btn-rescan-settings").addEventListener("click", () => {
+      this._q("#rescan-settings-panel").classList.toggle("open");
+    });
+    const retryInput = this._q("#rescan-retry-count");
+    if (retryInput) {
+      retryInput.value = this._retryCount;
+      retryInput.addEventListener("change", () => {
+        this._saveRetryCount(retryInput.value);
+        retryInput.value = this._retryCount; // reflect the clamped value back
+      });
+    }
     this._q("#btn-zoom-fit").addEventListener("click", () => this._zoomFit());
     this._q("#btn-zoom-in").addEventListener("click", () => this._zoomBy(1.2));
     this._q("#btn-zoom-out").addEventListener("click", () => this._zoomBy(1 / 1.2));
@@ -2232,10 +2412,24 @@ class ZhaBindingMapCard extends HTMLElement {
       </table>
       ${detailHtml}
       <div class="dialog-actions">
+        ${
+          (health.code === "unable_to_verify" || health.code === "partial_scan") && source
+            ? `<button class="btn" id="health-detail-rescan" data-ieee="${escapeHtml(source.ieee)}">Rescan now</button>`
+            : ""
+        }
         <button class="btn" id="health-detail-close">Close</button>
       </div>`;
     this._q("#dialog").classList.add("open");
     this._q("#health-detail-close").addEventListener("click", () => this._closeDialog());
+    const rescanBtn = this._q("#health-detail-rescan");
+    if (rescanBtn) {
+      rescanBtn.addEventListener("click", async () => {
+        rescanBtn.disabled = true;
+        rescanBtn.textContent = "Scanning…";
+        await this._scanBindings([rescanBtn.dataset.ieee], { tries: this._retryCount });
+        this._closeDialog();
+      });
+    }
   }
 
   /** "+ Add binding" from a filtered Bindings-tab source device now jumps straight to the
@@ -2337,29 +2531,86 @@ class ZhaBindingMapCard extends HTMLElement {
   // Devices view — flat list of every ZHA device with its identifying info,
   // independent of any bindings.
   // -------------------------------------------------------------------
+  /** Builds the combined status/rescan/wake cell for one device — status +
+   *  when + learned response-time stats, doubling as the rescan trigger.
+   *  scanRank orders worst-first (never/failed before ok) so sorting the
+   *  column surfaces what needs attention. */
+  _lastScanCellInfo(device) {
+    const key = normIeee(device.ieee);
+    const known = this._bindings.has(device.ieee) || this._bindings.has(key);
+    const history = this._historyFor(device.ieee);
+    const isBattery = this._isBatteryDevice(device);
+    let status, scanRank;
+    if (this._scanFailures.has(key)) {
+      status = "failed";
+      scanRank = 0;
+    } else if (this._scanPartial.has(key)) {
+      status = "partial";
+      scanRank = 1;
+    } else if (known) {
+      status = "ok";
+      scanRank = 3;
+    } else {
+      status = "never";
+      scanRank = 0;
+    }
+    const whenIso = (history && (history.lastSuccessAt || history.lastAttemptAt)) || (status === "ok" ? this._lastScanAt : null);
+    const statusLabel = { failed: "Failed", partial: "Partial", ok: "OK", never: "Never scanned" }[status];
+    const bits = [statusLabel];
+    if (whenIso) bits.push(relTime(whenIso));
+    if (history && history.medianMs != null) bits.push(`typical ${formatDurationMs(history.medianMs)}`);
+    if (history && history.attemptCount > 1) {
+      bits.push(`responded ${history.successCount}/${history.attemptCount}`);
+    }
+    // Wake-advice is only physically meaningful for a battery device, and
+    // only when there's an actual current failure/partial to explain — a
+    // mains device that's not responding needs a completely different
+    // message (check power/wiring, not "press a button").
+    const needsExplanation = status === "failed" || status === "partial";
+    const wakeHint = !needsExplanation
+      ? ""
+      : isBattery
+      ? `<div class="scan-wake-hint">May be asleep — press a button on it, then rescan.</div>`
+      : `<div class="scan-wake-hint">Not responding — check it's powered on and in range, then rescan.</div>`;
+    const btnLabel = isBattery && needsExplanation ? "Wake & rescan" : "Rescan";
+    return {
+      scanRank,
+      html: `<div class="scan-cell scan-cell-${status}">
+        <span class="scan-cell-status">${escapeHtml(bits.join(" · "))}</span>
+        ${wakeHint}
+        <button type="button" class="btn btn-small scan-cell-btn" data-ieee="${escapeHtml(device.ieee)}">${btnLabel}</button>
+      </div>`,
+    };
+  }
+
   _renderDevicesTab() {
     const wrap = this._q("#devices-table-body");
     if (!wrap) return;
     this._updateSortIndicators("#view-devices", this._devicesSort);
     if (!this._loaded) {
-      wrap.innerHTML = `<tr><td colspan="7" class="muted">Loading devices…</td></tr>`;
+      wrap.innerHTML = `<tr><td colspan="8" class="muted">Loading devices…</td></tr>`;
       return;
     }
-    let rows = this._devices.map((d) => ({
-      device: d,
-      name: this._deviceLabel(d),
-      type: this._devicePrimaryType(d),
-      typeFull: this._deviceTypeTags(d).join(", "),
-      manufacturer: d.manufacturer || "—",
-      model: d.model || "—",
-      area: this._areaName(d.area_id),
-      power: d.power_source || "—",
-      count: this._deviceBindingCount(d.ieee),
-    }));
+    let rows = this._devices.map((d) => {
+      const scanCell = this._lastScanCellInfo(d);
+      return {
+        device: d,
+        name: this._deviceLabel(d),
+        type: this._devicePrimaryType(d),
+        typeFull: this._deviceTypeTags(d).join(", "),
+        manufacturer: d.manufacturer || "—",
+        model: d.model || "—",
+        area: this._areaName(d.area_id),
+        power: d.power_source || "—",
+        count: this._deviceBindingCount(d.ieee),
+        scanRank: scanCell.scanRank,
+        scanHtml: scanCell.html,
+      };
+    });
     rows = this._devicesSort.key ? this._sortRows(rows, this._devicesSort) : rows.sort((a, b) => a.name.localeCompare(b.name));
 
     if (!rows.length) {
-      wrap.innerHTML = `<tr><td colspan="7" class="muted">No devices found.</td></tr>`;
+      wrap.innerHTML = `<tr><td colspan="8" class="muted">No devices found.</td></tr>`;
       return;
     }
     wrap.innerHTML = rows
@@ -2373,6 +2624,7 @@ class ZhaBindingMapCard extends HTMLElement {
           <td>${escapeHtml(r.area)}</td>
           <td>${escapeHtml(r.power)}</td>
           <td>${r.count}</td>
+          <td>${r.scanHtml}</td>
         </tr>`
       )
       .join("");
@@ -2382,6 +2634,21 @@ class ZhaBindingMapCard extends HTMLElement {
         e.preventDefault();
         this._tableSourceFilter = el.dataset.ieee;
         this._switchView("table");
+      });
+    });
+    this._qa("#devices-table-body .scan-cell-btn").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        btn.disabled = true;
+        const original = btn.textContent;
+        btn.textContent = "Scanning…";
+        this._scanBindings([btn.dataset.ieee], { tries: this._retryCount }).finally(() => {
+          // _renderDevicesTab() (called at the end of _scanBindings) will
+          // have already replaced this button — nothing to reset if so.
+          if (btn.isConnected) {
+            btn.disabled = false;
+            btn.textContent = original;
+          }
+        });
       });
     });
   }
@@ -3064,7 +3331,7 @@ class ZhaBindingMapCard extends HTMLElement {
         btn.addEventListener("click", async () => {
           btn.disabled = true;
           btn.textContent = "Scanning…";
-          await this._scanBindings([ieee]);
+          await this._scanBindings([ieee], { tries: this._retryCount });
           this._advRenderSourceBindings();
         });
       }
@@ -3222,6 +3489,18 @@ const SHELL_HTML = `
     <input id="search" class="search" placeholder="Search devices…">
     <button class="btn" id="btn-refresh-devices" title="Reload device list">⟳ Devices</button>
     <button class="btn btn-primary" id="btn-scan" title="Read current bindings from your Zigbee devices">Scan bindings</button>
+    <button class="btn btn-small" id="btn-rescan-settings" title="Single-device rescan settings">⚙</button>
+  </div>
+  <div id="rescan-settings-panel" class="filter-panel">
+    <div class="filter-group">
+      <label class="row" for="rescan-retry-count">Retries for single-device rescan
+        <input type="number" id="rescan-retry-count" min="1" max="10" style="width:4em; margin-left:6px;">
+      </label>
+      <p class="hint">Only applies when you rescan one device (e.g. the Devices tab or "Scan this device") —
+        the full "Scan bindings" network scan is unaffected. Each extra retry costs about 45 seconds if the
+        device genuinely doesn't respond, so more isn't free — it's a real trade-off between a better chance
+        of catching a briefly-unreachable device and a longer wait. Default is ${DEFAULT_RETRY_COUNT}.</p>
+    </div>
   </div>
   <div id="status" class="status" style="display:none"></div>
 
@@ -3232,7 +3511,7 @@ const SHELL_HTML = `
       <label class="row"><input type="checkbox" id="f-endDevices"> End devices</label>
       <label class="row"><input type="checkbox" id="f-groups"> Groups</label>
       <label class="row"><input type="checkbox" id="f-unbound"> Unbound devices</label>
-      <label class="row"><input type="checkbox" id="f-hideCoordinatorBindings" checked> Hide coordinator bindings</label>
+      <label class="row" title="Also filters the Bindings tab, not just this Map view"><input type="checkbox" id="f-hideCoordinatorBindings" checked> Hide coordinator bindings (Map &amp; Bindings tab)</label>
       <span class="spacer"></span>
       <span id="scan-info" class="scan-info muted"></span>
       <button class="btn btn-small" id="btn-filters">Filters ▾</button>
@@ -3307,6 +3586,7 @@ const SHELL_HTML = `
         <th data-sort="area">Area</th>
         <th data-sort="power">Power</th>
         <th data-sort="count">Bindings</th>
+        <th data-sort="scanRank">Last scan</th>
       </tr></thead>
       <tbody id="devices-table-body"></tbody>
     </table>
@@ -3397,6 +3677,13 @@ const STYLE = `
   line-height: 1; padding: 0 2px; color: inherit; opacity: 0.6;
 }
 .status-close:hover { opacity: 1; }
+.scan-cell { display:flex; flex-direction:column; align-items:flex-start; gap:4px; min-width:150px; }
+.scan-cell-status { font-size:0.85em; }
+.scan-cell-failed .scan-cell-status, .scan-cell-never .scan-cell-status { color: var(--error-color, #db4437); }
+.scan-cell-partial .scan-cell-status { color: var(--warning-color, #ff9800); }
+.scan-cell-ok .scan-cell-status { color: var(--success-color, #4caf50); }
+.scan-wake-hint { font-size:0.78em; color: var(--secondary-text-color); font-style:italic; }
+.scan-cell-btn { align-self:flex-start; }
 .view { display:none; }
 .view.active { display:block; }
 .graph-toolbar { display:flex; align-items:center; gap:14px; flex-wrap:wrap; margin-bottom:6px; font-size:0.85em; }

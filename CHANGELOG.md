@@ -2,6 +2,60 @@
 
 All notable changes to ZHA Bindings Manager are documented here.
 
+## [0.10.1] — 15 July 2026
+
+### Fixed
+
+- **The wake-device hint could tell you to "press a button" on a
+  mains-powered device**, found immediately during testing (devices
+  deliberately unplugged for testing showed "Usually needs waking — press
+  a button on it"). Root cause: the sleepy-device check let a single
+  failed scan attempt (a sample size of one) override the device's actual
+  `power_source`, since a 0/1 success rate technically counts as "below
+  50%". Whether wake-advice is physically sensible is now decided purely
+  by `power_source` (a hardware fact) and never overridden by history — a
+  mains device that isn't responding now shows "check it's powered on and
+  in range" instead. Response-time/success-rate history is still shown as
+  context, it just no longer drives which message you see.
+
+## [0.10.0] — 15 July 2026
+
+Bumped the minor version rather than another patch — this is a real feature
+addition, not a bug fix, off the back of a full design/testing discussion
+(including live retry-timing tests against a real device).
+
+### Added
+
+- **Learned per-device scan history.** The card now remembers, per device,
+  how long recent `binds_get` attempts took to succeed and how often they
+  succeeded at all (last 10 attempts, persisted like the bindings cache).
+  This replaces guesswork with real observed behavior — confirmed necessary
+  during testing, where a genuine battery device at the edge of the network
+  responded in under a second, disproving the assumption that "battery
+  device" reliably predicts "slow to respond."
+- **Devices tab: a combined "Last scan" column.** Shows status (never
+  scanned / OK / partial / failed), when, typical response time, and
+  success rate for each device, and doubles as a one-click rescan button —
+  no more needing to re-run the full network scan to retry one device. A
+  wake-device hint appears for battery-powered devices that just failed or
+  partially responded.
+- **Configurable retry count for single-device rescans**, with an
+  explanation of the real cost involved (a small settings panel, ⚙ next to
+  "Scan bindings"). Confirmed via live testing that zha_toolkit's `tries`
+  parameter is a real sequential retry loop costing ~45 seconds per attempt
+  against a genuinely unresponsive device (45s for 1 try, 222s for 5) — so
+  this is a deliberate trade-off setting, not a free improvement, and is
+  scoped to single-device rescans only. The full network scan is
+  unaffected and stays at zha_toolkit's own default.
+- A "Rescan now" button on the Binding Health detail popover for
+  "unable to verify" and "partial scan" findings, instead of just telling
+  you to go rescan manually.
+
+### Changed
+
+- The "Hide coordinator bindings" filter is now labeled to make clear it
+  affects both the Map and the Bindings tab, not just the graph.
+
 ## [0.9.4] — 15 July 2026
 
 ### Changed
@@ -80,8 +134,7 @@ All notable changes to ZHA Bindings Manager are documented here.
   and reported by a user testing against a real Hue network with large
   binding tables — thank you!
 
-
-## [0.9.0] - 11 July 2026
+## [0.9.0] — 11 July 2026
 
 ### Added
 

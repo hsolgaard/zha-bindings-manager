@@ -2,6 +2,53 @@
 
 All notable changes to ZHA Bindings Manager are documented here.
 
+## [0.11.2] — 16 July 2026
+
+### Changed
+
+- **The scan batch size setting now documents a real, tested downside to
+  setting it too high**, found through live testing on a real ~64-device
+  network: a batch of 28 caused otherwise-healthy mains devices to
+  intermittently fail to respond (a different device on each repeat scan,
+  every one of them fine when rescanned individually) — almost certainly
+  Zigbee airtime/collision contention from that much concurrent traffic at
+  once, not an actual device problem. 10-12 tested clean with no induced
+  failures across repeated runs. The setting itself is unchanged (still
+  1-30, still defaults to 10) — this just makes sure the trade-off is
+  explained before you turn it up rather than after something fails
+  unexpectedly.
+
+## [0.11.1] — 16 July 2026
+
+### Changed
+
+- **The concurrent scan batch size is now a setting (⚙ next to "Scan
+  bindings"), defaulting to 10** (up from the fixed 8 shipped in 0.11.0).
+  Found via real testing: with a fixed batch size, a handful of
+  sleepy/offline devices can happen to land in different batches purely by
+  chance, and each one drags its own batch out by its full retry delay
+  (~45s) — a larger batch reduces how often that happens. There's no single
+  batch size that's provably best for every network, so it's adjustable
+  rather than hardcoded.
+
+## [0.11.0] — 16 July 2026
+
+### Changed
+
+- **Scans now run in concurrent batches of 8 devices instead of one at a
+  time**, cutting wall-clock time on larger networks. Previously, a full
+  network scan read one device's bindings, waited for the response, then
+  moved to the next — so every sleepy/offline device's retry delay (~45s
+  each) added up serially across the whole scan. Confirmed via live testing
+  (browser console, calling the same `zha_toolkit.binds_get` service the
+  card uses) that requests genuinely run in parallel end-to-end — 10
+  concurrent calls to real devices, including 2 that failed simultaneously,
+  all completed in under 45 seconds total instead of stacking to 90+. Only
+  the bulk network scan is affected; single-device rescans (Devices tab,
+  Advanced tab, Binding Health "Rescan now") were already effectively a
+  batch of one and behave exactly as before.
+
+
 ## [0.10.1] — 15 July 2026
 
 ### Fixed

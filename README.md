@@ -328,7 +328,7 @@ one-off UI click-through that's easy to get wrong.)
 ## Credits
 
 Designed, specified, and tested by [Hans Solgaard](https://github.com/hsolgaard) against a real ZHA
-network. Development assisted by [Claude](https://www.anthropic.com/claude) (Anthropic)<img width="620" height="227" alt="Screenshot 2026-07-16 at 17 17 56" src="https://github.com/user-attachments/assets/df2eb213-e9f2-4d09-9377-35a9bba219ee" />
+network. Development assisted by [Claude](https://www.anthropic.com/claude) (Anthropic)
 
 
 Built on top of:

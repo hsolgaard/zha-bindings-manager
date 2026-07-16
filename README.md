@@ -16,23 +16,16 @@ bound to what.
 ## Screenshots
 
 **Map view** — every device and its bindings, colour-coded by cluster type.
-<img width="1201" height="625" alt="Screenshot 2026-07-10 at 22 10 02" src="https://github.com/user-attachments/assets/2f452e56-cea5-4527-ae1b-9ea1ef92de10" />
+<img width="1425" height="735" alt="mapview" src="https://github.com/user-attachments/assets/8f28371b-301f-4eb6-ae26-805451041f80" />
 
-**Bindings view** — a flat, searchable, sortable table of every binding, with
-Binding Health (summary card, Health column, and status filter chips —
-added in v0.9.0).
-<!-- 📸 REPLACE: this screenshot predates Binding Health. Drop a new one here
-     showing the Health summary card + Health column + filter chips
-     (Bindings tab, after clicking "Scan bindings"). -->
-<img width="1201" height="372" alt="Screenshot 2026-07-10 at 22 10 52" src="https://github.com/user-attachments/assets/5af7e6e5-e8c1-4929-8fe4-4c65809e7042" />
+**Bindings view** — a flat, searchable, sortable table of every binding, with Binding Health (summary card, Health column, and status filter chips).
+<img width="1425" height="735" alt="bindings" src="https://github.com/user-attachments/assets/64294804-5788-4c1a-84a5-36abb755bb5e" />
 
-**Binding Health detail** — clicking a Health badge explains what's wrong,
-why it matters, and what to do about it in plain English.
-<!-- 📸 ADD: screenshot of the Health detail popover (click any Health badge
-     in the Bindings table — a Warning or Error one shows the fullest example). -->
+**Binding Health detail** — clicking a Health badge explains what's wrong, why it matters, and what to do about it in plain English.
+<img width="620" height="227" alt="Screenshot 2026-07-16 at 17 17 56" src="https://github.com/user-attachments/assets/dd7109e4-8d94-4751-83a9-216b021d70e7" />
 
-**Devices view** — every ZHA device with manufacturer, model, and binding count.
-<img width="1201" height="454" alt="Screenshot 2026-07-10 at 22 11 25" src="https://github.com/user-attachments/assets/80c632c5-d7b5-4218-a520-b4e8b996d571" />
+**Devices view** — every ZHA device with manufacturer, model, binding count, and a Last scan column that doubles as a rescan/wake-device control.
+<img width="2850" height="1080" alt="Devices screenshot" src="https://github.com/user-attachments/assets/8dc6f677-0840-45b9-ac30-d8dedf0bbad1" />
 
 **Advanced view** — endpoint- and cluster-aware manual bind/unbind, with existing-binding context.
 <img width="1201" height="519" alt="Screenshot 2026-07-10 at 22 12 15" src="https://github.com/user-attachments/assets/00b993ac-eee0-42be-a2e9-b439267b3f75" />
@@ -128,10 +121,11 @@ replace `zha-toolkit` — it's a UI on top of it:
   unbound), by entity type (Light, Switch, Garage Door, Motion Sensor, etc —
   derived from each entity's `device_class`, not just its raw domain), by
   manufacturer, or by area — all remembered across reloads. A "hide
-  coordinator bindings" toggle (on by default) filters out the reporting
-  bindings most devices auto-create to the coordinator, so what's left is the
-  device-to-device bindings you actually went looking for. A fullscreen
-  toggle (⛶) expands the card to fill the browser window.
+  coordinator bindings" toggle (on by default, and affects both the Map and
+  the Bindings tab) filters out the reporting bindings most devices
+  auto-create to the coordinator, so what's left is the device-to-device
+  bindings you actually went looking for. A fullscreen toggle (⛶) expands
+  the card to fill the browser window.
 - **Floor Plan view** — set an image URL (a floor plan you drop into `www/`),
   drag devices from an "unplaced" list onto their physical spot, and see
   bindings drawn as lines on top of the image instead of an auto-arranged
@@ -146,7 +140,8 @@ replace `zha-toolkit` — it's a UI on top of it:
   source/target devices, endpoints, or clusters; duplicate bindings; bindings
   pointing at a Zigbee group that no longer exists — with filter chips (All /
   Problems Only / Errors / Warnings / Info) and a click-through detail popover
-  explaining what's wrong, why it matters, and what to do about it. This is a
+  explaining what's wrong, why it matters, and what to do about it, with a
+  one-click "Rescan now" button where a rescan is the likely fix. This is a
   structural check only (does everything the binding refers to still exist?),
   not a live verification that the binding actually works over Zigbee.
   Export the current (filtered) view as CSV, JSON, or print / save as PDF —
@@ -154,7 +149,20 @@ replace `zha-toolkit` — it's a UI on top of it:
   which you need for manual zha-toolkit calls.
 - **Devices view** — every ZHA device in one table (Name, Type, Manufacturer,
   Model, Area, Power source, binding count), independent of any binding data.
-  Click a name to jump to the Bindings tab filtered to that device.
+  Click a name to jump to the Bindings tab filtered to that device. A
+  **Last scan** column shows each device's status (never scanned / OK /
+  partial / failed), when, its typical response time, and how often it's
+  actually responded — learned from real scan history rather than guessed —
+  and doubles as a one-click rescan button, so retrying one stubborn device
+  doesn't mean re-running the whole network scan. Battery-powered devices
+  that just failed or partially responded get a wake-device hint ("press a
+  button on it, then rescan"); mains-powered devices get a different message
+  ("check it's powered on and in range"), since a mains device can't be
+  asleep. A small settings panel (⚙, next to "Scan bindings") lets you
+  configure how many extra retries a single-device rescan uses — each retry
+  costs a real ~45 seconds against a device that genuinely doesn't respond,
+  so this is a deliberate trade-off, not a free improvement, and only
+  applies to single-device rescans, never the full network scan.
 - **Advanced view** — a raw form over `bind_ieee` / `binds_remove_all` /
   `bind_group` / `unbind_group` / `unbind_coordinator` for cases the automatic
   cluster-matching elsewhere doesn't handle (specific endpoints on
@@ -244,9 +252,12 @@ one-off UI click-through that's easy to get wrong.)
    Zigbee (`zha_toolkit.binds_get`). This is a real radio operation per
    device, so it can take a little while on a large network, and **sleepy
    battery-powered devices (most buttons/remotes) often won't respond unless
-   they're awake** — you may need to press a button on the remote and re-scan
-   just that device. (There isn't a way around this: it's how Zigbee sleepy
-   end devices work, not a limitation of this card.)
+   they're awake**. If a device doesn't respond, use the **Rescan** /
+   **Wake & rescan** button next to it in the Devices tab afterwards — wake
+   it first if it's battery-powered, then retry just that one device rather
+   than the whole network. (There isn't a way around needing the device
+   awake: it's how Zigbee sleepy end devices work, not a limitation of this
+   card — but retrying one device is much cheaper than a full rescan.)
 3. Drag a button/switch node onto a relay/light node to bind them. Pick the
    cluster(s) in the dialog (On/Off and Level Control are pre-checked when
    present).
@@ -275,8 +286,11 @@ one-off UI click-through that's easy to get wrong.)
   not to have existed in the first place). The status message you see (e.g.
   "Binding confirmed removed") reflects a real before/after comparison, not
   just zha_toolkit's opinion of what happened.
-- Sleepy end devices may fail to respond to a bind table read; retry while
-  the device is awake.
+- Sleepy battery-powered end devices may fail to respond to a bind table
+  read; the Devices tab's per-device Rescan/Wake & rescan button and its
+  learned response-time history (see Features, above) help here, but there's
+  no way around a device genuinely needing to be awake — that's how Zigbee
+  sleepy end devices work.
 - The cluster pre-picked when you drag one device onto another (or use "+ Add
   binding") is based on matching output clusters on the source device with
   input clusters on the target device, and is only a suggestion — the
@@ -314,7 +328,8 @@ one-off UI click-through that's easy to get wrong.)
 ## Credits
 
 Designed, specified, and tested by [Hans Solgaard](https://github.com/hsolgaard) against a real ZHA
-network. Development assisted by [Claude](https://www.anthropic.com/claude) (Anthropic)
+network. Development assisted by [Claude](https://www.anthropic.com/claude) (Anthropic)<img width="620" height="227" alt="Screenshot 2026-07-16 at 17 17 56" src="https://github.com/user-attachments/assets/df2eb213-e9f2-4d09-9377-35a9bba219ee" />
+
 
 Built on top of:
 - [ZHA](https://www.home-assistant.io/integrations/zha/) (Home Assistant core)

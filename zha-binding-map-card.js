@@ -22,12 +22,12 @@
  * zha_toolkit MUST be installed (via HACS) and working for bind/unbind/scan
  * to function. See README.md for details.
  *
- * Version: 0.10.1
+ * Version: 0.11.2
  */
 
 /* eslint-disable no-console */
 
-const CARD_VERSION = "0.10.1";
+const CARD_VERSION = "0.11.2";
 // Logged once per script load (not per card instance) so you can confirm
 // which build is actually active straight from the browser console —
 // useful given HACS caches a pre-gzipped copy of this file that can go
@@ -53,6 +53,29 @@ const HISTORY_LIMIT = 10;
 // is a real time cost, not a free safety net, and is user-configurable.
 const DEFAULT_RETRY_COUNT = 2;
 const DEFAULT_BINDABLE_IN_CLUSTERS = [0x0402];
+// How many devices' binds_get calls _scanBindings fires concurrently, rather
+// than one at a time. Confirmed safe and effective via live console testing
+// on 2026-07-16: 10 concurrent calls to real, distinct devices (including 2
+// simultaneous failing devices at ~45s each) showed no serialization
+// anywhere in the chain — every fast device still resolved in under 1.1s,
+// and the two failures completed within 0.15s of each other rather than
+// stacking (bounded by the single slowest call, not the sum of them). This
+// only affects the bulk network scan; single-device rescans are unaffected
+// since a batch of 1-2 behaves the same either way. User-configurable (see
+// _scanBatchSize) since a fixed batch size means fixed batch boundaries —
+// e.g. with 8, three sleepy devices scattered through a device list can each
+// land in a different batch and each drag their batch out by ~45s, instead
+// of landing in the same batch and only costing ~45s once. A larger batch
+// makes that collision less likely without needing to reorder devices —
+// but bigger isn't free: confirmed via live testing on 2026-07-16 that a
+// batch of 28 on a real ~64-device network caused otherwise-healthy mains
+// devices to intermittently fail to respond (different devices on repeat
+// runs, all fine when rescanned individually) — almost certainly Zigbee
+// airtime/collision contention from that much concurrent traffic, not a
+// real device fault. 10-12 tested clean with no induced failures; 10 is the
+// default, higher values are available but not necessarily safe for every
+// network.
+const DEFAULT_SCAN_BATCH_SIZE = 10;
 
 // Friendly names + rough category for clusters we know how to talk about.
 // Anything not in this table is still usable (shown as "Cluster 0xXXXX").
@@ -727,6 +750,7 @@ class ZhaBindingMapCard extends HTMLElement {
     // based sleepy-device guess once we have real observed behavior.
     this._responseHistory = new Map(); // ieee(lower) -> {successMs:[], outcomes:[bool]}
     this._retryCount = DEFAULT_RETRY_COUNT; // single-device rescan only; bulk scan is unaffected
+    this._scanBatchSize = DEFAULT_SCAN_BATCH_SIZE; // how many devices _scanBindings reads concurrently
     this._tableHealthFilter = "all"; // "all" | "problems" | "error" | "warning" | "info"
     this._healthReqId = 0; // guards _ensureHealthData against out-of-order fetches
 
@@ -980,6 +1004,36 @@ class ZhaBindingMapCard extends HTMLElement {
     }
   }
 
+  // How many devices _scanBindings reads concurrently — see
+  // DEFAULT_SCAN_BATCH_SIZE for the reasoning. User-configurable because a
+  // fixed batch size interacts with device ordering: a larger batch makes it
+  // less likely several sleepy/offline devices land in different batches and
+  // each drag one out by ~45s, but there's no single number that's provably
+  // optimal for every network, so it's a setting rather than a constant.
+  _scanBatchSizeStorageKey() {
+    return `zha-binding-map-card:${this._config.id || "default"}:scan-batch-size`;
+  }
+  _loadScanBatchSize() {
+    try {
+      const raw = parseInt(localStorage.getItem(this._scanBatchSizeStorageKey()), 10);
+      this._scanBatchSize = Number.isFinite(raw) && raw >= 1 ? raw : DEFAULT_SCAN_BATCH_SIZE;
+    } catch (e) {
+      this._scanBatchSize = DEFAULT_SCAN_BATCH_SIZE;
+    }
+    // Same reasoning as _loadRetryCount(): _render() wires the input before
+    // _loadAll() calls this, so the input needs updating here too.
+    const el = this._q("#scan-batch-size");
+    if (el) el.value = this._scanBatchSize;
+  }
+  _saveScanBatchSize(value) {
+    this._scanBatchSize = clamp(Number(value) || DEFAULT_SCAN_BATCH_SIZE, 1, 30);
+    try {
+      localStorage.setItem(this._scanBatchSizeStorageKey(), String(this._scanBatchSize));
+    } catch (e) {
+      /* ignore quota errors */
+    }
+  }
+
   _setStatus(level, text, timeout = 6000) {
     this._status = { level, text };
     this._renderStatus();
@@ -1000,6 +1054,7 @@ class ZhaBindingMapCard extends HTMLElement {
     this._loadCachedBindings();
     this._loadHistory();
     this._loadRetryCount();
+    this._loadScanBatchSize();
     this._loadFloorplan();
     if (this._fpImageUrl) this._loadFpImage(this._fpImageUrl);
     this._setStatus("info", "Loading ZHA devices…", 0);
@@ -1094,7 +1149,15 @@ class ZhaBindingMapCard extends HTMLElement {
 
   /** opts.tries: extra attempts for a deliberate single-device rescan (see
    *  DEFAULT_RETRY_COUNT). Left unset for the bulk network scan so it stays
-   *  at zha_toolkit's own default rather than getting slower for everyone. */
+   *  at zha_toolkit's own default rather than getting slower for everyone.
+   *
+   *  Devices are scanned in concurrent batches of this._scanBatchSize (see
+   *  DEFAULT_SCAN_BATCH_SIZE) rather than one at a time — confirmed via live
+   *  testing that this genuinely overlaps end-to-end (browser → HA → zigpy →
+   *  radio) rather than just moving the queueing somewhere else, including
+   *  when several devices in the same batch fail/time out together. This
+   *  matters most for the bulk network scan; single-device rescans just get
+   *  a "batch" of 1 and behave exactly as before. */
   async _scanBindings(ieeeList, opts = {}) {
     if (this._scanState.running) return;
     const targets = ieeeList && ieeeList.length ? ieeeList : this._devices.map((d) => d.ieee);
@@ -1103,7 +1166,8 @@ class ZhaBindingMapCard extends HTMLElement {
     let okCount = 0;
     let failCount = 0;
     let partialCount = 0;
-    for (const ieee of targets) {
+
+    const scanOne = async (ieee) => {
       const startedAt = Date.now();
       try {
         const { bindings, partial, retrievedCount, totalCount } = await this._api.getDeviceBindings(
@@ -1129,10 +1193,20 @@ class ZhaBindingMapCard extends HTMLElement {
         this._scanPartial.delete(normIeee(ieee));
         console.warn(`ZHA Binding Map: could not read bindings for ${ieee}:`, err.message || err);
       }
+      // done++ and the two renders below are safe to run out of completion
+      // order — done is a simple counter, and both renders read current
+      // state fresh rather than assuming this device was the most recent.
       this._scanState.done++;
       this._renderStatus();
       this._renderGraphEdges();
+    };
+
+    const batchSize = Math.max(1, this._scanBatchSize || DEFAULT_SCAN_BATCH_SIZE);
+    for (let i = 0; i < targets.length; i += batchSize) {
+      const batch = targets.slice(i, i + batchSize);
+      await Promise.all(batch.map(scanOne));
     }
+
     this._scanState.running = false;
     this._saveCachedBindings();
     const summary = [`${okCount} device(s) read`];
@@ -1410,6 +1484,14 @@ class ZhaBindingMapCard extends HTMLElement {
       retryInput.addEventListener("change", () => {
         this._saveRetryCount(retryInput.value);
         retryInput.value = this._retryCount; // reflect the clamped value back
+      });
+    }
+    const batchSizeInput = this._q("#scan-batch-size");
+    if (batchSizeInput) {
+      batchSizeInput.value = this._scanBatchSize;
+      batchSizeInput.addEventListener("change", () => {
+        this._saveScanBatchSize(batchSizeInput.value);
+        batchSizeInput.value = this._scanBatchSize; // reflect the clamped value back
       });
     }
     this._q("#btn-zoom-fit").addEventListener("click", () => this._zoomFit());
@@ -3489,9 +3571,22 @@ const SHELL_HTML = `
     <input id="search" class="search" placeholder="Search devices…">
     <button class="btn" id="btn-refresh-devices" title="Reload device list">⟳ Devices</button>
     <button class="btn btn-primary" id="btn-scan" title="Read current bindings from your Zigbee devices">Scan bindings</button>
-    <button class="btn btn-small" id="btn-rescan-settings" title="Single-device rescan settings">⚙</button>
+    <button class="btn btn-small" id="btn-rescan-settings" title="Scan settings">⚙</button>
   </div>
   <div id="rescan-settings-panel" class="filter-panel">
+    <div class="filter-group">
+      <label class="row" for="scan-batch-size">Devices scanned at once (full network scan)
+        <input type="number" id="scan-batch-size" min="1" max="30" style="width:4em; margin-left:6px;">
+      </label>
+      <p class="hint">Only applies to the full "Scan bindings" network scan — devices are read in concurrent
+        batches of this size rather than one at a time, confirmed via live testing to genuinely overlap rather
+        than just queue behind each other. A larger batch makes it less likely that several sleepy/offline
+        devices happen to land in different batches and each drag their own batch out by ~45 seconds — but
+        bigger isn't free: testing found that batches much above ~10-12 can cause otherwise-healthy devices to
+        occasionally fail to respond (Zigbee airtime/collision contention from that much traffic at once, not
+        a real device problem — retrying individually or rescanning usually succeeds). Increase cautiously and
+        only if you've confirmed it holds up reliably on your own network. Default is ${DEFAULT_SCAN_BATCH_SIZE}.</p>
+    </div>
     <div class="filter-group">
       <label class="row" for="rescan-retry-count">Retries for single-device rescan
         <input type="number" id="rescan-retry-count" min="1" max="10" style="width:4em; margin-left:6px;">

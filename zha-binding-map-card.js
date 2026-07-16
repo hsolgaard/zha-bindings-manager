@@ -22,12 +22,12 @@
  * zha_toolkit MUST be installed (via HACS) and working for bind/unbind/scan
  * to function. See README.md for details.
  *
- * Version: 0.11.2
+ * Version: 0.12.0
  */
 
 /* eslint-disable no-console */
 
-const CARD_VERSION = "0.11.2";
+const CARD_VERSION = "0.12.0";
 // Logged once per script load (not per card instance) so you can confirm
 // which build is actually active straight from the browser console —
 // useful given HACS caches a pre-gzipped copy of this file that can go
@@ -76,6 +76,15 @@ const DEFAULT_BINDABLE_IN_CLUSTERS = [0x0402];
 // default, higher values are available but not necessarily safe for every
 // network.
 const DEFAULT_SCAN_BATCH_SIZE = 10;
+
+// Floor Plan node radius is normally derived from the uploaded image's raw
+// pixel width (see _renderFpNode) so it scales with resolution, but that
+// formula has no idea how large your actual rooms are relative to the
+// image — a lower-resolution blueprint can leave markers looking oversized
+// no matter how well the auto-scaling works. This percentage is a manual
+// multiplier on top of that formula, defaulting to no change (100%), so a
+// blueprint that doesn't fit the assumption can still be dialed down (or up).
+const DEFAULT_FP_MARKER_SCALE = 100;
 
 // Friendly names + rough category for clusters we know how to talk about.
 // Anything not in this table is still usable (shown as "Cluster 0xXXXX").
@@ -751,6 +760,7 @@ class ZhaBindingMapCard extends HTMLElement {
     this._responseHistory = new Map(); // ieee(lower) -> {successMs:[], outcomes:[bool]}
     this._retryCount = DEFAULT_RETRY_COUNT; // single-device rescan only; bulk scan is unaffected
     this._scanBatchSize = DEFAULT_SCAN_BATCH_SIZE; // how many devices _scanBindings reads concurrently
+    this._fpMarkerScale = DEFAULT_FP_MARKER_SCALE; // Floor Plan marker size, % of the auto-computed radius
     this._tableHealthFilter = "all"; // "all" | "problems" | "error" | "warning" | "info"
     this._healthReqId = 0; // guards _ensureHealthData against out-of-order fetches
 
@@ -1034,6 +1044,31 @@ class ZhaBindingMapCard extends HTMLElement {
     }
   }
 
+  // Floor Plan marker size — see DEFAULT_FP_MARKER_SCALE for the reasoning.
+  _fpMarkerScaleStorageKey() {
+    return `zha-binding-map-card:${this._config.id || "default"}:fp-marker-scale`;
+  }
+  _loadFpMarkerScale() {
+    try {
+      const raw = parseInt(localStorage.getItem(this._fpMarkerScaleStorageKey()), 10);
+      this._fpMarkerScale = Number.isFinite(raw) && raw >= 10 ? raw : DEFAULT_FP_MARKER_SCALE;
+    } catch (e) {
+      this._fpMarkerScale = DEFAULT_FP_MARKER_SCALE;
+    }
+    // Same reasoning as _loadRetryCount(): _render() wires the input before
+    // _loadAll() calls this, so the input needs updating here too.
+    const el = this._q("#fp-marker-scale");
+    if (el) el.value = this._fpMarkerScale;
+  }
+  _saveFpMarkerScale(value) {
+    this._fpMarkerScale = clamp(Number(value) || DEFAULT_FP_MARKER_SCALE, 40, 200);
+    try {
+      localStorage.setItem(this._fpMarkerScaleStorageKey(), String(this._fpMarkerScale));
+    } catch (e) {
+      /* ignore quota errors */
+    }
+  }
+
   _setStatus(level, text, timeout = 6000) {
     this._status = { level, text };
     this._renderStatus();
@@ -1055,6 +1090,7 @@ class ZhaBindingMapCard extends HTMLElement {
     this._loadHistory();
     this._loadRetryCount();
     this._loadScanBatchSize();
+    this._loadFpMarkerScale();
     this._loadFloorplan();
     if (this._fpImageUrl) this._loadFpImage(this._fpImageUrl);
     this._setStatus("info", "Loading ZHA devices…", 0);
@@ -1594,6 +1630,15 @@ class ZhaBindingMapCard extends HTMLElement {
     this._q("#btn-fp-zoom-in").addEventListener("click", () => this._fpZoomBy(1.2));
     this._q("#btn-fp-zoom-out").addEventListener("click", () => this._fpZoomBy(1 / 1.2));
     this._q("#btn-fp-zoom-fit").addEventListener("click", () => this._fpZoomFit());
+    const fpMarkerInput = this._q("#fp-marker-scale");
+    if (fpMarkerInput) {
+      fpMarkerInput.value = this._fpMarkerScale;
+      fpMarkerInput.addEventListener("change", () => {
+        this._saveFpMarkerScale(fpMarkerInput.value);
+        fpMarkerInput.value = this._fpMarkerScale; // reflect the clamped value back
+        this._renderFloorplan();
+      });
+    }
     const fpSvg = this._q("#fp-svg");
     fpSvg.addEventListener("wheel", (e) => this._onFpWheel(e), { passive: false });
     fpSvg.addEventListener("pointerdown", (e) => this._onFpSvgPointerDown(e));
@@ -1994,6 +2039,16 @@ class ZhaBindingMapCard extends HTMLElement {
     this._updateEdgePositions();
   }
 
+  /** Matches the radius used in _renderNode() for each node kind, so edges
+   *  can be trimmed back to the actual drawn edge of the icon rather than
+   *  its center — see _updateEdgePositions(). */
+  _nodeRadius(key) {
+    const n = (this._graphNodes || []).find((nn) => nn.key === key);
+    if (!n) return 20;
+    if (n.kind === "group") return 22;
+    return n.isCoordinator ? 26 : 20;
+  }
+
   _updateEdgePositions() {
     if (!this._edgesLayer) return;
     this._edgesLayer.querySelectorAll(".edge").forEach((el) => {
@@ -2009,7 +2064,19 @@ class ZhaBindingMapCard extends HTMLElement {
       const bend = offset * 18;
       const mx = (from.x + to.x) / 2 + nx * bend;
       const my = (from.y + to.y) / 2 + ny * bend;
-      el.setAttribute("d", `M ${from.x} ${from.y} Q ${mx} ${my} ${to.x} ${to.y}`);
+      // Pull the endpoint back from the target's center to just outside its
+      // icon (radius + a small gap), using the curve's actual incoming
+      // direction (control point -> target) rather than the straight
+      // source-to-target line, so the arrowhead lands next to the icon
+      // instead of hidden underneath it — previously the line ran all the
+      // way to dead center, putting marker-end directly behind the circle.
+      const tdx = to.x - mx,
+        tdy = to.y - my;
+      const tdist = Math.hypot(tdx, tdy) || 1;
+      const targetGap = this._nodeRadius(el.dataset.to) + 3;
+      const ex = to.x - (tdx / tdist) * targetGap;
+      const ey = to.y - (tdy / tdist) * targetGap;
+      el.setAttribute("d", `M ${from.x} ${from.y} Q ${mx} ${my} ${ex} ${ey}`);
     });
   }
 
@@ -2842,17 +2909,29 @@ class ZhaBindingMapCard extends HTMLElement {
     this._renderFpUnplacedList();
   }
 
+  /** Base radius auto-derived from the image's raw pixel width, times the
+   *  user's manual marker-size setting (see DEFAULT_FP_MARKER_SCALE) — the
+   *  formula alone has no way to know how large your rooms actually are
+   *  relative to the image, so a lower-resolution blueprint can leave
+   *  markers looking oversized no matter what the formula guesses. */
+  _fpNodeRadius() {
+    if (!this._fpImageSize) return 20;
+    const base = clamp(this._fpImageSize.w * 0.012, 14, 34);
+    return base * ((this._fpMarkerScale || DEFAULT_FP_MARKER_SCALE) / 100);
+  }
+
   _renderFpNode(ieee) {
     const d = this._devices.find((dd) => dd.ieee === ieee);
     const frac = this._fpPositions[ieee];
     if (!d || !frac || !this._fpImageSize) return;
     const x = frac.x * this._fpImageSize.w;
     const y = frac.y * this._fpImageSize.h;
-    const r = clamp(this._fpImageSize.w * 0.012, 14, 34);
+    const r = this._fpNodeRadius();
     const g = this._svgEl("g", { class: "node fp-node", "data-key": ieee, transform: `translate(${x},${y})` });
     const circle = this._svgEl("circle", { r, class: "node-shape node-device" });
     g.appendChild(circle);
     const icon = this._svgEl("text", { class: "node-icon", "text-anchor": "middle", dy: "0.35em" });
+    icon.setAttribute("style", `font-size:${Math.round(r * 0.9)}px`);
     icon.textContent = this._deviceIcon(d);
     g.appendChild(icon);
     const label = this._svgEl("text", { class: "node-label", y: r + 15 });
@@ -2896,6 +2975,9 @@ class ZhaBindingMapCard extends HTMLElement {
 
   _updateFpEdgePositions() {
     if (!this._fpEdgesLayer || !this._fpImageSize) return;
+    // Matches _renderFpNode()'s radius (including the manual marker-size
+    // setting) so the trim below lines up with the actual drawn circle.
+    const nodeRadius = this._fpNodeRadius();
     this._fpEdgesLayer.querySelectorAll(".edge").forEach((el) => {
       const fromFrac = this._fpPositions[el.dataset.from];
       const toFrac = this._fpPositions[el.dataset.to];
@@ -2911,7 +2993,16 @@ class ZhaBindingMapCard extends HTMLElement {
       const bend = offset * 18;
       const mx = (from.x + to.x) / 2 + nx * bend;
       const my = (from.y + to.y) / 2 + ny * bend;
-      el.setAttribute("d", `M ${from.x} ${from.y} Q ${mx} ${my} ${to.x} ${to.y}`);
+      // Same fix as the Map view: pull the endpoint back to just outside the
+      // target icon along the curve's actual incoming direction, so the
+      // arrowhead is visible next to the icon instead of hidden under it.
+      const tdx = to.x - mx,
+        tdy = to.y - my;
+      const tdist = Math.hypot(tdx, tdy) || 1;
+      const targetGap = nodeRadius + 3;
+      const ex = to.x - (tdx / tdist) * targetGap;
+      const ey = to.y - (tdy / tdist) * targetGap;
+      el.setAttribute("d", `M ${from.x} ${from.y} Q ${mx} ${my} ${ex} ${ey}`);
     });
   }
 
@@ -3698,6 +3789,9 @@ const SHELL_HTML = `
       <button class="btn btn-small" id="btn-fp-zoom-out">－</button>
       <button class="btn btn-small" id="btn-fp-zoom-fit">Fit</button>
       <button class="btn btn-small" id="btn-fp-zoom-in">＋</button>
+      <label class="row fp-marker-row" for="fp-marker-scale" title="Scales device markers independently of image resolution — useful when a lower-resolution floor plan leaves markers looking oversized.">Marker size
+        <input type="number" id="fp-marker-scale" min="40" max="200" step="10" style="width:4.5em; margin-left:6px;">%
+      </label>
     </div>
     <div class="floorplan-layout">
       <div class="fp-sidebar">
@@ -3839,6 +3933,17 @@ const STYLE = `
 .node.drop-target .node-shape { filter: drop-shadow(0 0 6px var(--primary-color)); stroke: var(--primary-color); }
 .node-icon { font-size: 18px; pointer-events:none; }
 .node-label { font-size: 11px; text-anchor: middle; fill: var(--primary-text-color); pointer-events:none; }
+/* Floor Plan labels sit on an arbitrary uploaded image, not the card's own
+   background, so trusting the theme's text color (as the Map view safely
+   does) can go invisible — e.g. dark theme = light text, sitting on a white
+   blueprint. A halo outline in the card's background color keeps the label
+   readable against light or dark image content either way. */
+.fp-node .node-label {
+  paint-order: stroke;
+  stroke: var(--card-background-color, #fff);
+  stroke-width: 3px;
+  stroke-linejoin: round;
+}
 .edge { stroke-width: 2.5; cursor:pointer; opacity: 0.85; }
 .edge:hover { stroke-width: 4; opacity: 1; }
 .table-filter-info { display:flex; align-items:center; gap:10px; margin-bottom:8px; padding:6px 10px;

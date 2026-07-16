@@ -2,6 +2,45 @@
 
 All notable changes to ZHA Bindings Manager are documented here.
 
+
+## [0.12.0] — 17 July 2026
+
+### Added
+
+
+- A "Marker size" setting on the Floor Plan tab (next to the zoom
+controls), a percentage that scales device markers independently of the
+uploaded image's resolution. Markers were previously sized purely from the
+image's raw pixel width, which has no idea how large your actual rooms
+are relative to the image — a lower-resolution blueprint could leave
+markers looking oversized no matter what the auto-scaling guessed.
+Defaults to 100% (no change from before).
+
+
+### Fixed
+
+
+- Floor Plan device labels could become invisible depending on your
+Home Assistant theme and the floor plan image's colors — e.g. a dark
+theme renders label text in a light color, which disappears against a
+white or light-colored blueprint. Labels on the Floor Plan tab now have a
+halo outline in the card's background color, so they stay legible against
+the uploaded image regardless of theme or image color. (The Map view's
+labels are unaffected — they already sit on the card's own background,
+not an arbitrary image, so the original theme-based color there is fine.)
+
+
+## [0.11.3] — 16 July 2026
+
+### Fixed
+
+
+- The arrowhead on a binding line was hidden behind the target device's
+icon, since the line was drawn all the way to the exact center of the
+target node, putting the arrowhead directly underneath the circle. Lines
+(on both the Map and Floor Plan views) now stop just outside the target
+icon's edge instead, so the arrowhead is actually visible next to it.
+
 ## [0.11.2] — 16 July 2026
 
 ### Changed

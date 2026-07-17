@@ -22,12 +22,12 @@
  * zha_toolkit MUST be installed (via HACS) and working for bind/unbind/scan
  * to function. See README.md for details.
  *
- * Version: 0.14.1
+ * Version: 0.15.0
  */
 
 /* eslint-disable no-console */
 
-const CARD_VERSION = "0.14.1";
+const CARD_VERSION = "0.15.0";
 // Logged once per script load (not per card instance) so you can confirm
 // which build is actually active straight from the browser console —
 // useful given HACS caches a pre-gzipped copy of this file that can go
@@ -270,6 +270,17 @@ function clusterColor(id) {
 }
 function hex4(n) {
   return `0x${Number(n).toString(16).padStart(4, "0")}`;
+}
+/** Parses a manually-typed cluster ID (Advanced tab's "Custom cluster ID"
+ *  field) — accepts "0x0000"/"0x6" style hex or a plain decimal number.
+ *  Returns null for anything that isn't a valid 0..0xFFFF cluster id,
+ *  rather than throwing, so callers can just check for null. */
+function parseClusterIdInput(raw) {
+  const s = (raw || "").trim();
+  if (!s) return null;
+  const n = /^0x/i.test(s) ? parseInt(s, 16) : Number(s);
+  if (!Number.isInteger(n) || n < 0 || n > 0xffff) return null;
+  return n;
 }
 function normIeee(ieee) {
   return (ieee || "").toLowerCase();
@@ -3367,6 +3378,14 @@ class ZhaBindingMapCard extends HTMLElement {
           <label>Cluster
             <select id="adv-cluster"><option value="">— zha-toolkit default —</option></select>
           </label>
+          <label id="adv-cluster-custom-wrap" style="display:none">Custom cluster ID
+            <input type="text" id="adv-cluster-custom" placeholder="e.g. 0x0000 or 0">
+          </label>
+          <p id="adv-cluster-custom-hint" class="hint" style="display:none">Expert option. Most devices don't
+            expose this cluster for binding, that's why it's not in the list above — an accepted bind doesn't
+            guarantee the device will actually behave as expected. This binding also won't appear on the Map/Floor
+            Plan graphs by default, since it isn't a normal output cluster on this device, enable "Show
+            reporting-only bindings" there to see it.</p>
           <div class="dialog-actions">
             <button class="btn btn-primary" id="adv-bind">Bind</button>
             <button class="btn btn-danger" id="adv-unbind">Unbind</button>
@@ -3395,9 +3414,15 @@ class ZhaBindingMapCard extends HTMLElement {
     });
     this._q("#adv-target-device").addEventListener("change", () => this._advPopulateTargetEndpoints());
     this._q("#adv-dst-ep").addEventListener("change", () => this._advRenderTargetBindings());
+    this._q("#adv-cluster").addEventListener("change", () => this._advUpdateCustomClusterState());
+    this._q("#adv-cluster-custom").addEventListener("input", () => this._advUpdateCustomClusterState());
 
     const getClusterIds = () => {
       const v = this._q("#adv-cluster").value;
+      if (v === "__custom__") {
+        const n = parseClusterIdInput(this._q("#adv-cluster-custom").value);
+        return n == null ? [] : [n];
+      }
       return v === "" ? [] : [Number(v)];
     };
     const getOpts = () => {
@@ -3635,7 +3660,12 @@ class ZhaBindingMapCard extends HTMLElement {
     this._advRenderTargetBindings();
   }
 
-  /** Cluster dropdown = the selected source endpoint's OUTPUT clusters (the only clusters a bind can legally reference). */
+  /** Cluster dropdown = the selected source endpoint's OUTPUT clusters (the
+   *  only clusters a bind can normally reference), plus a "Custom cluster
+   *  ID…" escape hatch for edge cases like an IKEA controller's
+   *  genBasic/0x0000 group-binding trick, which zha_toolkit's bind_group
+   *  will happily attempt even though it's not a normal output cluster —
+   *  see _advUpdateCustomClusterState(). */
   _advPopulateClusterOptions() {
     const clusterSel = this._q("#adv-cluster");
     const ieee = this._q("#adv-source").value;
@@ -3643,10 +3673,31 @@ class ZhaBindingMapCard extends HTMLElement {
     if (!clusterSel) return;
     const clusters = this._clusterCache.get(ieee) || [];
     const outClusters = uniqueClusters(clusters.filter((c) => c.type === "out" && c.endpoint_id === ep));
-    const opts = [`<option value="">— zha-toolkit default —</option>`].concat(
-      outClusters.map((c) => `<option value="${c.id}">${escapeHtml(clusterName(c.id))} (${hex4(c.id)})</option>`)
-    );
+    const opts = [`<option value="">— zha-toolkit default —</option>`]
+      .concat(outClusters.map((c) => `<option value="${c.id}">${escapeHtml(clusterName(c.id))} (${hex4(c.id)})</option>`))
+      .concat([`<option value="__custom__">Custom cluster ID…</option>`]);
     clusterSel.innerHTML = opts.join("");
+    // A custom cluster picked for a different endpoint/device likely doesn't
+    // apply here — reset rather than carry stale state across selections.
+    const customInput = this._q("#adv-cluster-custom");
+    if (customInput) customInput.value = "";
+    this._advUpdateCustomClusterState();
+  }
+
+  /** Shows/hides the custom-cluster input + warning based on the dropdown
+   *  selection, and disables Bind/Unbind while a custom cluster is selected
+   *  but not yet a valid id — see parseClusterIdInput(). */
+  _advUpdateCustomClusterState() {
+    const isCustom = this._q("#adv-cluster").value === "__custom__";
+    const wrap = this._q("#adv-cluster-custom-wrap");
+    const hint = this._q("#adv-cluster-custom-hint");
+    if (wrap) wrap.style.display = isCustom ? "" : "none";
+    if (hint) hint.style.display = isCustom ? "" : "none";
+    const valid = !isCustom || parseClusterIdInput(this._q("#adv-cluster-custom").value) != null;
+    const bindBtn = this._q("#adv-bind");
+    const unbindBtn = this._q("#adv-unbind");
+    if (bindBtn) bindBtn.disabled = !valid;
+    if (unbindBtn) unbindBtn.disabled = !valid;
   }
 
   _advRenderSourceBindings() {

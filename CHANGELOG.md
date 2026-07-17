@@ -2,6 +2,25 @@
 
 All notable changes to ZHA Bindings Manager are documented here.
 
+## [0.15.0] — 17 July 2026
+
+### Added
+
+- **A "Custom cluster ID…" option in the Advanced tab's Cluster dropdown**,
+  for binding a cluster the source device doesn't declare as an output
+  cluster — the normal dropdown only offers clusters the device itself
+  advertises as bindable, which is correct for standard Zigbee behaviour
+  but blocks legitimate manufacturer-specific tricks, e.g. reports of some
+  IKEA controllers sending all commands to a group once bound on their
+  Basic cluster (0x0000) and nothing else, a firmware-specific quirk, not
+  standard binding behaviour. Selecting it reveals a text field (accepts
+  `0x0000` or plain `0`), with a warning that an accepted bind doesn't
+  guarantee the device will actually behave as expected, and that this
+  binding won't appear on the Map/Floor Plan graphs by default since it
+  isn't a normal output cluster (see "Show reporting-only bindings" from
+  the last two releases). Bind/Unbind are disabled while a custom cluster
+  is selected but not yet a valid id. No changes to the normal dropdown,
+  to zha_toolkit's bind/unbind calls, or to any other tab.
 
 ## [0.14.1] — 17 July 2026
 

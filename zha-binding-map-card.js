@@ -22,12 +22,12 @@
  * zha_toolkit MUST be installed (via HACS) and working for bind/unbind/scan
  * to function. See README.md for details.
  *
- * Version: 0.12.0
+ * Version: 0.14.1
  */
 
 /* eslint-disable no-console */
 
-const CARD_VERSION = "0.12.0";
+const CARD_VERSION = "0.14.1";
 // Logged once per script load (not per card instance) so you can confirm
 // which build is actually active straight from the browser console —
 // useful given HACS caches a pre-gzipped copy of this file that can go
@@ -42,6 +42,12 @@ const ZTK_DOMAIN = "zha_toolkit";
 
 // Clusters zha-toolkit binds by default when no explicit cluster is given.
 const DEFAULT_BINDABLE_OUT_CLUSTERS = [0x0005, 0x0006, 0x0008, 0x0102, 0x0300];
+
+// Stroke color for synthetic group -> member edges (see _membershipEdges).
+// Matches .node-group's own color so a membership edge visually reads as
+// "coming from a group" — deliberately not a cluster color, since these
+// edges aren't sourced from any single cluster's binding.
+const MEMBERSHIP_EDGE_COLOR = "#8e24aa";
 
 // How many recent binds_get attempts we remember per device for the learned
 // response-time/outcome history (see _recordScanOutcome).
@@ -380,23 +386,14 @@ class ZhaApi {
     });
   }
 
-  async bindDeviceToGroup(sourceIeee, groupId, clusters) {
-    return this.hass.callWS({
-      type: "zha/groups/bind",
-      source_ieee: sourceIeee,
-      group_id: groupId,
-      bindings: clusters,
-    });
-  }
-
-  async unbindDeviceFromGroup(sourceIeee, groupId, clusters) {
-    return this.hass.callWS({
-      type: "zha/groups/unbind",
-      source_ieee: sourceIeee,
-      group_id: groupId,
-      bindings: clusters,
-    });
-  }
+  // Native HA's zha/groups/bind and zha/groups/unbind websocket commands
+  // used to live here (bindDeviceToGroup/unbindDeviceFromGroup). Removed —
+  // bindDeviceToGroup had zero callers, and unbindDeviceFromGroup was the
+  // confirmed root cause of "still on the device after rescanning" on group
+  // unbinds (Hans tested zha_toolkit's unbind_group directly and it worked
+  // immediately, while this native path kept failing). unbindGroup() below,
+  // which goes through zha_toolkit like every other bind/unbind action in
+  // this card, replaced its one real caller.
 
   /** Calls a zha_toolkit service and returns the event_data response object.
    *  On any failure, logs the full request + raw response to the browser
@@ -727,6 +724,7 @@ class ZhaBindingMapCard extends HTMLElement {
       unbound: true,
       groups: true,
       hideCoordinatorBindings: true, // most devices auto-bind reporting clusters to the coordinator; that's rarely what you're trying to audit
+      showReportingBindings: false, // real bindings a device uses to report its own state (e.g. to a group it belongs to) rather than to control anything — see _isControlBinding()
       search: "",
       types: new Set(), // entity-domain filter, e.g. "light", "switch" — empty = show all
       manufacturers: new Set(), // empty = show all
@@ -790,7 +788,7 @@ class ZhaBindingMapCard extends HTMLElement {
     try {
       const raw = JSON.parse(localStorage.getItem(this._filtersStorageKey()) || "null");
       if (!raw) return;
-      ["coordinator", "routers", "endDevices", "unbound", "groups", "hideCoordinatorBindings"].forEach((k) => {
+      ["coordinator", "routers", "endDevices", "unbound", "groups", "hideCoordinatorBindings", "showReportingBindings"].forEach((k) => {
         if (typeof raw[k] === "boolean") this._filters[k] = raw[k];
       });
       if (Array.isArray(raw.types)) this._filters.types = new Set(raw.types);
@@ -812,6 +810,7 @@ class ZhaBindingMapCard extends HTMLElement {
           unbound: f.unbound,
           groups: f.groups,
           hideCoordinatorBindings: f.hideCoordinatorBindings,
+          showReportingBindings: f.showReportingBindings,
           types: [...f.types],
           manufacturers: [...f.manufacturers],
           areas: [...f.areas],
@@ -1280,6 +1279,70 @@ class ZhaBindingMapCard extends HTMLElement {
     return raw;
   }
 
+  /** True if binding `b` is something its source device can genuinely use to
+   *  control the target — i.e. `b.clusterId` is registered as an "out"
+   *  (client) cluster on the source device's source endpoint. A device can
+   *  hold a perfectly real binding-table entry on a cluster it only exposes
+   *  as "in" (server) too — e.g. a light bound to a group it belongs to on
+   *  its own OnOff cluster — but that entry is the device reporting its own
+   *  state outward, not controlling anything, since an "in" cluster is what
+   *  *receives* commands. Confirmed via a real device's binds_get output
+   *  (light bound to two groups on cluster 6, which it only serves).
+   *  Requires this device's cluster list to already be cached — see
+   *  _ensureHealthData(). Until that data arrives, treats the binding as
+   *  control-type (never hidden) rather than guessing. */
+  _isControlBinding(b) {
+    const clusters = this._clusterCache.get(b.sourceIeee);
+    if (!clusters) return true;
+    return clusters.some(
+      (c) => c.type === "out" && c.endpoint_id === b.sourceEndpoint && c.id === b.clusterId
+    );
+  }
+
+  /** Bindings drawn on the Map/Floor Plan graphs specifically. Starts from
+   *  _allBindings() (still respects the coordinator-hide toggle) and, unless
+   *  "Show reporting-only bindings" is on, additionally drops reporting-type
+   *  bindings (see _isControlBinding) so the graph reads as a control map —
+   *  "who's controlled by what" — rather than mixing in real-but-unrelated
+   *  state-reporting traffic. The Bindings tab and exports intentionally stay
+   *  on _allBindings()/_rawBindings() so the full scanned data is always
+   *  auditable there regardless of this toggle. */
+  _graphBindings() {
+    const all = this._allBindings();
+    if (this._filters.showReportingBindings) return all;
+    return all.filter((b) => this._isControlBinding(b));
+  }
+
+  /** Synthetic group -> member edges, sourced entirely from real ZCL group
+   *  membership data (zha/groups' own `members` list — already fetched by
+   *  fetchGroups() and cached in this._groups, no extra API call needed).
+   *  This is a genuinely separate real fact from a binding-table entry: a
+   *  device that's a group member receives that group's commands without
+   *  needing any binding at all, which is exactly the "who's controlled"
+   *  relationship a switch -> group binding alone doesn't show. Drawn with
+   *  the same visual weight as a real control binding (see _renderGraphEdges)
+   *  so switch -> group -> member reads as one continuous path, even though
+   *  the two halves come from different real mechanisms. Not a binding, so
+   *  never affected by the control/reporting split above and never shown in
+   *  the Bindings tab (which is real binding-table data only). */
+  _membershipEdges() {
+    const out = [];
+    (this._groups || []).forEach((g) => {
+      (g.members || []).forEach((m) => {
+        const ieee = normIeee(m.device && m.device.ieee);
+        if (!ieee) return;
+        out.push({
+          id: `member:${g.group_id}:${ieee}:${m.endpoint_id}`,
+          isMembership: true,
+          groupId: g.group_id,
+          memberIeee: ieee,
+          memberEndpoint: m.endpoint_id,
+        });
+      });
+    });
+    return out;
+  }
+
   // -------------------------------------------------------------------
   // Binding Health — structural validation of bindings (see project spec).
   // Deliberately checks structure only: does the source/target/endpoint/
@@ -1290,8 +1353,10 @@ class ZhaBindingMapCard extends HTMLElement {
 
   /** Fetches endpoint/cluster metadata (cheap local ZHA reads, not a Zigbee
    *  radio operation) for every device referenced by a binding, so Rules 2/3
-   *  (missing endpoint / missing cluster) can be evaluated. Safe to call
-   *  often — _ensureClusters() is a no-op for anything already cached. */
+   *  (missing endpoint / missing cluster) can be evaluated, and so
+   *  _isControlBinding() can tell control bindings from reporting ones on
+   *  the Map/Floor Plan graphs. Safe to call often — _ensureClusters() is a
+   *  no-op for anything already cached. */
   async _ensureHealthData() {
     const reqId = (this._healthReqId = this._healthReqId + 1);
     const ieees = new Set();
@@ -1305,7 +1370,11 @@ class ZhaBindingMapCard extends HTMLElement {
     if (!toFetch.length) return;
     await Promise.all(toFetch.map((ieee) => this._ensureClusters(ieee).catch(() => {})));
     if (reqId !== this._healthReqId) return; // a newer bindings set has since superseded this fetch
+    // Newly-cached cluster data can change which bindings _graphBindings()
+    // hides, so the graph/floor plan need a redraw too, not just the table.
     if (this._view === "table") this._renderTable();
+    if (this._view === "graph") this._renderGraph();
+    if (this._view === "floorplan") this._renderFloorplan();
   }
 
   /** Health for every currently-scanned binding, keyed by binding id. Computed
@@ -1558,7 +1627,7 @@ class ZhaBindingMapCard extends HTMLElement {
       this._renderTable();
     });
 
-    ["coordinator", "routers", "endDevices", "unbound", "groups", "hideCoordinatorBindings"].forEach((key) => {
+    ["coordinator", "routers", "endDevices", "unbound", "groups", "hideCoordinatorBindings", "showReportingBindings"].forEach((key) => {
       const el = this._q(`#f-${key}`);
       el.checked = this._filters[key];
       el.addEventListener("change", () => {
@@ -1703,9 +1772,13 @@ class ZhaBindingMapCard extends HTMLElement {
         if (d.device_type === "EndDevice" && !this._filters.endDevices) return false;
       }
       if (!this._filters.unbound) {
+        // A device with no real binding-table entry at all can still be a
+        // genuine group member (see _membershipEdges) — that's a real
+        // relationship worth showing, so it counts as "bound" here too.
         const hasBindings =
           (this._bindings.get(d.ieee) || []).length > 0 ||
-          this._allBindings().some((b) => b.targetIeee === d.ieee);
+          this._allBindings().some((b) => b.targetIeee === d.ieee) ||
+          this._membershipEdges().some((m) => m.memberIeee === d.ieee);
         if (!hasBindings) return false;
       }
       if (this._filters.types.size) {
@@ -1916,6 +1989,10 @@ class ZhaBindingMapCard extends HTMLElement {
     const svg = this._q("#graph-svg");
     const empty = this._q("#graph-empty");
     if (!svg) return;
+    // Fire-and-forget: fetches source-device cluster metadata needed for
+    // _isControlBinding() and re-renders once done. No-ops instantly if
+    // everything's already cached (see _ensureHealthData()).
+    this._ensureHealthData();
     if (!this._loaded) {
       empty.style.display = "flex";
       empty.textContent = "Loading devices…";
@@ -2004,7 +2081,7 @@ class ZhaBindingMapCard extends HTMLElement {
   _renderGraphEdges() {
     if (!this._edgesLayer) return;
     while (this._edgesLayer.firstChild) this._edgesLayer.removeChild(this._edgesLayer.firstChild);
-    const bindings = this._allBindings();
+    const bindings = this._graphBindings();
     const visibleKeys = new Set((this._graphNodes || []).map((n) => n.key));
 
     // group parallel edges between the same pair so they fan out a little
@@ -2019,8 +2096,9 @@ class ZhaBindingMapCard extends HTMLElement {
       const idx = pairCount.get(pairKey) || 0;
       pairCount.set(pairKey, idx + 1);
 
+      const isControl = this._isControlBinding(b);
       const line = this._svgEl("path", {
-        class: "edge",
+        class: isControl ? "edge" : "edge edge-reporting",
         "data-id": b.id,
         "data-from": fromKey,
         "data-to": toKey,
@@ -2033,6 +2111,36 @@ class ZhaBindingMapCard extends HTMLElement {
       line.addEventListener("click", (e) => {
         e.stopPropagation();
         this._onEdgeClick(b);
+      });
+      this._edgesLayer.appendChild(line);
+    });
+
+    // Group -> member edges, from real group membership data (see
+    // _membershipEdges) — drawn with the same weight as a control binding
+    // so switch -> group -> member reads as one continuous path.
+    this._membershipEdges().forEach((m) => {
+      const fromKey = this._groupNodeKey(m.groupId);
+      const toKey = this._nodeKey(m.memberIeee);
+      if (!visibleKeys.has(fromKey) || !visibleKeys.has(toKey)) return;
+
+      const pairKey = `${fromKey}->${toKey}`;
+      const idx = pairCount.get(pairKey) || 0;
+      pairCount.set(pairKey, idx + 1);
+
+      const line = this._svgEl("path", {
+        class: "edge edge-membership",
+        "data-id": m.id,
+        "data-from": fromKey,
+        "data-to": toKey,
+        "data-offset": idx,
+        stroke: MEMBERSHIP_EDGE_COLOR,
+        fill: "none",
+        "marker-end": "url(#arrow)",
+      });
+      line.style.setProperty("--edge-color", MEMBERSHIP_EDGE_COLOR);
+      line.addEventListener("click", (e) => {
+        e.stopPropagation();
+        this._onMembershipEdgeClick(m);
       });
       this._edgesLayer.appendChild(line);
     });
@@ -2237,6 +2345,41 @@ class ZhaBindingMapCard extends HTMLElement {
     this._openUnbindPopover(binding);
   }
 
+  _onMembershipEdgeClick(m) {
+    this._openMembershipPopover(m);
+  }
+
+  /** Read-only info for a group -> member edge (see _membershipEdges). No
+   *  "remove" action here deliberately — that would mean sending a real
+   *  remove_from_group zha_toolkit call, and its exact parameters haven't
+   *  been verified against zha_toolkit's source the way every other action
+   *  in this card has been (see bind_group/unbind_group). Rather than guess
+   *  at an action that sends a real Zigbee command, this points you to
+   *  ZHA's own group management UI, which already does this reliably. */
+  _openMembershipPopover(m) {
+    const group = (this._groups || []).find((g) => g.group_id === m.groupId);
+    const device = this._devices.find((d) => normIeee(d.ieee) === m.memberIeee);
+    const groupLabel = group ? group.name || `Group ${m.groupId}` : `Group ${m.groupId}`;
+    const deviceLabel = device ? this._deviceLabel(device) : m.memberIeee;
+    this._q("#dialog-title").textContent = "Group membership";
+    this._q("#dialog-body").innerHTML = `
+      <table class="detail-table">
+        <tr><td>Group</td><td>${escapeHtml(groupLabel)}</td></tr>
+        <tr><td>Member</td><td>${escapeHtml(deviceLabel)} (ep ${m.memberEndpoint})</td></tr>
+      </table>
+      <p class="hint">This isn't a binding-table entry — it's real ZCL group
+        membership, sourced from ZHA's own group data. The member receives
+        this group's commands without needing any binding of its own. To
+        change group membership, use Home Assistant's own group management
+        (Settings &rarr; Devices &amp; Services &rarr; Zigbee Home
+        Automation &rarr; Groups) — this card doesn't offer a "remove from
+        group" action yet.</p>
+      <div class="dialog-actions">
+        <button class="btn" id="unbind-cancel">Close</button>
+      </div>`;
+    this._q("#dialog").classList.add("open");
+    this._q("#unbind-cancel").addEventListener("click", () => this._closeDialog());
+  }
 
   _closeDialog() {
     this._q("#dialog").classList.remove("open");
@@ -2261,6 +2404,7 @@ class ZhaBindingMapCard extends HTMLElement {
       ? this._deviceLabel(target)
       : binding.targetIeee;
 
+    const isControl = this._isControlBinding(binding);
     this._q("#dialog-body").innerHTML = `
       <table class="detail-table">
         <tr><td>Source</td><td>${escapeHtml(sourceLabel)} (ep ${binding.sourceEndpoint})</td></tr>
@@ -2268,6 +2412,11 @@ class ZhaBindingMapCard extends HTMLElement {
       binding.isGroup ? "" : ` (ep ${binding.targetEndpoint})`
     }</td></tr>
         <tr><td>Cluster</td><td>${clusterName(binding.clusterId)} (${hex4(binding.clusterId)})</td></tr>
+        <tr><td>Type</td><td>${
+          isControl
+            ? "Control &mdash; the source uses this to command the target"
+            : "Reporting &mdash; the source uses this to report its own state; not a control relationship"
+        }</td></tr>
       </table>
       <div class="dialog-actions">
         <button class="btn btn-danger" id="unbind-confirm">Remove binding</button>
@@ -2287,9 +2436,15 @@ class ZhaBindingMapCard extends HTMLElement {
         : this._impactedIeees(binding.sourceIeee, binding.targetIeee);
       try {
         if (binding.isGroup) {
-          await this._api.unbindDeviceFromGroup(binding.sourceIeee, binding.groupId, [
-            { id: binding.clusterId, endpoint_id: binding.sourceEndpoint },
-          ]);
+          // Real zha_toolkit unbind_group service — confirmed working both
+          // here and via the Advanced tab. Previously called native HA's
+          // zha/groups/unbind websocket command instead (unbindDeviceFromGroup),
+          // which is what was actually causing "still on the device after
+          // rescanning" — confirmed by Hans testing unbind_group directly in
+          // Developer Tools while the button here kept failing.
+          await this._api.unbindGroup(binding.sourceIeee, binding.groupId, [binding.clusterId], {
+            endpoint: binding.sourceEndpoint,
+          });
         } else {
           await this._api.unbindIeee(binding.sourceIeee, binding.targetIeee, [binding.clusterId], {
             endpoint: binding.sourceEndpoint,
@@ -2857,6 +3012,9 @@ class ZhaBindingMapCard extends HTMLElement {
     const svg = this._q("#fp-svg");
     const empty = this._q("#fp-empty");
     if (!svg) return;
+    // See _renderGraph() — same fire-and-forget cluster-metadata fetch, so
+    // _isControlBinding() has what it needs to filter this view's edges too.
+    this._ensureHealthData();
     const urlInput = this._q("#fp-image-url");
     if (urlInput && document.activeElement !== urlInput) urlInput.value = this._fpImageUrl || "";
 
@@ -2946,7 +3104,7 @@ class ZhaBindingMapCard extends HTMLElement {
     if (!this._fpEdgesLayer) return;
     while (this._fpEdgesLayer.firstChild) this._fpEdgesLayer.removeChild(this._fpEdgesLayer.firstChild);
     const placedSet = new Set(placedIeees);
-    const bindings = this._allBindings().filter(
+    const bindings = this._graphBindings().filter(
       (b) => !b.isGroup && placedSet.has(b.sourceIeee) && placedSet.has(b.targetIeee)
     );
     const pairCount = new Map();
@@ -2954,8 +3112,9 @@ class ZhaBindingMapCard extends HTMLElement {
       const pairKey = `${b.sourceIeee}->${b.targetIeee}`;
       const idx = pairCount.get(pairKey) || 0;
       pairCount.set(pairKey, idx + 1);
+      const isControl = this._isControlBinding(b);
       const line = this._svgEl("path", {
-        class: "edge",
+        class: isControl ? "edge" : "edge edge-reporting",
         "data-id": b.id,
         "data-from": b.sourceIeee,
         "data-to": b.targetIeee,
@@ -3698,6 +3857,7 @@ const SHELL_HTML = `
       <label class="row"><input type="checkbox" id="f-groups"> Groups</label>
       <label class="row"><input type="checkbox" id="f-unbound"> Unbound devices</label>
       <label class="row" title="Also filters the Bindings tab, not just this Map view"><input type="checkbox" id="f-hideCoordinatorBindings" checked> Hide coordinator bindings (Map &amp; Bindings tab)</label>
+      <label class="row" title="Some real bindings are a device reporting its own state (e.g. a light reporting to a group it belongs to) rather than controlling anything. These are hidden here by default so the map reads as &quot;who controls what&quot; — they're still real and still shown in full on the Bindings tab."><input type="checkbox" id="f-showReportingBindings"> Show reporting-only bindings (Map only)</label>
       <span class="spacer"></span>
       <span id="scan-info" class="scan-info muted"></span>
       <button class="btn btn-small" id="btn-filters">Filters ▾</button>
@@ -3946,6 +4106,11 @@ const STYLE = `
 }
 .edge { stroke-width: 2.5; cursor:pointer; opacity: 0.85; }
 .edge:hover { stroke-width: 4; opacity: 1; }
+/* Reporting-type bindings (see _isControlBinding) — only ever drawn when
+   "Show reporting-only bindings" is on, so they need to read as secondary
+   background info rather than compete with real control arrows. */
+.edge-reporting { stroke-width: 1.2; stroke-dasharray: 4,3; opacity: 0.45; }
+.edge-reporting:hover { stroke-width: 2; opacity: 0.8; }
 .table-filter-info { display:flex; align-items:center; gap:10px; margin-bottom:8px; padding:6px 10px;
   border-radius:8px; background: rgba(76,154,255,0.12); font-size:0.85em; }
 .table-toolbar { display:flex; align-items:center; gap:8px; margin-bottom:8px; font-size:0.85em; flex-wrap:wrap; }

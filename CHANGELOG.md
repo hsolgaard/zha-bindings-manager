@@ -3,6 +3,75 @@
 All notable changes to ZHA Bindings Manager are documented here.
 
 
+## [0.14.1] — 17 July 2026
+
+### Fixed
+
+- **Removing a device-to-group binding from the graph or table ("Remove
+  binding") could report "Unbind failed — this binding is still on the
+  device after rescanning" even though nothing was actually wrong with the
+  binding itself.** Root cause: that button called native Home Assistant's
+  `zha/groups/unbind` websocket command, a different, separate mechanism
+  from zha_toolkit that the rest of this card doesn't otherwise use — while
+  the Advanced tab's group-unbind (which has always worked) goes through
+  zha_toolkit's own `unbind_group` service instead. Confirmed by testing
+  `zha_toolkit.unbind_group` directly in Developer Tools against a real
+  binding that the in-app button couldn't remove: it worked immediately.
+  The button now calls `unbind_group` too, the same path already proven
+  reliable elsewhere in the card. Also removed `bindDeviceToGroup` and
+  `unbindDeviceFromGroup`, the two native-websocket API methods behind this
+  — the first had no callers left anywhere, and the second's only caller
+  was this bug.
+
+## [0.14.0] — 17 July 2026
+
+### Added
+
+- **The Map view now draws a group &rarr; member arrow for every device in a
+  Zigbee group**, sourced entirely from real ZCL group membership data
+  (`zha/groups`' own member list — already fetched, no new API call). This
+  is a genuinely separate real fact from a binding: a group member receives
+  that group's commands without needing any binding-table entry at all,
+  which is exactly the relationship a switch &rarr; group binding alone
+  doesn't show. It's drawn with the same solid, bold weight as a real
+  control binding, so a switch bound to a group with lights in it now reads
+  as one continuous switch &rarr; group &rarr; light path, even though the
+  two halves come from different real mechanisms (a binding, then group
+  membership). Click one for group/member details. There's no "remove from
+  group" action from this edge yet &mdash; that would need a verified
+  zha_toolkit `remove_from_group` call, which hasn't been confirmed against
+  source the way every other action in this card has been, so it points to
+  ZHA's own group management UI instead for now. Group-membership edges
+  aren't shown on the Floor Plan tab, which doesn't place group nodes at
+  all today.
+
+## [0.13.0] — 17 July 2026
+
+### Added
+
+- **Reporting-type bindings are now told apart from control bindings, and
+  hidden from the Map/Floor Plan graphs by default.** Prompted by a real
+  case: a light added to a Zigbee group through native ZHA's own group UI
+  turned out to have a genuine binding-table entry pointing back at the
+  group (confirmed via a live `binds_get` read), which the graph correctly
+  drew as an arrow — but that arrow made it look like the light was
+  "controlling" the group, which isn't what it's for and isn't what this
+  tool is meant to show. A binding is now classified as control-type only
+  if its cluster is registered as an "out" (client) cluster on the source
+  device's endpoint — the same in/out distinction the Advanced tab's
+  cluster dropdown already relies on. Bindings that only exist on an "in"
+  (server) cluster represent the device reporting its own state outward,
+  not controlling anything, and are hidden from the graph by default. A new
+  "Show reporting-only bindings (Map only)" checkbox reveals them again,
+  drawn thin, dashed, and muted so they read as background information
+  rather than competing with real control arrows. The Bindings tab and all
+  exports are unaffected — they always show the complete raw scanned data
+  regardless of this setting, since that view's job is auditing, not
+  storytelling.
+- The binding-details popover (opened by clicking an edge or a table row)
+  now shows a "Type" line — Control or Reporting — using the same
+  classification.
+
 ## [0.12.0] — 17 July 2026
 
 ### Added

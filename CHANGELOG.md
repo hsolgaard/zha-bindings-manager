@@ -2,370 +2,371 @@
 
 All notable changes to ZHA Bindings Manager are documented here.
 
+## [0.18.1] — 19 July 2026
+
+### Changed
+
+- **The multi-role badge (added in 0.18.0) now explains itself.** The only
+  explanation previously was a hover tooltip, which nobody discovers by
+  accident and doesn't work on touch. A short caption now appears under
+  the Map and Floor Plan graphs — but only when a badge is actually
+  visible in the current view, so it doesn't clutter the screen for
+  anyone who never has one of these devices. The exploded device view
+  also gets a short callout at the top when it applies, so clicking
+  through confirms what the badge meant. Wording on all three (badge
+  tooltip, graph caption, exploded-view callout) was also made
+  mechanism-agnostic — it no longer implies the second role is
+  necessarily a Zigbee self-binding, since a real case is a wired/local
+  load that Zigbee never sees a binding for at all, alongside a genuinely
+  separate Zigbee-bound role on another endpoint.
+
+## [0.18.0] — 19 July 2026
+
+### Added
+
+- **Multi-role device badge on the Map and Floor Plan graphs.** Detachable
+  combo switches (raised in [#1](../../issues/1)) can have one endpoint
+  driving its own relay while another endpoint is detached and rebound to
+  control something else — the graph previously showed the whole device
+  as a single light/switch icon either way. A device now gets a small
+  controller badge on its node when it has a light/switch/cover/fan
+  entity *and* at least one confirmed control binding, on any endpoint,
+  targeting something other than itself. Clicking the node still opens
+  the exploded per-endpoint view for the full breakdown. Endpoint-to-entity
+  mapping isn't available from `zha/devices`, so this checks "does the
+  device have both traits", not "on different endpoints specifically" —
+  deliberately restricted to confirmed control bindings (not
+  reporting/unknown) to keep it conservative.
+
+## [0.17.2] — 19 July 2026
+
+### Fixed
+
+- The version header was missing from the built file. The build step now
+  injects a header comment (project description and version, read from
+  `package.json`) at the very top of the bundle via esbuild's `banner`
+  option, independent of module order.
+
+### Added
+
+- Added 21 more Zigbee clusters to the friendly-name table, including
+  Power Configuration (`0x0001`) and Poll Control (`0x0020`), reported as
+  unrecognized in [#1](../../issues/1). Also added Door Lock, Fan Control,
+  Ballast Configuration, Metering, Touchlink Commissioning, and others
+  likely to appear on real networks. A few of the newly added control
+  clusters (On/Off Switch Configuration, Door Lock, Fan Control, Ballast
+  Configuration) now get specific Binding Health phrases (e.g. "lock
+  control", "fan speed control") instead of the generic fallback.
+
+## [0.17.1] — 19 July 2026
+
+### Internal
+
+- Split the codebase into ES modules under `src/` (`constants.js`,
+  `utils.js`, `parser.js`, `api-client.js`, `template.js`, `styles.js`,
+  `card.js`, `index.js`), bundled into the single `zha-binding-map-card.js`
+  file via `npm run build` (esbuild, unminified). No change to
+  installation or updates — the distributed file is still one plain JS
+  file in the same location. Source edits now happen in `src/`, followed
+  by a rebuild, rather than in the generated file directly.
+  - Note: esbuild renders numeric object keys in decimal rather than hex
+    in the generated bundle (e.g. `6:` instead of `0x0006:`). This is
+    purely cosmetic and has no functional effect; `src/constants.js`
+    itself is unaffected.
+
+## [0.17.0] — 19 July 2026
+
+### Changed
+
+- The control/reporting classifier now has a third state, "unknown", for
+  bindings on a cluster that hasn't been scanned yet or isn't declared as
+  either an input or output cluster. Previously these were
+  indistinguishable from confirmed reporting-only bindings.
+  - The Map and Floor Plan graphs draw unknown bindings with their own
+    dashed edge style, still visible by default.
+  - The binding detail dialog and exploded device view now label these
+    "Unknown" instead of folding them into "Reporting".
+  - "Show reporting-only bindings" continues to affect only confirmed
+    reporting bindings.
+
+### Internal
+
+- Renamed `_isControlBinding()` (yes/no) to `_classifyBinding()`
+  (control/reporting/unknown); `_isControlBinding()` remains as a thin
+  wrapper. The Map and Floor Plan views now share one `_edgeClassFor()`
+  helper for edge styling.
+
+## [0.16.4] — 19 July 2026
+
+### Internal
+
+- Added `verify-parser.js`, a standalone check of the `binds_get` response
+  parser against real captured binding-table data, covering both response
+  shapes (`result` and `replies`) that ZHA/zha_toolkit can return.
+
+## [0.16.3] — 19 July 2026
+
+### Changed
+
+- Exploded device view: bindings between the same source/target
+  endpoint pair on different clusters (e.g. a rocker sending both On/Off
+  and Level Control to the same light) are now grouped into a single
+  badge listing all clusters involved, instead of appearing as
+  near-duplicate badges.
+
+## [0.16.2] — 19 July 2026
+
+### Added
+
+- Firmware and hardware version are now shown in the exploded device
+  view's header, pulled from Home Assistant's device registry and
+  cross-referenced by IEEE address. Omitted if not available on a given
+  HA install.
+
+## [0.16.1] — 19 July 2026
+
+### Added
+
+- Product photos in the exploded device view, fetched from
+  zigbee2mqtt.io by model id. A "Show device photo" checkbox (on by
+  default) turns this off — it's the only feature in the card that
+  contacts the internet rather than your own HA instance.
+- Offline fallback: a simple wall-plate diagram with one rectangle per
+  endpoint when no photo is available or photos are disabled.
+- The exploded view is now also reachable by clicking a device node on
+  the Map (without dragging it).
+
+### Changed
+
+- Renamed the endpoint's "what does this control" field to "Physically
+  wired to", to distinguish it from the Zigbee-binding badge above it.
+
+## [0.16.0] — 19 July 2026
+
+### Added
+
+- Exploded device view: an "Explode" button on each Devices tab row opens
+  a per-endpoint breakdown built from a live scan of that device (no
+  external lookups).
+  - Each endpoint shows every relationship it has — self-bound, controls
+    another device, controls a group, receives control, group
+    membership, reporting-only — as separate badges.
+  - Detach-relay-mode state is read from the matching
+    `switch.*_detach_relay_N` entity rather than inferred from the
+    binding table.
+  - The device header shows manufacturer, model, quirk, power source,
+    area, IEEE, and network address.
+  - A "What does this control?" picker (Light / Fan / Outlet / Heating /
+    Cover / Other / Not set) per endpoint, saved locally, for
+    information no binding data can supply on its own.
+
 ## [0.15.0] — 17 July 2026
 
 ### Added
 
-- **A "Custom cluster ID…" option in the Advanced tab's Cluster dropdown**,
-  for binding a cluster the source device doesn't declare as an output
-  cluster — the normal dropdown only offers clusters the device itself
-  advertises as bindable, which is correct for standard Zigbee behaviour
-  but blocks legitimate manufacturer-specific tricks, e.g. reports of some
-  IKEA controllers sending all commands to a group once bound on their
-  Basic cluster (0x0000) and nothing else, a firmware-specific quirk, not
-  standard binding behaviour. Selecting it reveals a text field (accepts
-  `0x0000` or plain `0`), with a warning that an accepted bind doesn't
-  guarantee the device will actually behave as expected, and that this
-  binding won't appear on the Map/Floor Plan graphs by default since it
-  isn't a normal output cluster (see "Show reporting-only bindings" from
-  the last two releases). Bind/Unbind are disabled while a custom cluster
-  is selected but not yet a valid id. No changes to the normal dropdown,
-  to zha_toolkit's bind/unbind calls, or to any other tab.
+- A "Custom cluster ID…" option in the Advanced tab's cluster dropdown,
+  for binding a cluster the source device doesn't declare as bindable
+  (e.g. some IKEA controllers reportedly send all commands to a group
+  once bound on the Basic cluster, `0x0000`). Accepts hex or plain
+  numeric input. Bind/Unbind stay disabled until a valid id is entered.
 
 ## [0.14.1] — 17 July 2026
 
 ### Fixed
 
-- **Removing a device-to-group binding from the graph or table ("Remove
-  binding") could report "Unbind failed — this binding is still on the
-  device after rescanning" even though nothing was actually wrong with the
-  binding itself.** Root cause: that button called native Home Assistant's
-  `zha/groups/unbind` websocket command, a different, separate mechanism
-  from zha_toolkit that the rest of this card doesn't otherwise use — while
-  the Advanced tab's group-unbind (which has always worked) goes through
-  zha_toolkit's own `unbind_group` service instead. Confirmed by testing
-  `zha_toolkit.unbind_group` directly in Developer Tools against a real
-  binding that the in-app button couldn't remove: it worked immediately.
-  The button now calls `unbind_group` too, the same path already proven
-  reliable elsewhere in the card. Also removed `bindDeviceToGroup` and
-  `unbindDeviceFromGroup`, the two native-websocket API methods behind this
-  — the first had no callers left anywhere, and the second's only caller
-  was this bug.
+- Removing a device-to-group binding could report "Unbind failed" even
+  when the binding itself was fine. The remove-binding button used Home
+  Assistant's native `zha/groups/unbind` command instead of zha_toolkit's
+  `unbind_group`, unlike the rest of the card. It now uses `unbind_group`
+  consistently. Removed the now-unused native-websocket bind/unbind group
+  methods.
 
 ## [0.14.0] — 17 July 2026
 
 ### Added
 
-- **The Map view now draws a group &rarr; member arrow for every device in a
-  Zigbee group**, sourced entirely from real ZCL group membership data
-  (`zha/groups`' own member list — already fetched, no new API call). This
-  is a genuinely separate real fact from a binding: a group member receives
-  that group's commands without needing any binding-table entry at all,
-  which is exactly the relationship a switch &rarr; group binding alone
-  doesn't show. It's drawn with the same solid, bold weight as a real
-  control binding, so a switch bound to a group with lights in it now reads
-  as one continuous switch &rarr; group &rarr; light path, even though the
-  two halves come from different real mechanisms (a binding, then group
-  membership). Click one for group/member details. There's no "remove from
-  group" action from this edge yet &mdash; that would need a verified
-  zha_toolkit `remove_from_group` call, which hasn't been confirmed against
-  source the way every other action in this card has been, so it points to
-  ZHA's own group management UI instead for now. Group-membership edges
-  aren't shown on the Floor Plan tab, which doesn't place group nodes at
-  all today.
+- The Map view now draws a group → member arrow for every device in a
+  Zigbee group, sourced from `zha/groups` membership data. This is
+  separate from a binding — a group member receives that group's
+  commands without needing a binding-table entry of its own — so a
+  switch bound to a group with lights in it now reads as one continuous
+  switch → group → light path. There's no "remove from group" action
+  from this edge yet; use ZHA's own group management UI for that. Not
+  shown on the Floor Plan tab.
 
 ## [0.13.0] — 17 July 2026
 
 ### Added
 
-- **Reporting-type bindings are now told apart from control bindings, and
-  hidden from the Map/Floor Plan graphs by default.** Prompted by a real
-  case: a light added to a Zigbee group through native ZHA's own group UI
-  turned out to have a genuine binding-table entry pointing back at the
-  group (confirmed via a live `binds_get` read), which the graph correctly
-  drew as an arrow — but that arrow made it look like the light was
-  "controlling" the group, which isn't what it's for and isn't what this
-  tool is meant to show. A binding is now classified as control-type only
-  if its cluster is registered as an "out" (client) cluster on the source
-  device's endpoint — the same in/out distinction the Advanced tab's
-  cluster dropdown already relies on. Bindings that only exist on an "in"
-  (server) cluster represent the device reporting its own state outward,
-  not controlling anything, and are hidden from the graph by default. A new
-  "Show reporting-only bindings (Map only)" checkbox reveals them again,
-  drawn thin, dashed, and muted so they read as background information
-  rather than competing with real control arrows. The Bindings tab and all
-  exports are unaffected — they always show the complete raw scanned data
-  regardless of this setting, since that view's job is auditing, not
-  storytelling.
-- The binding-details popover (opened by clicking an edge or a table row)
-  now shows a "Type" line — Control or Reporting — using the same
-  classification.
+- Bindings are now classified as control or reporting, based on whether
+  their cluster is registered as an output (client) cluster on the
+  source endpoint. Reporting-only bindings are hidden from the Map/Floor
+  Plan graphs by default; a "Show reporting-only bindings" checkbox
+  reveals them, drawn thin and dashed. The Bindings tab and all exports
+  are unaffected.
+- The binding-details popover now shows a Type line (Control or
+  Reporting).
 
 ## [0.12.0] — 17 July 2026
 
 ### Added
 
-
-- A "Marker size" setting on the Floor Plan tab (next to the zoom
-controls), a percentage that scales device markers independently of the
-uploaded image's resolution. Markers were previously sized purely from the
-image's raw pixel width, which has no idea how large your actual rooms
-are relative to the image — a lower-resolution blueprint could leave
-markers looking oversized no matter what the auto-scaling guessed.
-Defaults to 100% (no change from before).
-
+- A "Marker size" setting on the Floor Plan tab, a percentage that scales
+  device markers independently of the uploaded image's resolution.
+  Defaults to 100% (no change).
 
 ### Fixed
 
-
-- Floor Plan device labels could become invisible depending on your
-Home Assistant theme and the floor plan image's colors — e.g. a dark
-theme renders label text in a light color, which disappears against a
-white or light-colored blueprint. Labels on the Floor Plan tab now have a
-halo outline in the card's background color, so they stay legible against
-the uploaded image regardless of theme or image color. (The Map view's
-labels are unaffected — they already sit on the card's own background,
-not an arbitrary image, so the original theme-based color there is fine.)
-
+- Floor Plan device labels could become illegible depending on your Home
+  Assistant theme and the floor plan image's colors. Labels now have a
+  background-color halo so they stay legible regardless of theme or
+  image.
 
 ## [0.11.3] — 16 July 2026
 
 ### Fixed
 
-
 - The arrowhead on a binding line was hidden behind the target device's
-icon, since the line was drawn all the way to the exact center of the
-target node, putting the arrowhead directly underneath the circle. Lines
-(on both the Map and Floor Plan views) now stop just outside the target
-icon's edge instead, so the arrowhead is actually visible next to it.
+  icon. Lines now stop just outside the target icon's edge.
 
 ## [0.11.2] — 16 July 2026
 
 ### Changed
 
-- **The scan batch size setting now documents a real, tested downside to
-  setting it too high**, found through live testing on a real ~64-device
-  network: a batch of 28 caused otherwise-healthy mains devices to
-  intermittently fail to respond (a different device on each repeat scan,
-  every one of them fine when rescanned individually) — almost certainly
-  Zigbee airtime/collision contention from that much concurrent traffic at
-  once, not an actual device problem. 10-12 tested clean with no induced
-  failures across repeated runs. The setting itself is unchanged (still
-  1-30, still defaults to 10) — this just makes sure the trade-off is
-  explained before you turn it up rather than after something fails
-  unexpectedly.
+- Documented a real downside to setting the scan batch size too high:
+  testing showed a batch of 28 on a ~64-device network could cause
+  otherwise-healthy mains devices to intermittently fail to respond,
+  likely from Zigbee airtime contention. 10–12 tested clean. The setting
+  itself is unchanged (1–30, default 10).
 
 ## [0.11.1] — 16 July 2026
 
 ### Changed
 
-- **The concurrent scan batch size is now a setting (⚙ next to "Scan
-  bindings"), defaulting to 10** (up from the fixed 8 shipped in 0.11.0).
-  Found via real testing: with a fixed batch size, a handful of
-  sleepy/offline devices can happen to land in different batches purely by
-  chance, and each one drags its own batch out by its full retry delay
-  (~45s) — a larger batch reduces how often that happens. There's no single
-  batch size that's provably best for every network, so it's adjustable
-  rather than hardcoded.
+- Concurrent scan batch size is now a setting (⚙ next to "Scan
+  bindings"), defaulting to 10 (up from a fixed 8). A larger batch
+  reduces the chance that sleepy/offline devices land in different
+  batches and each add their own retry delay to the total scan time.
 
 ## [0.11.0] — 16 July 2026
 
 ### Changed
 
-- **Scans now run in concurrent batches of 8 devices instead of one at a
-  time**, cutting wall-clock time on larger networks. Previously, a full
-  network scan read one device's bindings, waited for the response, then
-  moved to the next — so every sleepy/offline device's retry delay (~45s
-  each) added up serially across the whole scan. Confirmed via live testing
-  (browser console, calling the same `zha_toolkit.binds_get` service the
-  card uses) that requests genuinely run in parallel end-to-end — 10
-  concurrent calls to real devices, including 2 that failed simultaneously,
-  all completed in under 45 seconds total instead of stacking to 90+. Only
-  the bulk network scan is affected; single-device rescans (Devices tab,
-  Advanced tab, Binding Health "Rescan now") were already effectively a
-  batch of one and behave exactly as before.
-
+- Scans now run in concurrent batches of 8 devices instead of one at a
+  time, reducing wall-clock time on larger networks. Only the bulk
+  network scan is affected; single-device rescans are unchanged.
 
 ## [0.10.1] — 15 July 2026
 
 ### Fixed
 
-- **The wake-device hint could tell you to "press a button" on a
-  mains-powered device**, found immediately during testing (devices
-  deliberately unplugged for testing showed "Usually needs waking — press
-  a button on it"). Root cause: the sleepy-device check let a single
-  failed scan attempt (a sample size of one) override the device's actual
-  `power_source`, since a 0/1 success rate technically counts as "below
-  50%". Whether wake-advice is physically sensible is now decided purely
-  by `power_source` (a hardware fact) and never overridden by history — a
-  mains device that isn't responding now shows "check it's powered on and
-  in range" instead. Response-time/success-rate history is still shown as
-  context, it just no longer drives which message you see.
+- The wake-device hint could tell you to "press a button" on a
+  mains-powered device. Wake advice now depends only on `power_source`
+  and is no longer overridden by scan history.
 
 ## [0.10.0] — 15 July 2026
 
-Bumped the minor version rather than another patch — this is a real feature
-addition, not a bug fix, off the back of a full design/testing discussion
-(including live retry-timing tests against a real device).
-
 ### Added
 
-- **Learned per-device scan history.** The card now remembers, per device,
-  how long recent `binds_get` attempts took to succeed and how often they
-  succeeded at all (last 10 attempts, persisted like the bindings cache).
-  This replaces guesswork with real observed behavior — confirmed necessary
-  during testing, where a genuine battery device at the edge of the network
-  responded in under a second, disproving the assumption that "battery
-  device" reliably predicts "slow to respond."
-- **Devices tab: a combined "Last scan" column.** Shows status (never
-  scanned / OK / partial / failed), when, typical response time, and
-  success rate for each device, and doubles as a one-click rescan button —
-  no more needing to re-run the full network scan to retry one device. A
-  wake-device hint appears for battery-powered devices that just failed or
-  partially responded.
-- **Configurable retry count for single-device rescans**, with an
-  explanation of the real cost involved (a small settings panel, ⚙ next to
-  "Scan bindings"). Confirmed via live testing that zha_toolkit's `tries`
-  parameter is a real sequential retry loop costing ~45 seconds per attempt
-  against a genuinely unresponsive device (45s for 1 try, 222s for 5) — so
-  this is a deliberate trade-off setting, not a free improvement, and is
-  scoped to single-device rescans only. The full network scan is
-  unaffected and stays at zha_toolkit's own default.
-- A "Rescan now" button on the Binding Health detail popover for
-  "unable to verify" and "partial scan" findings, instead of just telling
-  you to go rescan manually.
+- Learned per-device scan history: response time and success rate over
+  the last 10 `binds_get` attempts, persisted alongside the bindings
+  cache.
+- Devices tab: a combined "Last scan" column showing status, timing, and
+  success rate, which also doubles as a one-click rescan button.
+- Configurable retry count for single-device rescans (⚙ next to "Scan
+  bindings"). Each retry costs roughly 45 seconds against an
+  unresponsive device, so this is a deliberate trade-off, not a free
+  improvement, and only applies to single-device rescans.
+- A "Rescan now" button on Binding Health detail popovers for "unable to
+  verify" and "partial scan" findings.
 
 ### Changed
 
 - The "Hide coordinator bindings" filter is now labeled to make clear it
-  affects both the Map and the Bindings tab, not just the graph.
+  affects both the Map and the Bindings tab.
 
 ## [0.9.4] — 15 July 2026
 
 ### Changed
 
-- The scan-complete status message (e.g. "Scan complete: 59 device(s) read,
-  5 did not respond...") now stays on screen until you dismiss it with the
-  new × button, instead of auto-hiding after a few seconds — easy to miss
-  if you looked away while a larger scan was still running. Other status
-  messages are unchanged, but can now also be dismissed early the same way.
+- The scan-complete status message now stays on screen until dismissed
+  with a × button, instead of auto-hiding after a few seconds.
 
 ## [0.9.3] — 14 July 2026
 
 ### Fixed
 
-- **False "duplicate binding" Health warnings**, found immediately after
-  testing the 0.9.2 fix above. zha_toolkit can return the same real binding
-  in both `response.result` and `response.replies` on a fully successful
-  scan; the card is supposed to merge these into one entry, but the two
-  parsers formatted their internal `.id` string differently (one used the
-  cluster id as a hex string, the other as a plain number), so the merge
-  step never recognized them as the same binding. Both copies survived,
-  and Binding Health correctly — but misleadingly — flagged them as
-  duplicates of each other. Deduplication now uses a normalized identity
-  key built from each binding's already-normalized fields instead of the
-  inconsistently-formatted `.id` string.
-- **Home Assistant's own generic "Failed to perform the action
-  zha_toolkit/binds_get. unknown error" toast** was popping up for every
-  sleepy/offline device during a scan, on top of the card's own accurate
-  status reporting ("N did not respond — sleepy/offline devices are
-  normal"). This came from `notifyOnError: true` on the underlying service
-  call, which asks Home Assistant to show its own error toast regardless
-  of how the calling code handles the failure. Now set to `false` — the
-  card has handled and reported these failures itself since Binding
-  Health shipped in 0.9.0, so the extra toast was redundant noise at best.
+- False "duplicate binding" Health warnings when zha_toolkit returned the
+  same binding in both `response.result` and `response.replies` — the
+  two parsers formatted their internal identity key differently, so the
+  merge step didn't recognize them as the same binding. Deduplication now
+  uses a normalized identity key built from each binding's already
+  normalized fields.
+- Home Assistant's generic error toast for `zha_toolkit/binds_get` no
+  longer fires for expected sleepy/offline devices during a scan; the
+  card already reports these itself.
 
 ## [0.9.2] — 14 July 2026
 
 ### Fixed
 
-- **Every binding read via the newer `response.replies` format (added in
-  0.9.1) incorrectly showed "target device no longer exists"**, even for
-  perfectly healthy bindings. Root cause: a target device's IEEE address in
-  this response shape is serialized as an array of 8 raw bytes in
-  little-endian order (e.g. `[255, 255, 21, 126, ...]`), not as a hex
-  string like `a4:c1:38:...` — the 0.9.1 parser assumed the latter. This is
-  now converted correctly. Confirmed against a real `binds_get` response
-  captured directly from a live device (via Developer Tools → Actions)
-  rather than inferred from source code alone.
-- As a side effect of the fix above, entries whose target IEEE still can't
-  be resolved for any reason are now skipped and logged to the console
-  instead of being shown as a false "missing device" error.
+- Every binding read via the `response.replies` format (added in 0.9.1)
+  incorrectly showed "target device no longer exists". The target IEEE
+  address in this response shape is a little-endian byte array, not a
+  hex string, and the 0.9.1 parser assumed the latter. Entries whose
+  IEEE still can't be resolved are now skipped and logged to the console
+  instead of shown as an error.
 
 ### Added
 
 - Partial-scan Binding Health messages now show how much of a device's
-  binding table was actually retrieved (e.g. "3 of 12 binding table
-  entries retrieved") instead of just flagging that the read was
-  incomplete — using the page-count metadata `binds_get` already returns.
+  binding table was retrieved (e.g. "3 of 12 entries").
 
 ## [0.9.1] — 12 July 2026
 
 ### Fixed
 
-- **Fresh browser sessions could show zero bindings even though real
-  bindings existed and worked**, caused by a change in how newer
-  `zha_toolkit`/`zigpy` versions report a `binds_get` scan. When a device's
-  binding table is large enough to need multiple "pages," a later page can
-  time out (`success: false`, `errors: ["TimeoutError()"]`) even though an
-  earlier page already returned valid entries in `response.replies`. The
-  card previously discarded the entire response on any reported failure,
-  losing that valid data. It now keeps whatever bindings were actually
-  returned and marks the device as a "partial" read (shown as an Info
-  status in Binding Health) instead of showing nothing. Also added support
-  for parsing the newer `response.replies` format directly, alongside the
-  older `response.result` format the card already understood. Root-caused
-  and reported by a user testing against a real Hue network with large
-  binding tables — thank you!
+- Fresh browser sessions could show zero bindings even though real
+  bindings existed, when a device's binding table needed multiple pages
+  and a later page timed out. The card now keeps whatever bindings were
+  returned and marks the device as a partial read instead of discarding
+  everything. Also added support for the newer `response.replies` format
+  alongside the existing `response.result` format.
 
 ## [0.9.0] — 11 July 2026
 
 ### Added
 
-- **Binding Health** — every binding in the Bindings table is now checked
-  for structural problems (missing source/target device, missing endpoint,
-  missing cluster, missing Zigbee group, duplicate bindings) and shown with
-  a plain-English status: OK, Info, Warning, or Error. Includes a summary
-  card, status filter chips (All / Problems Only / Errors / Warnings /
-  Info), a sortable Health column, and a click-through detail popover
-  explaining what's wrong, why it matters, and what to do about it.
-- **Verified bind/unbind outcomes** — after creating or removing a binding,
-  the card now rescans the affected device(s) and compares before vs.
-  after to report what actually happened (e.g. "Binding confirmed
-  removed"), instead of just relaying zha_toolkit's own success/failure
-  report — which turned out to be misleading in both directions during
-  testing (see Fixed, below).
-- A version banner is now logged to the browser console on load
-  (`ZHA-BINDING-MAP-CARD v0.9.0`), so you can always confirm which build is
-  actually active — useful since HACS caches a pre-gzipped copy of this
-  file that can go stale if you ever replace it manually.
-- Failed zha_toolkit calls now log the full request and raw response to
-  the browser console (tagged `[ZHA Bindings Manager]`), for easier
-  troubleshooting when the on-screen error message alone isn't enough.
-- CSV/JSON/print exports now include each binding's Health status and
-  details instead of the old binary "stale" flag.
+- Binding Health — every binding is checked for structural problems
+  (missing source/target device, missing endpoint, missing cluster,
+  missing group, duplicates) and shown with a plain-English status: OK,
+  Info, Warning, or Error. Includes a summary card, status filters, a
+  sortable Health column, and a detail popover.
+- Verified bind/unbind outcomes — after creating or removing a binding,
+  the card rescans the affected device(s) and reports what actually
+  changed, rather than relying solely on zha_toolkit's own
+  success/failure report.
+- A version banner is logged to the browser console on load.
+- Failed zha_toolkit calls log the full request and response to the
+  console for troubleshooting.
+- CSV/JSON/print exports include each binding's Health status and
+  details.
 
 ### Changed
 
-- Bind/unbind actions now automatically rescan **both** the source and
-  target device afterwards (previously only the source was rescanned),
-  regardless of whether the action succeeded or failed — this keeps the
-  table from showing bindings that no longer exist on the actual device.
-- The Bindings table's Target column now shows the target's endpoint
-  (e.g. "ep 1"), matching how the Source column already did — needed for
-  clarity when a device is both the source and target of different
-  bindings on itself.
-- Binding Health detail popups for a healthy ("OK") binding now show a
-  single plain confirmation line instead of an odd "What's wrong: This
-  binding looks structurally valid" framing.
+- Bind/unbind actions now rescan both the source and target device
+  afterwards (previously only the source was rescanned).
+- The Bindings table's Target column now shows the target's endpoint,
+  matching the Source column.
 
 ### Fixed
 
-- **Unbind was silently failing in some cases** because the card never
-  sent the target device's endpoint (`dst_endpoint`) to zha_toolkit's
-  `binds_remove_all` service — only the bind path did. Without it,
-  zha_toolkit couldn't reliably identify which binding-table entry to
-  remove on a target with more than one endpoint, and reported failure
-  even when everything else about the request was correct.
-- Diagnosed and documented a related issue where the local scan cache
-  could show a binding that no longer existed on the actual device (left
-  over from earlier testing/reconfiguration) — the new automatic rescan
-  and verified-outcome behavior above both help this self-correct instead
-  of leaving stale, confusing entries in the table.
+- Unbind could silently fail because the card didn't send the target
+  device's endpoint to zha_toolkit's `binds_remove_all` service.
 
 ## [0.7.1] — 10 July 2026 (initial public release)
 
 - First HACS/GitHub release: Map, Floor Plan, Bindings, Devices, and
-  Advanced tabs; drag-and-drop bind/unbind; stale-binding flagging (later
-  replaced by Binding Health in 0.9.0); CSV/JSON/print export; mobile
-  layout fixes.
+  Advanced tabs; drag-and-drop bind/unbind; stale-binding flagging
+  (later replaced by Binding Health in 0.9.0); CSV/JSON/print export;
+  mobile layout fixes.

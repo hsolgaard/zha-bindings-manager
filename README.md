@@ -192,6 +192,15 @@ replace `zha-toolkit` — it's a UI on top of it:
 2. Add it as a Lovelace resource: **Settings → Dashboards → ⋮ → Resources → Add
    Resource**, URL `/local/zha-binding-map-card.js`, type **JavaScript Module**.
 
+**Updating a manual install:** HACS installs auto-bust the browser cache on
+update; a manual `/local/` resource doesn't, so after replacing the file your
+browser may keep serving the old cached copy even after restarting Home
+Assistant. A hard refresh (Ctrl/Cmd+Shift+R) usually fixes it. If it doesn't,
+add a version tag to the resource URL itself — e.g.
+`/local/zha-binding-map-card.js?v=0172` — and bump that number each time you
+update the file manually; a changed URL forces the browser to fetch fresh
+rather than serve its cache.
+
 ### Add the card
 
 Add manually via YAML, or edit a dashboard → add card → search "ZHA Bindings Manager":

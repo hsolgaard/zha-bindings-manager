@@ -16,19 +16,40 @@ bound to what.
 ## Screenshots
 
 **Map view** — every device and its bindings, colour-coded by cluster type.
-<img width="1425" height="735" alt="mapview" src="https://github.com/user-attachments/assets/8f28371b-301f-4eb6-ae26-805451041f80" />
+<img width="1401" height="696" alt="Untitled 3" src="https://github.com/user-attachments/assets/63a7c281-5043-40a2-a19c-23ec6ceab3cf" />
 
-**Bindings view** — a flat, searchable, sortable table of every binding, with Binding Health (summary card, Health column, and status filter chips).
-<img width="1425" height="735" alt="bindings" src="https://github.com/user-attachments/assets/64294804-5788-4c1a-84a5-36abb755bb5e" />
 
-**Binding Health detail** — clicking a Health badge explains what's wrong, why it matters, and what to do about it in plain English.
-<img width="620" height="227" alt="Screenshot 2026-07-16 at 17 17 56" src="https://github.com/user-attachments/assets/dd7109e4-8d94-4751-83a9-216b021d70e7" />
+**Map View** - click on a binding to see the detail and unbind it, drag-and-drop to create new bindings.
+<img width="1401" height="696" alt="image" src="https://github.com/user-attachments/assets/f0272567-483e-43e2-8935-4acbe38316c4" />
 
-**Devices view** — every ZHA device with manufacturer, model, binding count, and a Last scan column that doubles as a rescan/wake-device control.
-<img width="2850" height="1080" alt="Devices screenshot" src="https://github.com/user-attachments/assets/8dc6f677-0840-45b9-ac30-d8dedf0bbad1" />
 
-**Advanced view** — endpoint- and cluster-aware manual bind/unbind, with existing-binding context.
-<img width="1201" height="519" alt="Screenshot 2026-07-10 at 22 12 15" src="https://github.com/user-attachments/assets/00b993ac-eee0-42be-a2e9-b439267b3f75" />
+**Bindings view** — a flat, searchable, sortable table of every binding, with
+Binding Health (summary card, Health column, and status filter chips).
+<img width="1401" height="696" alt="image" src="https://github.com/user-attachments/assets/d8179c72-1c5f-40f8-9689-8194413b7017" />
+
+
+**Binding Health detail** — clicking a Health badge explains what's wrong,
+why it matters, and what to do about it in plain English.
+<img width="1401" height="696" alt="image" src="https://github.com/user-attachments/assets/0e5b8a3d-172c-422e-a9f4-05466e427ee7" />
+
+
+**Devices view** — every ZHA device with manufacturer, model, binding count,
+and a Last scan column that doubles as a rescan/wake-device control.
+<img width="1401" height="696" alt="image" src="https://github.com/user-attachments/assets/08965127-62c4-4859-a3dc-f3460457b5ed" />
+
+
+**Exploded device view** — click "Explode" on any device (or click its node
+on the Map) for a per-endpoint breakdown: every real relationship that
+endpoint has, live detach-relay state, firmware/hardware info, and a product
+photo where available.
+<img width="1401" height="696" alt="image" src="https://github.com/user-attachments/assets/96cc4e6c-7d0e-41ff-be4f-0d7dbb62b1ff" />
+
+
+**Advanced view** — endpoint- and cluster-aware manual bind/unbind, with
+existing-binding context, including a "Custom cluster ID…" option for
+binding clusters a device doesn't declare as bindable.
+<img width="1401" height="696" alt="image" src="https://github.com/user-attachments/assets/d3369c99-26b2-4b42-a597-79bd0805522c" />
+
 
 ## Vision
 
@@ -113,11 +134,25 @@ replace `zha-toolkit` — it's a UI on top of it:
 
 - **Map view** — every ZHA device and group as a node on a canvas. Existing
   bindings are drawn as coloured lines (colour = cluster type) from source to
-  target. Drag a node to reposition it (saved per-browser); drag it **onto**
-  another node to jump to the Advanced tab with both devices pre-selected as
-  Source/Target and the most likely compatible cluster pre-picked, so you can
-  choose the exact endpoint(s) before creating the bind. Click a line to
-  inspect or remove it. Filter by device role (coordinator/routers/end devices/groups/
+  target, and a device that's a member of a Zigbee group also gets a
+  group → member arrow sourced from real ZCL group membership data — a
+  separate mechanism from bindings, since a group member receives that
+  group's commands without needing a binding-table entry of its own. Each
+  binding is classified as control, reporting, or unknown (based on whether
+  its cluster is declared as an output on the source endpoint); reporting
+  and unknown bindings are visually distinct and reporting ones are hidden
+  by default (toggle below) so the graph reads as "who controls what," not
+  a wall of every cluster interaction. A device that has both its own
+  light/switch/cover/fan role and a real control binding elsewhere gets a
+  small controller badge on its node — common on detachable/combo switches
+  where one gang drives its own load and another gang has been rebound to
+  control something else. Drag a node to reposition it (saved per-browser);
+  drag it **onto** another node to jump to the Advanced tab with both
+  devices pre-selected as Source/Target and the most likely compatible
+  cluster pre-picked, so you can choose the exact endpoint(s) before
+  creating the bind. Click a line to inspect or remove it; click a device
+  node (without dragging it) to open its exploded per-endpoint view (see
+  below). Filter by device role (coordinator/routers/end devices/groups/
   unbound), by entity type (Light, Switch, Garage Door, Motion Sensor, etc —
   derived from each entity's `device_class`, not just its raw domain), by
   manufacturer, or by area — all remembered across reloads. A "hide
@@ -130,7 +165,33 @@ replace `zha-toolkit` — it's a UI on top of it:
   drag devices from an "unplaced" list onto their physical spot, and see
   bindings drawn as lines on top of the image instead of an auto-arranged
   graph. Positions are saved as percentages of the image, so they survive a
-  higher-resolution version of the same image later.
+  higher-resolution version of the same image later. A "Marker size" setting
+  scales device markers independently of the image's own resolution, useful
+  when a lower-resolution floor plan leaves auto-scaled markers looking
+  oversized. The same multi-role controller badge from the Map view appears
+  here too; group → member edges don't, since this view doesn't place group
+  nodes.
+- **Exploded device view** — click "Explode" on a device (Devices tab) or
+  click its node on the Map to open a per-endpoint breakdown built from a
+  live scan of that one device, not assumptions:
+  - Every endpoint's real relationships — self-bound, controls another
+    device, controls a group, receives control, group membership,
+    reporting-only, or unknown — shown as separate badges, since one
+    endpoint can genuinely be more than one of these at once.
+  - Detach-relay-mode state read live from the matching
+    `switch.*_detach_relay_N` entity, never guessed from binding shape.
+  - Manufacturer, model, quirk, power source, area, IEEE, network address,
+    and firmware/hardware version (where available from Home Assistant's
+    device registry).
+  - A real product photo (fetched from Zigbee2MQTT's device image database
+    by model id — see Credits) with a simple wall-plate diagram as an
+    offline/no-match fallback showing one rectangle per real endpoint. A
+    checkbox turns photos off if you'd rather this card never contact the
+    internet.
+  - A "What does this control?" picker per endpoint (Light / Fan / Outlet /
+    Heating / Cover / Other appliance / Not set) — a closed list rather than
+    free text, saved locally, for the one thing no Zigbee data can ever
+    supply: what's physically wired to the other end.
 - **Bindings view** — a flat, searchable table of every binding read so far,
   with sortable Type/Area/Manufacturer/Model columns and a one-click unbind
   button. Click a source device's name to filter the table to just that
@@ -149,20 +210,23 @@ replace `zha-toolkit` — it's a UI on top of it:
   which you need for manual zha-toolkit calls.
 - **Devices view** — every ZHA device in one table (Name, Type, Manufacturer,
   Model, Area, Power source, binding count), independent of any binding data.
-  Click a name to jump to the Bindings tab filtered to that device. A
-  **Last scan** column shows each device's status (never scanned / OK /
-  partial / failed), when, its typical response time, and how often it's
-  actually responded — learned from real scan history rather than guessed —
-  and doubles as a one-click rescan button, so retrying one stubborn device
-  doesn't mean re-running the whole network scan. Battery-powered devices
-  that just failed or partially responded get a wake-device hint ("press a
-  button on it, then rescan"); mains-powered devices get a different message
-  ("check it's powered on and in range"), since a mains device can't be
-  asleep. A small settings panel (⚙, next to "Scan bindings") lets you
-  configure how many extra retries a single-device rescan uses — each retry
-  costs a real ~45 seconds against a device that genuinely doesn't respond,
-  so this is a deliberate trade-off, not a free improvement, and only
-  applies to single-device rescans, never the full network scan.
+  Click a name to jump to the Bindings tab filtered to that device, or click
+  "Explode" for the per-endpoint breakdown above. A **Last scan** column
+  shows each device's status (never scanned / OK / partial / failed), when,
+  its typical response time, and how often it's actually responded — learned
+  from real scan history rather than guessed — and doubles as a one-click
+  rescan button, so retrying one stubborn device doesn't mean re-running the
+  whole network scan. Battery-powered devices that just failed or partially
+  responded get a wake-device hint ("press a button on it, then rescan");
+  mains-powered devices get a different message ("check it's powered on and
+  in range"), since a mains device can't be asleep. A small settings panel
+  (⚙, next to "Scan bindings") lets you configure how many devices the full
+  network scan reads concurrently (default 10 — higher isn't automatically
+  better, see Known limitations) and how many extra retries a single-device
+  rescan uses — each retry costs a real ~45 seconds against a device that
+  genuinely doesn't respond, so this is a deliberate trade-off, not a free
+  improvement, and only applies to single-device rescans, never the full
+  network scan.
 - **Advanced view** — a raw form over `bind_ieee` / `binds_remove_all` /
   `bind_group` / `unbind_group` / `unbind_coordinator` for cases the automatic
   cluster-matching elsewhere doesn't handle (specific endpoints on
@@ -173,6 +237,11 @@ replace `zha-toolkit` — it's a UI on top of it:
   (e.g. "On/Off" instead of `0x0006`), and side panels show existing bindings
   already on the source endpoint and already pointing at the chosen target —
   both drawn from your local scan cache, so scan first for complete results.
+  A "Custom cluster ID…" option lets you bind a cluster the source device
+  doesn't declare as bindable at all (e.g. binding the Basic cluster,
+  `0x0000`, to a group — a firmware-specific trick some controllers respond
+  to) — an expert option with no guarantee the device will actually behave
+  as expected.
 
 ## Installing
 
@@ -266,12 +335,16 @@ one-off UI click-through that's easy to get wrong.)
    it first if it's battery-powered, then retry just that one device rather
    than the whole network. (There isn't a way around needing the device
    awake: it's how Zigbee sleepy end devices work, not a limitation of this
-   card — but retrying one device is much cheaper than a full rescan.)
+   card — but retrying one device is much cheaper than a full rescan.) The
+   ⚙ settings panel next to "Scan bindings" lets you adjust how many devices
+   the full scan reads concurrently and how many retries a single-device
+   rescan uses, if the defaults don't suit your network.
 3. Drag a button/switch node onto a relay/light node to bind them. Pick the
    cluster(s) in the dialog (On/Off and Level Control are pre-checked when
    present).
-4. Click a line to see or remove a binding. Or use the **Bindings** tab for a
-   flat list with unbind buttons.
+4. Click a line to see or remove a binding, or click a device node to open
+   its exploded per-endpoint view. Or use the **Bindings** tab for a flat
+   list with unbind buttons.
 5. For anything unusual (specific endpoint on a multi-gang switch, a cluster
    that wasn't auto-detected, binding directly to the coordinator), use the
    **Advanced** tab.
@@ -300,6 +373,12 @@ one-off UI click-through that's easy to get wrong.)
   learned response-time history (see Features, above) help here, but there's
   no way around a device genuinely needing to be awake — that's how Zigbee
   sleepy end devices work.
+- The concurrent scan batch size trades speed for reliability: testing on a
+  real ~64-device network found batches much above ~10-12 can cause
+  otherwise-healthy devices to intermittently fail to respond (Zigbee
+  airtime/collision contention from that much traffic at once, not an
+  actual device fault) — increase the default cautiously and only if you've
+  confirmed it holds up on your own network.
 - The cluster pre-picked when you drag one device onto another (or use "+ Add
   binding") is based on matching output clusters on the source device with
   input clusters on the target device, and is only a suggestion — the
@@ -307,6 +386,12 @@ one-off UI click-through that's easy to get wrong.)
   so you can pick something else. Some real-world bindings (e.g. certain IAS
   Zone sensor → siren setups) don't fit the auto-matched pattern at all;
   nothing is stopping you from picking any cluster manually.
+- The multi-role controller badge (Map/Floor Plan) is a heuristic, not a
+  precise endpoint-level fact — Home Assistant's device registry has no
+  field tying an entity to a specific Zigbee endpoint, so the badge can only
+  tell you a device has both a light/switch/cover/fan role *and* a real
+  control binding elsewhere, not confirm they're on different endpoints.
+  Open the exploded device view for the definitive per-endpoint picture.
 - No visual Lovelace card editor yet (YAML-only config, though the only
   required line is `type: custom:zha-binding-map-card`).
 - This card calls `zha_toolkit` services with `return_response: true`, which
@@ -339,7 +424,12 @@ one-off UI click-through that's easy to get wrong.)
 Designed, specified, and tested by [Hans Solgaard](https://github.com/hsolgaard) against a real ZHA
 network. Development assisted by [Claude](https://www.anthropic.com/claude) (Anthropic)
 
-
 Built on top of:
 - [ZHA](https://www.home-assistant.io/integrations/zha/) (Home Assistant core)
 - [zha-toolkit](https://github.com/mdeweerd/zha-toolkit) by mdeweerd and contributors
+- Device photos in the exploded device view are fetched from
+  [Zigbee2MQTT](https://www.zigbee2mqtt.io/)'s device image database — an
+  independent, unaffiliated project, credited here for the images this card
+  displays but otherwise not used by or connected to it in any way. Turn off
+  "Show device photo" in that view if you'd rather this card never contact
+  it (or the internet at all).

@@ -2,6 +2,35 @@
 
 All notable changes to ZHA Bindings Manager are documented here.
 
+## [0.18.2] — 20 July 2026
+
+### Fixed
+
+- **False "Controls group" badges (and false multi-role badges) on
+  ordinary lights.** Reported in [#1](../../issues/1) (MattWestb) - nearly
+  every real Zigbee 3 light/plug on his network was showing a "Controls
+  group" badge in the exploded view and, as a result, a multi-role
+  controller badge on the Map/Floor Plan, despite being an entirely normal
+  light with no control capability at all (confirmed against a real
+  device's raw cluster data: `output_clusters` contained only OTA Upgrade,
+  nothing that could actually control anything). Root cause: the exploded
+  view's per-endpoint relationship logic treated every binding-table entry
+  pointing at a group as "controls group" outright, unlike device-to-device
+  bindings, which were already checked against the source cluster's real
+  in/out direction. ZHA's own "add device to group" flow can leave a real
+  binding-table entry on a cluster the device only ever declares as an
+  input (e.g. a light's OnOff, which it receives, never sends) — that's the
+  device being reachable through the group, not controlling it. Group
+  bindings now go through the same in/out cluster check device-to-device
+  bindings already used, matching how the Map/Floor Plan graphs have always
+  classified them. A genuine control binding to a group (e.g. a real
+  remote's output cluster bound to a group) is unaffected.
+- As part of the same fix, the exploded view's "Also reports … to the
+  coordinator" line and its "Unclassified binding to …" badge could
+  previously mislabel or break on a group target or a report to a device
+  other than the coordinator — both now name the real target (a device, a
+  group, or the coordinator) correctly.
+
 ## [0.18.1] — 19 July 2026
 
 ### Changed

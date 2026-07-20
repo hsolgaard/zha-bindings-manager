@@ -21,7 +21,7 @@
  * zha_toolkit MUST be installed (via HACS) and working for bind/unbind/scan
  * to function. See README.md for details.
  *
- * Version: 0.18.1
+ * Version: 0.18.2
  */
 (() => {
   // src/constants.js
@@ -1744,17 +1744,19 @@
       };
       raw.forEach((b) => {
         if (b.sourceIeee === d.ieee && b.sourceEndpoint === ep) {
-          if (b.isGroup) {
-            out.controlsGroup.push(b);
-          } else if (b.targetIeee === coord) {
-            out.reportsTo.push(b);
-          } else if (b.targetIeee === d.ieee) {
+          if (!b.isGroup && b.targetIeee === d.ieee) {
             out.self.push(b);
+          } else if (!b.isGroup && b.targetIeee === coord) {
+            out.reportsTo.push(b);
           } else {
             const cls = this._classifyBinding(b);
-            if (cls === "control") out.controlsDevice.push(b);
-            else if (cls === "unknown") out.unknown.push(b);
-            else out.reportsTo.push(b);
+            if (cls === "control") {
+              (b.isGroup ? out.controlsGroup : out.controlsDevice).push(b);
+            } else if (cls === "unknown") {
+              out.unknown.push(b);
+            } else {
+              out.reportsTo.push(b);
+            }
           }
         }
         if (!b.isGroup && b.targetIeee === d.ieee && b.targetEndpoint === ep && b.sourceIeee !== d.ieee) {
@@ -2374,6 +2376,20 @@
     _deviceLabel(d) {
       return d.user_given_name || d.name || d.model || d.ieee;
     }
+    /** Display label for a device referenced only by IEEE (a binding's
+     *  source/target), falling back to the raw IEEE if it's since left the
+     *  network — shared by the exploded view's badge renderers so they don't
+     *  each repeat the same find-or-fallback lookup. */
+    _targetDeviceLabel(ieee) {
+      const d = this._devices.find((x) => x.ieee === ieee);
+      return d ? this._deviceLabel(d) : ieee;
+    }
+    /** Same idea as _targetDeviceLabel() but for a Zigbee group referenced by
+     *  id (a binding's or membership's group target). */
+    _groupLabel(groupId) {
+      const g = this._groups.find((x) => x.group_id === groupId);
+      return g ? g.name || `Group ${groupId}` : `Group ${groupId}`;
+    }
     _renderGraph() {
       const svg = this._q("#graph-svg");
       const empty = this._q("#graph-empty");
@@ -2827,6 +2843,7 @@
      *  user-editable "what does this control" picker. */
     _endpointCardHtml(d, ep) {
       const rel = this._endpointRelationships(d, ep);
+      const coord = this._coordinatorIeee();
       const detach = this._detachStateFor(d, ep);
       const detachHtml = detach.state === null ? `<span class="ep-badge ep-badge-muted" title="No matching switch.*detach* entity found for this endpoint">Mode unknown</span>` : `<span class="ep-badge ep-badge-muted" title="${escapeHtml(detach.entityId || "")}">${detach.state ? "Detached" : "Not detached"}</span>`;
       const badge = (cls, main, clusters) => `<span class="ep-badge ${cls}">${main}${clusters.length > 1 ? `<span class="ep-badge-clusters">${escapeHtml(clusters.join(", "))}</span>` : ""}</span>`;
@@ -2839,44 +2856,44 @@
       );
       this._groupBindingsByKey(rel.controlsDevice, (b) => `${b.targetIeee}:${b.targetEndpoint}`).forEach(
         ({ binding: b, clusters }) => {
-          const target = this._devices.find((x) => x.ieee === b.targetIeee);
-          const label = target ? this._deviceLabel(target) : b.targetIeee;
-          const main = `Controls ${escapeHtml(label)} (ep ${b.targetEndpoint})`;
+          const main = `Controls ${escapeHtml(this._targetDeviceLabel(b.targetIeee))} (ep ${b.targetEndpoint})`;
           badges.push(badge("ep-badge-out", main, clusters));
         }
       );
       this._groupBindingsByKey(rel.controlsGroup, (b) => `group:${b.groupId}`).forEach(
         ({ binding: b, clusters }) => {
-          const group = this._groups.find((g) => g.group_id === b.groupId);
-          const label = group ? group.name : `Group ${b.groupId}`;
-          const main = `Controls group ${escapeHtml(label)}`;
+          const main = `Controls group ${escapeHtml(this._groupLabel(b.groupId))}`;
           badges.push(badge("ep-badge-out", main, clusters));
         }
       );
       this._groupBindingsByKey(rel.incoming, (b) => `${b.sourceIeee}:${b.sourceEndpoint}`).forEach(
         ({ binding: b, clusters }) => {
-          const source = this._devices.find((x) => x.ieee === b.sourceIeee);
-          const label = source ? this._deviceLabel(source) : b.sourceIeee;
-          const main = `Receives control from ${escapeHtml(label)} (ep ${b.sourceEndpoint})`;
+          const main = `Receives control from ${escapeHtml(this._targetDeviceLabel(b.sourceIeee))} (ep ${b.sourceEndpoint})`;
           badges.push(badge("ep-badge-in", main, clusters));
         }
       );
       rel.memberOf.forEach((m) => {
-        const group = this._groups.find((g) => g.group_id === m.groupId);
-        const label = group ? group.name : `Group ${m.groupId}`;
-        badges.push(`<span class="ep-badge ep-badge-member">Member of ${escapeHtml(label)}</span>`);
+        badges.push(
+          `<span class="ep-badge ep-badge-member">Member of ${escapeHtml(this._groupLabel(m.groupId))}</span>`
+        );
       });
-      this._groupBindingsByKey(rel.unknown, (b) => `${b.targetIeee}:${b.targetEndpoint}`).forEach(
-        ({ binding: b, clusters }) => {
-          const target = this._devices.find((x) => x.ieee === b.targetIeee);
-          const label = target ? this._deviceLabel(target) : b.targetIeee;
-          const main = `Unclassified binding to ${escapeHtml(label)} (ep ${b.targetEndpoint})`;
-          badges.push(badge("ep-badge-unknown", main, clusters));
-        }
-      );
+      this._groupBindingsByKey(
+        rel.unknown,
+        (b) => b.isGroup ? `group:${b.groupId}` : `${b.targetIeee}:${b.targetEndpoint}`
+      ).forEach(({ binding: b, clusters }) => {
+        const main = b.isGroup ? `Unclassified binding to group ${escapeHtml(this._groupLabel(b.groupId))}` : `Unclassified binding to ${escapeHtml(this._targetDeviceLabel(b.targetIeee))} (ep ${b.targetEndpoint})`;
+        badges.push(badge("ep-badge-unknown", main, clusters));
+      });
       if (!badges.length) badges.push(`<span class="ep-badge ep-badge-reporting">Reporting only</span>`);
-      const reportClusters = [...new Set(rel.reportsTo.map((b) => clusterName(b.clusterId)))];
-      const reportLine = reportClusters.length ? `<p class="ep-report">Also reports ${escapeHtml(reportClusters.join(", "))} to the coordinator</p>` : "";
+      const reportLine = this._groupBindingsByKey(
+        rel.reportsTo,
+        (b) => b.isGroup ? `group:${b.groupId}` : `target:${b.targetIeee}`
+      ).map(({ binding: b, clusters }) => {
+        const targetLabel = b.isGroup ? `group ${this._groupLabel(b.groupId)}` : b.targetIeee === coord ? "the coordinator" : this._targetDeviceLabel(b.targetIeee);
+        return `<p class="ep-report">Also reports ${escapeHtml(clusters.join(", "))} to ${escapeHtml(
+          targetLabel
+        )}</p>`;
+      }).join("");
       const current = this._endpointControlType(d.ieee, ep);
       const options = ENDPOINT_CONTROL_TYPES.map(
         (t) => `<option${t === current ? " selected" : ""}>${escapeHtml(t)}</option>`
@@ -4098,7 +4115,7 @@
   };
 
   // src/index.js
-  var CARD_VERSION = "0.18.1";
+  var CARD_VERSION = "0.18.2";
   console.info(
     `%c ZHA-BINDING-MAP-CARD %c v${CARD_VERSION} `,
     "color: white; background: #039be5; font-weight: 700; border-radius: 3px 0 0 3px;",

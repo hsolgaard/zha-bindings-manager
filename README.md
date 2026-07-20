@@ -322,13 +322,11 @@ Bindings Manager focuses on making these answers obvious.
 
 ### Real-world example
 
-A user noticed that an outside light kept turning on whenever the wrong
-switch was pressed. The switch wasn't faulty. Home Assistant wasn't
-involved. The user wasn't pressing the wrong button.
+I originally built ZHA Bindings Manager after an outside light in my own network kept turning on 'randomly'.
+The switch was not faulty. Home Assistant was not involved, and the automation configuration appeared correct.
+The cause was an old direct Zigbee binding that had been forgotten. Once the network was visualised, the rogue relationship was immediately obvious.
 
-The cause was an unexpected direct Zigbee binding that had been forgotten.
-A simple visual overview immediately revealed the rogue binding. Without
-visibility, problems like this can be extremely difficult to diagnose.
+Without visibility, problems like this can be extremely difficult to diagnose.
 
 ### Design philosophy
 
@@ -591,6 +589,28 @@ one-off UI click-through that's easy to get wrong.)
    that wasn't auto-detected, binding directly to the coordinator), use the
    **Advanced** tab.
 
+## Community and support
+
+Questions, ideas and examples from real ZHA networks are very welcome.
+
+- [Questions and help interpreting results](https://github.com/hsolgaard/zha-bindings-manager/discussions/categories/q-a)
+- [Feature ideas](https://github.com/hsolgaard/zha-bindings-manager/discussions/categories/ideas)
+- [Show and Tell — networks, screenshots and successful diagnoses](https://github.com/hsolgaard/zha-bindings-manager/discussions/categories/show-and-tell)
+- [General project discussion](https://github.com/hsolgaard/zha-bindings-manager/discussions/categories/general)
+- [Report a reproducible bug](https://github.com/hsolgaard/zha-bindings-manager/issues)
+- [Home Assistant Community thread](https://community.home-assistant.io/t/zha-bindings-manager-visual-manager-for-zha-zigbee-direct-bindings-graph-table-view-drag-and-drop-bind-unbind/1016911)
+
+When asking for help or reporting an issue, please include where possible:
+
+- ZHA Bindings Manager version
+- Home Assistant version
+- browser
+- Zigbee coordinator
+- device manufacturer and model
+- relevant screenshots or diagnostic output
+
+Please remove IEEE addresses or anything else you would prefer not to publish.
+
 ## Known limitations
 
 - Binding data is only as fresh as your last **Scan bindings** — it is not
@@ -675,3 +695,7 @@ Built on top of:
   displays but otherwise not used by or connected to it in any way. Turn off
   "Show device photo" in that view if you'd rather this card never contact
   it (or the internet at all).
+
+## Licence
+
+ZHA Bindings Manager is open source and released under the [MIT Licence](LICENSE).

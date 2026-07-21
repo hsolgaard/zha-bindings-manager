@@ -2,6 +2,42 @@
 
 All notable changes to ZHA Bindings Manager are documented here.
 
+## [0.19.0] — 21 July 2026
+
+### Added
+
+- **"Check supported commands" in the exploded device view.** Each
+  endpoint card now has a button that runs a live command-discovery scan
+  against that device (via `zha_toolkit.scan_device`) and shows exactly
+  which On/Off and Level Control commands it actually implements — not
+  just which clusters it declares. This came out of a real case on the
+  Home Assistant Community forum: a direct Zigbee binding from an IKEA
+  Vallhorn motion sensor to a Sonoff ZBMINIR2 relay looked correctly set
+  up but did nothing, because the Vallhorn sends `on_with_timed_off` and
+  the ZBMINIR2's firmware (confirmed via a real scan, including on its
+  latest 1.0.8 firmware) only implements the three basic On/Off commands
+  plus `off_with_effect`. This won't fix that kind of mismatch — it's a
+  device firmware limitation, not something a binding tool can work around
+  — but it means you can find out before wiring up a binding instead of
+  after.
+- Command support isn't always confirmable. Not every device answers the
+  underlying ZCL discovery request, and zha_toolkit doesn't currently
+  distinguish "confirmed zero commands" from "device didn't respond to
+  discovery" in what it returns. When a scan comes back empty for a known
+  cluster, the card says so plainly ("device may not support command
+  discovery") rather than presenting an absence as confirmed.
+- This is a manual, on-demand action, not part of the regular network
+  scan — it's a live per-device query (several ZCL round-trips), heavier
+  than everything else the card does, so it only runs when you click the
+  button for a specific endpoint.
+
+## [0.18.3] — 20 July 2026
+
+### Changed
+
+- HACS packaging/metadata update. No functional changes to the card
+  itself.
+
 ## [0.18.2] — 20 July 2026
 
 ### Fixed

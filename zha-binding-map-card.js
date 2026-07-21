@@ -21,7 +21,7 @@
  * zha_toolkit MUST be installed (via HACS) and working for bind/unbind/scan
  * to function. See README.md for details.
  *
- * Version: 0.18.2
+ * Version: 0.19.0
  */
 (() => {
   // src/constants.js
@@ -107,6 +107,26 @@
     const n = Number(id);
     return CLUSTER_FRIENDLY_PHRASE[n] || `${clusterName(n)} control`;
   }
+  var CLUSTER_COMMANDS = {
+    6: {
+      0: "Off",
+      1: "On",
+      2: "Toggle",
+      64: "Off with effect",
+      65: "On with recall global scene",
+      66: "On with timed off"
+    },
+    8: {
+      0: "Move to level",
+      1: "Move",
+      2: "Step",
+      3: "Stop",
+      4: "Move to level (with on/off)",
+      5: "Move (with on/off)",
+      6: "Step (with on/off)",
+      7: "Stop (with on/off)"
+    }
+  };
   var HEALTH_ICON = { ok: "\u2705", info: "\u2139", warning: "\u26A0", error: "\u274C" };
   var HEALTH_LABEL = { ok: "OK", info: "Info", warning: "Warning", error: "Error" };
   var HEALTH_RANK = { error: 0, warning: 1, info: 2, ok: 3 };
@@ -546,6 +566,30 @@
       if (opts.dstEndpoint != null) data.dst_endpoint = opts.dstEndpoint;
       return this.callToolkit("binds_remove_all", data);
     }
+    /** Live per-device command-discovery scan via zha_toolkit.scan_device —
+     *  separate from the passive binds_get-based network scan this card
+     *  otherwise relies on. Sends the real ZCL Discover_Commands_Received/
+     *  Generated requests to the device itself, so it's slower and heavier
+     *  than everything else the card does (multiple round-trips per cluster)
+     *  and zha_toolkit also writes a copy of the result to
+     *  config/scan/*_result.txt on the HA side — deliberately not run
+     *  automatically, only on explicit user action.
+     *  Returns the raw `scan` object zha_toolkit produces (see its
+     *  scan_device.py: {ieee, nwk, model, manufacturer, endpoints: [...]});
+     *  parsing which clusters/commands came back is left to the caller.
+     *  Not every device implements command discovery — an empty
+     *  commands_received/generated for a cluster can mean either "confirmed
+     *  zero commands" or "device didn't answer discovery at all"; zha_toolkit
+     *  doesn't currently preserve that distinction in the data it returns
+     *  (only in its own HA-side log), so callers must present an empty
+     *  result as ambiguous, not as a confirmed negative. */
+    async scanDeviceCommands(ieee, opts = {}) {
+      const data = { ieee };
+      if (opts.endpoint != null) data.endpoint = opts.endpoint;
+      if (opts.tries != null) data.tries = opts.tries;
+      const response = await this.callToolkit("scan_device", data);
+      return response.scan || null;
+    }
     async bindGroup(sourceIeee, groupId, clusterIds, opts = {}) {
       const data = { ieee: sourceIeee, command_data: groupId };
       if (clusterIds && clusterIds.length === 1) data.cluster = clusterIds[0];
@@ -951,6 +995,21 @@
 .ep-badge-muted { background: var(--divider-color, #e0e0e0); color: var(--secondary-text-color); }
 .ep-report { font-size:0.82em; color: var(--secondary-text-color); margin: 4px 0 8px; }
 .ep-picker-label { display:block; font-size:0.8em; color: var(--secondary-text-color); margin-bottom:3px; }
+.ep-cmd-section { margin-top:10px; }
+.ep-cmd-status { margin:4px 0; }
+.ep-cmd-results { display:flex; flex-direction:column; gap:8px; margin-bottom:8px; }
+.ep-cmd-cluster { border:1px solid var(--divider-color, #e0e0e0); border-radius:8px; padding:6px 8px; }
+.ep-cmd-cluster-head { display:flex; align-items:center; justify-content:space-between; font-size:0.85em; font-weight:600; margin-bottom:4px; }
+.ep-cmd-cluster-id { font-weight:400; opacity:0.65; margin-left:4px; }
+.ep-cmd-confirmed { font-size:0.78em; font-weight:400; padding:2px 7px; border-radius:10px; background:#e1f5ee; color:#0a5c46; }
+.ep-cmd-row { display:flex; align-items:center; gap:6px; padding:3px 6px; border-radius:6px; font-size:0.82em; }
+.ep-cmd-row.ep-cmd-yes { }
+.ep-cmd-row.ep-cmd-no { background:#faece7; }
+.ep-cmd-yes .ep-cmd-icon { color:#0a5c46; }
+.ep-cmd-no .ep-cmd-icon { color:#8f3d1c; }
+.ep-cmd-no .ep-cmd-name, .ep-cmd-no .ep-cmd-hex { color:#8f3d1c; }
+.ep-cmd-name { flex:1; }
+.ep-cmd-hex { opacity:0.65; font-size:0.9em; }
 .ep-control-select { width:100%; }
 
 /* Narrow (phone) screens: stack the floor-plan sidebar above the map
@@ -1017,6 +1076,7 @@
       this._fpMarkerScale = DEFAULT_FP_MARKER_SCALE;
       this._tableHealthFilter = "all";
       this._healthReqId = 0;
+      this._commandScans = /* @__PURE__ */ new Map();
       this._fpImageUrl = "";
       this._fpImageSize = null;
       this._fpPositions = {};
@@ -2835,6 +2895,122 @@
           this._setEndpointControlType(d.ieee, Number(sel.dataset.ep), sel.value);
         });
       });
+      this._qa(".ep-cmd-check").forEach((btn) => {
+        btn.addEventListener("click", () => this._checkEndpointCommands(d, Number(btn.dataset.ep)));
+      });
+    }
+    _commandScanKey(ieee, ep) {
+      return `${normIeee(ieee)}:${ep}`;
+    }
+    /** Pure classification helper (unit-tested in smoke-test.js) — given a
+     *  cluster ID and the `commands_received` object zha_toolkit's
+     *  scan_device returned for it (possibly empty/missing), works out what's
+     *  safe to claim:
+     *  - Clusters we have a known standard command list for (CLUSTER_COMMANDS)
+     *    get a row per known command, marked present/absent — but only when
+     *    the device actually returned at least one command for that cluster.
+     *    An empty result is genuinely ambiguous (confirmed zero commands vs.
+     *    the device never answering discovery at all — zha_toolkit doesn't
+     *    preserve that distinction in what it returns, see
+     *    ZhaApi.scanDeviceCommands), so it comes back `confirmed:false` with
+     *    no rows rather than a list of false crosses.
+     *  - Clusters with no known command list just report whatever discovery
+     *    found, positively — there's nothing to compare against, so no
+     *    "missing" claims are made. */
+    _classifyClusterCommands(clusterId, commandsReceived) {
+      const known = CLUSTER_COMMANDS[Number(clusterId)];
+      const found = commandsReceived && typeof commandsReceived === "object" ? commandsReceived : {};
+      const foundIds = new Set(Object.keys(found).map((k) => Number(k)));
+      const hasAnyResult = foundIds.size > 0;
+      if (known) {
+        if (!hasAnyResult) return { known: true, confirmed: false, rows: [] };
+        const rows2 = Object.entries(known).map(([id, name]) => ({
+          id: Number(id),
+          name,
+          present: foundIds.has(Number(id))
+        }));
+        return { known: true, confirmed: true, rows: rows2 };
+      }
+      const rows = Object.entries(found).map(([id, info]) => ({
+        id: Number(id),
+        name: info && info.command_name || `0x${Number(id).toString(16).padStart(2, "0")}`,
+        present: true
+      }));
+      return { known: false, confirmed: hasAnyResult, rows };
+    }
+    /** Triggers a live zha_toolkit.scan_device command-discovery scan for one
+     *  endpoint (see ZhaApi.scanDeviceCommands) and re-renders the exploded
+     *  view with the result. Deliberately not part of the normal scan flow —
+     *  this is slower (real ZCL discovery round-trips per cluster) and only
+     *  useful on demand for a specific device someone's already investigating. */
+    async _checkEndpointCommands(d, ep) {
+      const key = this._commandScanKey(d.ieee, ep);
+      this._commandScans.set(key, { status: "loading" });
+      if (this._q("#dialog").classList.contains("open")) this._renderExplodedView(d);
+      try {
+        const scan = await this._api.scanDeviceCommands(d.ieee, { endpoint: ep, tries: this._retryCount });
+        this._commandScans.set(key, { status: "done", scan });
+      } catch (err) {
+        this._commandScans.set(key, { status: "error", error: err.message || String(err) });
+      }
+      if (!this._q("#dialog").classList.contains("open")) return;
+      const fresh = this._devices.find((x) => x.ieee === d.ieee) || d;
+      this._renderExplodedView(fresh);
+    }
+    /** Renders the "Check supported commands" button/results block for one
+     *  endpoint card — see _checkEndpointCommands()/_classifyClusterCommands(). */
+    _commandsSectionHtml(d, ep) {
+      const key = this._commandScanKey(d.ieee, ep);
+      const entry = this._commandScans.get(key);
+      if (!entry) {
+        return `<button class="btn btn-small ep-cmd-check" data-ep="${ep}">Check supported commands</button>`;
+      }
+      if (entry.status === "loading") {
+        return `<p class="hint ep-cmd-status">Checking supported commands&hellip; this queries the device directly and can take a while.</p>`;
+      }
+      if (entry.status === "error") {
+        return `
+        <p class="hint ep-cmd-status">Couldn't check supported commands: ${escapeHtml(entry.error)}</p>
+        <button class="btn btn-small ep-cmd-check" data-ep="${ep}">Try again</button>`;
+      }
+      const epScan = (entry.scan && entry.scan.endpoints || []).find((e) => Number(e.id) === Number(ep));
+      const inClusters = epScan && epScan.in_clusters || {};
+      const clusterKeys = Object.keys(inClusters);
+      if (!clusterKeys.length) {
+        return `
+        <p class="hint ep-cmd-status">No cluster data came back for this endpoint.</p>
+        <button class="btn btn-small ep-cmd-check" data-ep="${ep}">Try again</button>`;
+      }
+      const sections = clusterKeys.map((k) => {
+        const clusterId = Number(k);
+        const c = inClusters[k];
+        const cls = this._classifyClusterCommands(clusterId, c.commands_received);
+        if (!cls.rows.length && cls.confirmed) return "";
+        const title = `${escapeHtml(clusterName(clusterId))} <span class="ep-cmd-cluster-id">${hex4(clusterId)}</span>`;
+        if (!cls.confirmed) {
+          return `
+            <div class="ep-cmd-cluster">
+              <div class="ep-cmd-cluster-head">${title}</div>
+              <p class="hint">No commands reported \u2014 this device may not support command discovery.</p>
+            </div>`;
+        }
+        const rows = cls.rows.map(
+          (r) => `
+            <div class="ep-cmd-row ${r.present ? "ep-cmd-yes" : "ep-cmd-no"}">
+              <span class="ep-cmd-icon">${r.present ? "\u2713" : "\u2715"}</span>
+              <span class="ep-cmd-name">${escapeHtml(r.name)}</span>
+              <span class="ep-cmd-hex">0x${r.id.toString(16).padStart(2, "0")}</span>
+            </div>`
+        ).join("");
+        return `
+          <div class="ep-cmd-cluster">
+            <div class="ep-cmd-cluster-head">${title}<span class="ep-cmd-confirmed">confirmed via scan</span></div>
+            ${rows}
+          </div>`;
+      }).join("");
+      return `
+      <div class="ep-cmd-results">${sections || `<p class="hint">Nothing to show for known control clusters on this endpoint.</p>`}</div>
+      <button class="btn btn-small ep-cmd-check" data-ep="${ep}">Re-check</button>`;
     }
     /** One endpoint's card: real relationships first (self-bound, controls
      *  another device, controls a group, receives control, group membership,
@@ -2908,6 +3084,10 @@
         ${reportLine}
         <label class="ep-picker-label">Physically wired to</label>
         <select class="ep-control-select" data-ep="${ep}">${options}</select>
+        <div class="ep-cmd-section">
+          <label class="ep-picker-label">Supported commands</label>
+          ${this._commandsSectionHtml(d, ep)}
+        </div>
       </div>`;
     }
     // -------------------------------------------------------------------
@@ -4115,7 +4295,7 @@
   };
 
   // src/index.js
-  var CARD_VERSION = "0.18.2";
+  var CARD_VERSION = "0.19.0";
   console.info(
     `%c ZHA-BINDING-MAP-CARD %c v${CARD_VERSION} `,
     "color: white; background: #039be5; font-weight: 700; border-radius: 3px 0 0 3px;",

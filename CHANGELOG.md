@@ -2,6 +2,103 @@
 
 All notable changes to ZHA Bindings Manager are documented here.
 
+## [0.20.1] — 21 July 2026
+
+### Fixed
+
+- **"Copy JSON" wasn't actually copying anything on some Home Assistant
+  installs.** `navigator.clipboard` only exists in secure contexts (https or
+  localhost) — a great many real HA installs are reached over plain http on
+  a LAN IP, where the API is simply undefined and the copy silently failed.
+  Worse, the error feedback was written to the card's main status bar, which
+  sits behind the open exploded-view dialog and was never actually visible.
+  Copy now falls back to the older `execCommand`-based selection copy (which
+  works over plain http too), and feedback is shown directly on the button
+  itself, inside the dialog, so it's never hidden behind the modal.
+
+### Changed
+
+- **Simplified sharing a scan too large for a pre-filled GitHub issue.**
+  Previously this dropped you on a completely blank issue form — no title,
+  nothing — and you'd have to copy the JSON yourself first. The title is
+  now always pre-filled regardless of size (titles are always short), and
+  clicking through also copies the JSON in the same click, so there's one
+  remaining manual step (paste) instead of three.
+- The JSON embedded in the pre-filled URL itself is now compact rather than
+  pretty-printed, so noticeably more real scans fit under the URL length
+  cutoff in the first place and hit the fast, fully pre-filled path instead
+  of the fallback. The on-screen review box and clipboard copy stay
+  pretty-printed for readability, since that's what actually gets
+  pasted/submitted.
+
+## [0.20.0] — 21 July 2026
+
+### Changed
+
+- **"Supported commands" redesigned as collapsed, per-cluster rows.** Rather
+  than one big list, each cluster this endpoint actually declares (and that
+  this card has a command table for) now shows as its own collapsed row —
+  click to expand and see the full valid/invalid command list for that
+  cluster. Clusters the device doesn't declare at all never appear, so this
+  stays naturally scoped without any device-type special-casing (a light
+  endpoint simply never shows a Door Lock row). One "Check supported
+  commands" scan still populates every row on the endpoint at once —
+  zha_toolkit's `scan_device` has no way to target a single cluster, so
+  there's no benefit to a true per-row fetch.
+- Expanding a cluster now always shows the complete command list, both
+  present and absent — not just what's missing. Seeing what a device *can*
+  do is as useful as spotting a gap, especially for anyone exploring a new
+  device rather than troubleshooting a specific mismatch.
+- Moved the "Supported commands" section higher in the endpoint card (right
+  after the relationship badges, before "Physically wired to") since it was
+  easy to miss below the fold.
+
+### Added
+
+- **"Share this scan" — submit a completed command scan to the community
+  device capability database.** A new, openly-licensed, public dataset
+  ([zha-device-capabilities](https://github.com/hsolgaard/zha-device-capabilities))
+  of confirmed cluster/command/attribute support per manufacturer+model,
+  built from real scans rather than manufacturer docs — usable by anyone,
+  not just this card. Clicking "Share this scan" builds the submission
+  record, shows it inline for review, then opens a pre-filled GitHub issue
+  (or falls back to copy-to-clipboard for scans too large for a pre-filled
+  link). Nothing is sent anywhere until you click through and submit it
+  yourself, using your own GitHub account — this card never touches GitHub
+  credentials. The record contains manufacturer, model, firmware identity
+  (where the Basic cluster reports it), the endpoint's cluster signature,
+  and per-cluster command/attribute support — deliberately never IEEE
+  address, entity IDs, area names, or binding data, since none of that
+  describes the device itself.
+- The scan already performed attribute discovery alongside command
+  discovery (confirmed against zha_toolkit's actual `scan_device.py`) — this
+  data was previously discarded and is now captured for the shared record,
+  at no extra cost (same single scan).
+
+## [0.19.2] — 21 July 2026
+
+### Added
+
+- **"Check supported commands" now covers every control-capable cluster,
+  not just On/Off and Level Control.** Added verified command tables
+  (checked against zigpy's own cluster definitions) for Scenes, Alarms,
+  Door Lock, Window Covering, Thermostat, Color Control, IAS Zone, IAS
+  ACE, and IAS WD. Clusters that are attribute-only with no real commands
+  (Pump Configuration and Control, Fan Control, Dehumidification Control,
+  Thermostat UI Configuration, Ballast Configuration, Shade Configuration)
+  correctly have nothing to show and are skipped, same as before.
+
+## [0.19.1] — 21 July 2026
+
+### Changed
+
+- **"Check supported commands" now only shows On/Off and Level Control.**
+  The first version listed every cluster the device returned anything for,
+  including administrative ones like Basic, Identify, and Groups — always
+  present, never actually in question, just clutter. It now only shows the
+  clusters this feature can make a real "supported" / "not supported" call
+  on.
+
 ## [0.19.0] — 21 July 2026
 
 ### Added

@@ -21,11 +21,13 @@
  * zha_toolkit MUST be installed (via HACS) and working for bind/unbind/scan
  * to function. See README.md for details.
  *
- * Version: 0.19.0
+ * Version: 0.20.1
  */
 (() => {
   // src/constants.js
   var ZTK_DOMAIN = "zha_toolkit";
+  var CARD_VERSION = "0.20.1";
+  var CAPABILITY_DB_REPO = "hsolgaard/zha-device-capabilities";
   var DEFAULT_BINDABLE_OUT_CLUSTERS = [5, 6, 8, 258, 768];
   var MEMBERSHIP_EDGE_COLOR = "#8e24aa";
   var HISTORY_LIMIT = 10;
@@ -108,6 +110,18 @@
     return CLUSTER_FRIENDLY_PHRASE[n] || `${clusterName(n)} control`;
   }
   var CLUSTER_COMMANDS = {
+    5: {
+      0: "Add",
+      1: "View",
+      2: "Remove",
+      3: "Remove all",
+      4: "Store",
+      5: "Recall",
+      6: "Get scene membership",
+      64: "Enhanced add",
+      65: "Enhanced view",
+      66: "Copy"
+    },
     6: {
       0: "Off",
       1: "On",
@@ -125,6 +139,98 @@
       5: "Move (with on/off)",
       6: "Step (with on/off)",
       7: "Stop (with on/off)"
+    },
+    9: {
+      0: "Reset alarm",
+      1: "Reset all alarms",
+      2: "Get alarm",
+      3: "Reset alarm log"
+    },
+    257: {
+      0: "Lock door",
+      1: "Unlock door",
+      2: "Toggle door",
+      3: "Unlock with timeout",
+      4: "Get log record",
+      5: "Set PIN code",
+      6: "Get PIN code",
+      7: "Clear PIN code",
+      8: "Clear all PIN codes",
+      9: "Set user status",
+      10: "Get user status",
+      11: "Set week day schedule",
+      12: "Get week day schedule",
+      13: "Clear week day schedule",
+      14: "Set year day schedule",
+      15: "Get year day schedule",
+      16: "Clear year day schedule",
+      17: "Set holiday schedule",
+      18: "Get holiday schedule",
+      19: "Clear holiday schedule",
+      20: "Set user type",
+      21: "Get user type",
+      22: "Set RFID code",
+      23: "Get RFID code",
+      24: "Clear RFID code",
+      25: "Clear all RFID codes"
+    },
+    258: {
+      0: "Up/open",
+      1: "Down/close",
+      2: "Stop",
+      4: "Go to lift value",
+      5: "Go to lift percentage",
+      7: "Go to tilt value",
+      8: "Go to tilt percentage"
+    },
+    513: {
+      0: "Setpoint raise/lower",
+      1: "Set weekly schedule",
+      2: "Get weekly schedule",
+      3: "Clear weekly schedule",
+      4: "Get relay status log"
+    },
+    768: {
+      0: "Move to hue",
+      1: "Move hue",
+      2: "Step hue",
+      3: "Move to saturation",
+      4: "Move saturation",
+      5: "Step saturation",
+      6: "Move to hue and saturation",
+      7: "Move to color",
+      8: "Move color",
+      9: "Step color",
+      10: "Move to color temperature",
+      64: "Enhanced move to hue",
+      65: "Enhanced move hue",
+      66: "Enhanced step hue",
+      67: "Enhanced move to hue and saturation",
+      68: "Color loop set",
+      71: "Stop move/step",
+      75: "Move color temperature",
+      76: "Step color temperature"
+    },
+    1280: {
+      0: "Enroll response",
+      1: "Initiate normal operation mode",
+      2: "Initiate test mode"
+    },
+    1281: {
+      0: "Arm",
+      1: "Bypass",
+      2: "Emergency",
+      3: "Fire",
+      4: "Panic",
+      5: "Get zone ID map",
+      6: "Get zone info",
+      7: "Get panel status",
+      8: "Get bypassed zone list",
+      9: "Get zone status"
+    },
+    1282: {
+      0: "Start warning",
+      1: "Squawk"
     }
   };
   var HEALTH_ICON = { ok: "\u2705", info: "\u2139", warning: "\u26A0", error: "\u274C" };
@@ -995,13 +1101,22 @@
 .ep-badge-muted { background: var(--divider-color, #e0e0e0); color: var(--secondary-text-color); }
 .ep-report { font-size:0.82em; color: var(--secondary-text-color); margin: 4px 0 8px; }
 .ep-picker-label { display:block; font-size:0.8em; color: var(--secondary-text-color); margin-bottom:3px; }
-.ep-cmd-section { margin-top:10px; }
+.ep-cmd-section { margin:10px 0; padding:8px 0; border-top:1px solid var(--divider-color, #e0e0e0); border-bottom:1px solid var(--divider-color, #e0e0e0); }
 .ep-cmd-status { margin:4px 0; }
-.ep-cmd-results { display:flex; flex-direction:column; gap:8px; margin-bottom:8px; }
+.ep-cmd-actions { display:flex; gap:6px; flex-wrap:wrap; margin-bottom:8px; }
+.ep-cmd-results { display:flex; flex-direction:column; gap:6px; margin-bottom:8px; }
 .ep-cmd-cluster { border:1px solid var(--divider-color, #e0e0e0); border-radius:8px; padding:6px 8px; }
-.ep-cmd-cluster-head { display:flex; align-items:center; justify-content:space-between; font-size:0.85em; font-weight:600; margin-bottom:4px; }
+.ep-cmd-cluster-head {
+  display:flex; align-items:center; gap:6px; width:100%; text-align:left;
+  border:none; background:none; padding:0; margin:0; font: inherit; font-size:0.85em; font-weight:600;
+  color:inherit; cursor:pointer;
+}
+.ep-cmd-cluster-head:hover { color: var(--primary-color); }
+.ep-cmd-chevron { flex:none; opacity:0.6; font-size:0.9em; }
+.ep-cmd-cluster-title { flex:1; }
+.ep-cmd-summary { flex:none; font-weight:400; font-size:0.82em; opacity:0.7; white-space:nowrap; }
+.ep-cmd-cluster-body { margin-top:6px; display:flex; flex-direction:column; gap:4px; }
 .ep-cmd-cluster-id { font-weight:400; opacity:0.65; margin-left:4px; }
-.ep-cmd-confirmed { font-size:0.78em; font-weight:400; padding:2px 7px; border-radius:10px; background:#e1f5ee; color:#0a5c46; }
 .ep-cmd-row { display:flex; align-items:center; gap:6px; padding:3px 6px; border-radius:6px; font-size:0.82em; }
 .ep-cmd-row.ep-cmd-yes { }
 .ep-cmd-row.ep-cmd-no { background:#faece7; }
@@ -1010,6 +1125,13 @@
 .ep-cmd-no .ep-cmd-name, .ep-cmd-no .ep-cmd-hex { color:#8f3d1c; }
 .ep-cmd-name { flex:1; }
 .ep-cmd-hex { opacity:0.65; font-size:0.9em; }
+.ep-cmd-share-draft { border:1px dashed var(--divider-color, #ccc); border-radius:8px; padding:8px; margin-top:4px; }
+.ep-cmd-share-json {
+  width:100%; box-sizing:border-box; font-family: var(--code-font-family, monospace); font-size:0.72em;
+  background: var(--card-background-color); color: var(--primary-text-color);
+  border:1px solid var(--divider-color, #ccc); border-radius:6px; padding:6px; resize:vertical;
+}
+.ep-cmd-share-actions { display:flex; gap:6px; flex-wrap:wrap; margin-top:6px; }
 .ep-control-select { width:100%; }
 
 /* Narrow (phone) screens: stack the floor-plan sidebar above the map
@@ -1077,6 +1199,8 @@
       this._tableHealthFilter = "all";
       this._healthReqId = 0;
       this._commandScans = /* @__PURE__ */ new Map();
+      this._expandedCmdClusters = /* @__PURE__ */ new Set();
+      this._shareDraft = null;
       this._fpImageUrl = "";
       this._fpImageSize = null;
       this._fpPositions = {};
@@ -2842,6 +2966,7 @@
     // per-endpoint breakdown. No external lookups, nothing asked of the user.
     // -------------------------------------------------------------------
     async _openDeviceExplodedView(d) {
+      this._shareDraft = null;
       const panel = this._q(".dialog-panel");
       if (panel) panel.classList.add("wide");
       this._q("#dialog-title").textContent = this._deviceLabel(d);
@@ -2897,6 +3022,45 @@
       });
       this._qa(".ep-cmd-check").forEach((btn) => {
         btn.addEventListener("click", () => this._checkEndpointCommands(d, Number(btn.dataset.ep)));
+      });
+      this._qa(".ep-cmd-toggle").forEach((btn) => {
+        btn.addEventListener("click", () => {
+          const rowKey = btn.dataset.rowKey;
+          if (this._expandedCmdClusters.has(rowKey)) this._expandedCmdClusters.delete(rowKey);
+          else this._expandedCmdClusters.add(rowKey);
+          this._renderExplodedView(d);
+        });
+      });
+      this._qa(".ep-cmd-share").forEach((btn) => {
+        btn.addEventListener("click", () => this._shareCommandScan(d, Number(btn.dataset.ep)));
+      });
+      this._qa(".ep-cmd-share-cancel").forEach((btn) => {
+        btn.addEventListener("click", () => {
+          this._shareDraft = null;
+          this._renderExplodedView(d);
+        });
+      });
+      this._qa(".ep-cmd-share-copy").forEach((btn) => {
+        btn.addEventListener("click", async () => {
+          if (!this._shareDraft) return;
+          const original = btn.textContent;
+          const ok = await this._copyShareText(this._shareDraft.body);
+          btn.textContent = ok ? "Copied!" : "Couldn't copy \u2014 select the text above";
+          setTimeout(() => {
+            btn.textContent = original;
+          }, 2500);
+        });
+      });
+      this._qa(".ep-cmd-share-open").forEach((a) => {
+        a.addEventListener("click", async () => {
+          if (!this._shareDraft || !this._shareDraft.tooLong) return;
+          const original = a.textContent;
+          const ok = await this._copyShareText(this._shareDraft.body);
+          a.textContent = ok ? "Copied \u2014 opening issue\u2026" : "Couldn't copy \u2014 opening issue\u2026";
+          setTimeout(() => {
+            a.textContent = original;
+          }, 2500);
+        });
       });
     }
     _commandScanKey(ieee, ep) {
@@ -2957,60 +3121,252 @@
       const fresh = this._devices.find((x) => x.ieee === d.ieee) || d;
       this._renderExplodedView(fresh);
     }
-    /** Renders the "Check supported commands" button/results block for one
-     *  endpoint card — see _checkEndpointCommands()/_classifyClusterCommands(). */
+    /** Renders the "Supported commands" block for one endpoint card: a
+     *  collapsed row per cluster this endpoint actually declares (via the
+     *  cluster cache — real, already-fetched data, no live query needed just
+     *  to show the list) that we also have a known command table for
+     *  (CLUSTER_COMMANDS). Clusters the device doesn't declare at all simply
+     *  never appear — a light endpoint never shows a Door Lock row — so this
+     *  is naturally scoped without any device-type special-casing. Rows start
+     *  collapsed; expanding one shows its full valid/invalid command list
+     *  once a scan has run, not just what's missing — Hans was explicit that
+     *  seeing what a device *can* do is as valuable as spotting a gap. One
+     *  scan (via the button above the list) populates every row on this
+     *  endpoint at once, since zha_toolkit's scan_device has no way to target
+     *  a single cluster — see _checkEndpointCommands(). */
     _commandsSectionHtml(d, ep) {
+      const clusters = this._clusterCache.get(d.ieee) || [];
+      const declaredIds = new Set(
+        clusters.filter((c) => c.type === "in" && c.endpoint_id === ep).map((c) => Number(c.id))
+      );
+      const relevantIds = [...declaredIds].filter((id) => CLUSTER_COMMANDS[id]).sort((a, b) => a - b);
+      if (!relevantIds.length) {
+        return `<p class="hint ep-cmd-status">This endpoint doesn't declare any clusters this card has command data for.</p>`;
+      }
       const key = this._commandScanKey(d.ieee, ep);
       const entry = this._commandScans.get(key);
+      let actionHtml;
       if (!entry) {
-        return `<button class="btn btn-small ep-cmd-check" data-ep="${ep}">Check supported commands</button>`;
-      }
-      if (entry.status === "loading") {
-        return `<p class="hint ep-cmd-status">Checking supported commands&hellip; this queries the device directly and can take a while.</p>`;
-      }
-      if (entry.status === "error") {
-        return `
+        actionHtml = `<button class="btn btn-small ep-cmd-check" data-ep="${ep}">Check supported commands</button>`;
+      } else if (entry.status === "loading") {
+        actionHtml = `<p class="hint ep-cmd-status">Checking supported commands&hellip; this queries the device directly and can take a while.</p>`;
+      } else if (entry.status === "error") {
+        actionHtml = `
         <p class="hint ep-cmd-status">Couldn't check supported commands: ${escapeHtml(entry.error)}</p>
         <button class="btn btn-small ep-cmd-check" data-ep="${ep}">Try again</button>`;
+      } else {
+        actionHtml = `
+        <button class="btn btn-small ep-cmd-check" data-ep="${ep}">Re-check</button>
+        <button class="btn btn-small ep-cmd-share" data-ep="${ep}">Share this scan</button>`;
       }
-      const epScan = (entry.scan && entry.scan.endpoints || []).find((e) => Number(e.id) === Number(ep));
+      const scanned = !!(entry && entry.status === "done");
+      const epScan = scanned ? (entry.scan && entry.scan.endpoints || []).find((e) => Number(e.id) === Number(ep)) : null;
       const inClusters = epScan && epScan.in_clusters || {};
-      const clusterKeys = Object.keys(inClusters);
-      if (!clusterKeys.length) {
-        return `
-        <p class="hint ep-cmd-status">No cluster data came back for this endpoint.</p>
-        <button class="btn btn-small ep-cmd-check" data-ep="${ep}">Try again</button>`;
-      }
-      const sections = clusterKeys.map((k) => {
-        const clusterId = Number(k);
-        const c = inClusters[k];
-        const cls = this._classifyClusterCommands(clusterId, c.commands_received);
-        if (!cls.rows.length && cls.confirmed) return "";
+      const rows = relevantIds.map((clusterId) => {
+        const hexKey = hex4(clusterId);
+        const c = inClusters[hexKey];
+        const rowKey = `${key}:${clusterId}`;
+        const expanded = this._expandedCmdClusters.has(rowKey);
         const title = `${escapeHtml(clusterName(clusterId))} <span class="ep-cmd-cluster-id">${hex4(clusterId)}</span>`;
-        if (!cls.confirmed) {
-          return `
-            <div class="ep-cmd-cluster">
-              <div class="ep-cmd-cluster-head">${title}</div>
-              <p class="hint">No commands reported \u2014 this device may not support command discovery.</p>
-            </div>`;
+        let summary = "Not checked yet";
+        let bodyHtml = `<p class="hint">Run "Check supported commands" above to see this cluster's valid/invalid commands.</p>`;
+        if (scanned) {
+          if (!c) {
+            summary = "No data returned";
+            bodyHtml = `<p class="hint">The scan didn't return data for this cluster \u2014 the device may not have responded for it specifically.</p>`;
+          } else {
+            const cls = this._classifyClusterCommands(clusterId, c.commands_received);
+            if (!cls.confirmed) {
+              summary = "No response to discovery";
+              bodyHtml = `<p class="hint">No commands reported \u2014 this device may not support command discovery.</p>`;
+            } else {
+              const presentCount = cls.rows.filter((r) => r.present).length;
+              summary = `${presentCount} of ${cls.rows.length} confirmed`;
+              bodyHtml = cls.rows.map(
+                (r) => `
+                  <div class="ep-cmd-row ${r.present ? "ep-cmd-yes" : "ep-cmd-no"}">
+                    <span class="ep-cmd-icon">${r.present ? "\u2713" : "\u2715"}</span>
+                    <span class="ep-cmd-name">${escapeHtml(r.name)}</span>
+                    <span class="ep-cmd-hex">0x${r.id.toString(16).padStart(2, "0")}</span>
+                  </div>`
+              ).join("");
+            }
+          }
         }
-        const rows = cls.rows.map(
-          (r) => `
-            <div class="ep-cmd-row ${r.present ? "ep-cmd-yes" : "ep-cmd-no"}">
-              <span class="ep-cmd-icon">${r.present ? "\u2713" : "\u2715"}</span>
-              <span class="ep-cmd-name">${escapeHtml(r.name)}</span>
-              <span class="ep-cmd-hex">0x${r.id.toString(16).padStart(2, "0")}</span>
-            </div>`
-        ).join("");
         return `
           <div class="ep-cmd-cluster">
-            <div class="ep-cmd-cluster-head">${title}<span class="ep-cmd-confirmed">confirmed via scan</span></div>
-            ${rows}
+            <button type="button" class="ep-cmd-cluster-head ep-cmd-toggle" data-row-key="${escapeHtml(rowKey)}">
+              <span class="ep-cmd-chevron">${expanded ? "\u25BE" : "\u25B8"}</span>
+              <span class="ep-cmd-cluster-title">${title}</span>
+              <span class="ep-cmd-summary">${escapeHtml(summary)}</span>
+            </button>
+            ${expanded ? `<div class="ep-cmd-cluster-body">${bodyHtml}</div>` : ""}
           </div>`;
       }).join("");
+      const shareHtml = this._shareDraft && this._shareDraft.key === key ? this._shareDraftHtml(this._shareDraft) : "";
       return `
-      <div class="ep-cmd-results">${sections || `<p class="hint">Nothing to show for known control clusters on this endpoint.</p>`}</div>
-      <button class="btn btn-small ep-cmd-check" data-ep="${ep}">Re-check</button>`;
+      <div class="ep-cmd-actions">${actionHtml}</div>
+      <div class="ep-cmd-results">${rows}</div>
+      ${shareHtml}`;
+    }
+    /** Inline "review before sharing" block for a completed command scan —
+     *  see _shareCommandScan(). Shown directly under the cluster list rather
+     *  than as a separate dialog (the exploded view is already a dialog, and
+     *  this card has no nested-dialog support), so nothing is ever sent
+     *  anywhere without the user seeing exactly what's in it first.
+     *  When the payload's too large to pre-fill the whole issue, the title
+     *  still gets pre-filled (titles are always short) and the one open/link
+     *  action also copies the JSON in the same click — down to one manual
+     *  step (paste) instead of inventing a title and copying separately. */
+    _shareDraftHtml(draft) {
+      const openLabel = draft.tooLong ? "Copy JSON &amp; open issue" : "Open GitHub issue";
+      const openBtn = `<a class="btn btn-small ep-cmd-share-open" href="${escapeHtml(
+        draft.url
+      )}" target="_blank" rel="noopener">${openLabel}</a>`;
+      const notice = draft.tooLong ? `<p class="hint">This scan is too large to pre-fill the whole issue. The title's already filled in \u2014 clicking below also copies the JSON, so just paste it (Ctrl/Cmd+V) into the body once the new issue opens.</p>` : `<p class="hint">Review what would be submitted, then open a pre-filled GitHub issue \u2014 nothing is sent until you click "Submit new issue" on GitHub's own page. No IEEE address, entity, area, or binding data is included.</p>`;
+      return `
+      <div class="ep-cmd-share-draft">
+        ${notice}
+        <textarea class="ep-cmd-share-json" readonly rows="8">${escapeHtml(draft.body)}</textarea>
+        <div class="ep-cmd-share-actions">
+          ${openBtn}
+          <button class="btn btn-small ep-cmd-share-copy" type="button">Copy JSON</button>
+          <button class="btn btn-small ep-cmd-share-cancel" type="button">Cancel</button>
+        </div>
+      </div>`;
+    }
+    /** Assembles the shareable capability record for one endpoint's completed
+     *  scan_device result, matching the schema described in the
+     *  zha-device-capabilities repo's README. Pure function of
+     *  (device, endpoint, scan) — unit-tested in smoke-test.js — so it's
+     *  never guessing at the scan's shape; every field read here is verified
+     *  against zha_toolkit's actual scan_device.py (scan_endpoint/scan_cluster/
+     *  discover_attributes_extended).
+     *  Deliberately excludes anything that identifies this specific device or
+     *  network — no IEEE, no entity IDs, no area, no binding data — only what
+     *  the device model/firmware is capable of. Covers every cluster the scan
+     *  touched (not just the known-command ones the UI itself displays),
+     *  since attribute-only clusters (e.g. Basic, Power Configuration) are
+     *  still genuinely useful capability data for the shared database even
+     *  though this card has nothing to check them against. */
+    _buildCapabilityRecord(d, ep, scan) {
+      const epScan = (scan && scan.endpoints || []).find((e) => Number(e.id) === Number(ep));
+      if (!epScan) return null;
+      const inClusters = epScan.in_clusters || {};
+      const outClusters = epScan.out_clusters || {};
+      const basic = inClusters["0x0000"];
+      const findIdentityAttr = (name) => {
+        if (!basic || !basic.attributes) return null;
+        const hit = Object.values(basic.attributes).find((a) => a.attribute_name === name);
+        return hit && hit.attribute_value != null ? hit.attribute_value : null;
+      };
+      const clusters = {};
+      Object.keys(inClusters).forEach((hexKey) => {
+        const clusterData = inClusters[hexKey] || {};
+        const clusterId = Number(hexKey);
+        const commandsReceived = this._classifyClusterCommands(clusterId, clusterData.commands_received);
+        const commandsGenerated = Object.values(clusterData.commands_generated || {}).map((info) => ({
+          id: Number(info.command_id),
+          name: info.command_name
+        }));
+        const attributesConfirmed = Object.values(clusterData.attributes || {}).map((info) => ({
+          id: Number(info.attribute_id),
+          name: info.attribute_name,
+          access: info.access
+        }));
+        clusters[hexKey] = {
+          name: clusterName(clusterId),
+          commands_received: commandsReceived.rows,
+          commands_received_confirmed: commandsReceived.confirmed,
+          commands_generated: commandsGenerated,
+          attributes_confirmed: attributesConfirmed
+        };
+      });
+      return {
+        manufacturer: d.manufacturer || null,
+        model: d.model || null,
+        identity: {
+          sw_build_id: findIdentityAttr("sw_build_id"),
+          hw_version: findIdentityAttr("hw_version"),
+          date_code: findIdentityAttr("date_code")
+        },
+        endpoint: {
+          id: ep,
+          profile: epScan.profile || null,
+          device_type: epScan.device_type || null,
+          in_clusters: Object.keys(inClusters),
+          out_clusters: Object.keys(outClusters)
+        },
+        clusters,
+        provenance: {
+          submitted_at: (/* @__PURE__ */ new Date()).toISOString(),
+          card_version: CARD_VERSION
+        }
+      };
+    }
+    /** Builds the review draft for sharing a completed command scan to the
+     *  community capability database (see CAPABILITY_DB_REPO) and shows it
+     *  inline for confirmation — see _shareDraftHtml(). Always manual, never
+     *  automatic: nothing leaves the browser until the user clicks through to
+     *  GitHub's own "Submit new issue" button themselves, using their own
+     *  GitHub session — this card never touches GitHub credentials. GitHub
+     *  issue pre-fill URLs get unreliable well before any hard browser limit,
+     *  so 6000 characters is a conservative cutoff, not the actual ceiling.
+     *  The URL attempt uses compact (unindented) JSON specifically to
+     *  maximize how often a scan fits under that cutoff — pretty-printing's
+     *  whitespace alone is often 30-50% of the encoded size — while the
+     *  on-screen review box and clipboard copy stay pretty-printed for
+     *  readability, since that's what actually gets pasted/submitted. Past
+     *  the cutoff, the title still gets pre-filled (titles are always short)
+     *  with a paste placeholder body — see _shareDraftHtml(). */
+    _shareCommandScan(d, ep) {
+      const key = this._commandScanKey(d.ieee, ep);
+      const entry = this._commandScans.get(key);
+      if (!entry || entry.status !== "done") return;
+      const record = this._buildCapabilityRecord(d, ep, entry.scan);
+      if (!record) {
+        this._setStatus("error", "Nothing to share \u2014 no scan data for this endpoint.");
+        return;
+      }
+      const title = `[Device Submission] ${record.manufacturer || "Unknown"} ${record.model || "Unknown"}${record.identity.sw_build_id ? ` (fw ${record.identity.sw_build_id})` : ""}`;
+      const displayBody = "```json\n" + JSON.stringify(record, null, 2) + "\n```";
+      const compactBody = "```json\n" + JSON.stringify(record) + "\n```";
+      const labelsParam = `labels=${encodeURIComponent("device-submission")}`;
+      const fullUrl = `https://github.com/${CAPABILITY_DB_REPO}/issues/new?title=${encodeURIComponent(title)}&body=${encodeURIComponent(compactBody)}&${labelsParam}`;
+      const tooLong = fullUrl.length > 6e3;
+      const url = tooLong ? `https://github.com/${CAPABILITY_DB_REPO}/issues/new?title=${encodeURIComponent(title)}&body=${encodeURIComponent("Paste the copied JSON below this line:\n\n")}&${labelsParam}` : fullUrl;
+      this._shareDraft = { key, record, title, body: displayBody, url, tooLong };
+      this._renderExplodedView(d);
+    }
+    /** Best-effort clipboard copy with an old-style fallback for HTTP-served
+     *  Home Assistant instances — navigator.clipboard only exists in secure
+     *  contexts (https or localhost), and plenty of real HA installs are
+     *  reached over plain http on a LAN IP, where it's simply undefined and
+     *  the modern API can't be used at all (not a rare edge case). Falls back
+     *  to selecting the visible review textarea and asking the browser to
+     *  copy the current selection via the older execCommand path, which works
+     *  over plain http too; if even that's unavailable, the text is at least
+     *  left selected for a manual Ctrl/Cmd+C. Returns whether the copy is
+     *  believed to have worked — execCommand's return value is the only
+     *  signal either path gives, so this is best-effort, not a guarantee. */
+    async _copyShareText(text) {
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        try {
+          await navigator.clipboard.writeText(text);
+          return true;
+        } catch (e) {
+        }
+      }
+      const textarea = this._q(".ep-cmd-share-json");
+      if (textarea) {
+        try {
+          textarea.focus();
+          textarea.select();
+          return document.execCommand("copy");
+        } catch (e) {
+        }
+      }
+      return false;
     }
     /** One endpoint's card: real relationships first (self-bound, controls
      *  another device, controls a group, receives control, group membership,
@@ -3082,12 +3438,12 @@
         </div>
         <div class="ep-badges">${badges.join("")}</div>
         ${reportLine}
-        <label class="ep-picker-label">Physically wired to</label>
-        <select class="ep-control-select" data-ep="${ep}">${options}</select>
         <div class="ep-cmd-section">
           <label class="ep-picker-label">Supported commands</label>
           ${this._commandsSectionHtml(d, ep)}
         </div>
+        <label class="ep-picker-label">Physically wired to</label>
+        <select class="ep-control-select" data-ep="${ep}">${options}</select>
       </div>`;
     }
     // -------------------------------------------------------------------
@@ -4295,7 +4651,6 @@
   };
 
   // src/index.js
-  var CARD_VERSION = "0.19.0";
   console.info(
     `%c ZHA-BINDING-MAP-CARD %c v${CARD_VERSION} `,
     "color: white; background: #039be5; font-weight: 700; border-radius: 3px 0 0 3px;",

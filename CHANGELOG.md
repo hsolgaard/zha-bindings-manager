@@ -4,10 +4,6 @@ All notable changes to ZHA Bindings Manager are documented here.
 
 ## [0.24.0] — 24 July 2026
 
-This completes the Capability Explorer's PRD v2 Phase 2 scope — all four
-planned features (Contributor Feedback, Compare My Device, and the two
-below) are now built.
-
 ### Added
 
 - **Capability Outcomes.** Explore My Devices' "Supports" section now groups
@@ -31,7 +27,7 @@ below) are now built.
   anything that doesn't clear its threshold is simply omitted, never shown
   with a hedge.
 
-## [0.23.0] — 24 July 2026 (local testing build — not yet released)
+## [0.23.0] — 24 July 2026 
 
 ### Added
 

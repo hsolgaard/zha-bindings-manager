@@ -83,6 +83,7 @@ No other configuration is required.
 5. Drag a controller device onto a target device to start creating a binding.
 6. Select a device node, or **Explode** in the Devices view, for an endpoint-by-endpoint breakdown.
 7. In an endpoint card, select **Check supported commands** when you need to verify what that device firmware actually implements.
+8. Open the **Zigbee Capability Explorer** view to see what your own devices — or a device you're considering buying — are confirmed to support, based on scans shared by the community.
 
 Reading binding tables is a real Zigbee operation. Battery-powered buttons and remotes may need to be woken before they respond. When one device fails, wake it and use its individual **Rescan** action rather than scanning the entire network again.
 
@@ -128,11 +129,24 @@ The supported-command check uses `zha_toolkit.scan_device` to query the device d
 
 This helps diagnose an important class of problem that Binding Health cannot detect: a binding may be structurally correct while the receiving device's firmware does not implement the particular command sent by the controller.
 
-A completed scan can also be reviewed and shared with the public [`zha-device-capabilities`](https://github.com/hsolgaard/zha-device-capabilities) dataset. Shared records contain the manufacturer, model, firmware identity, endpoint cluster signature, and discovered command and attribute support. They deliberately exclude IEEE addresses, entity IDs, Home Assistant areas and binding data.
+A completed scan can also be reviewed and shared with the public [`zigbee-capabilities`](https://github.com/hsolgaard/zigbee-capabilities) dataset — see [Explore device capabilities](#explore-device-capabilities) below. Shared records contain the manufacturer, model, firmware identity, endpoint cluster signature, and discovered command and attribute support. They deliberately exclude IEEE addresses, entity IDs, Home Assistant areas and binding data.
 
 Nothing is submitted automatically. The card prepares a GitHub issue for the user to review and submit using their own GitHub account.
 
 The physical-load annotation is saved **in the current browser only**. It is not written to Home Assistant and does not automatically follow you to another browser or device.
+
+### Explore device capabilities
+
+The **Zigbee Capability Explorer** view answers what a device can actually do, using evidence from real scans shared by the community rather than manufacturer claims or trial and error.
+
+- **Explore my devices** cross-references your own ZHA devices against the community dataset. Confirmed commands are grouped under a plain-English capability heading (for example, *Brightness control*) instead of a flat list of raw ZCL command names. Each device carries a confidence indicator — Single observation, Repeated observation, Strong evidence or Conflicting evidence — reflecting how much evidence actually backs it.
+- **Search database** filters the full dataset by manufacturer, model, cluster, command, attribute or firmware, using dropdowns populated from whatever the dataset actually contains. Useful before buying a device, not only after.
+- **Compare firmware** shows exactly what changed between two firmware versions of the same model, command by command.
+- If the community has confirmed a newer firmware than the one your device reports, this is flagged directly against your device — the card only ever states what has been *observed*, never what a manufacturer calls "latest."
+- From the exploded device view, **Check supported commands** followed by the **Compare My Device** panel runs the same firmware comparison against your own live scan, without leaving that dialog.
+- An **Interesting so far** panel highlights a small number of factual observations from the dataset — the most-confirmed device, a device whose capabilities genuinely differ by firmware version, the newest contribution. It deliberately excludes manufacturer-level comparisons or percentages; the dataset isn't yet large enough to support that kind of claim reliably.
+
+Coverage is limited to devices someone has scanned and shared. A missing or empty result means no submission exists yet, not that a device is incapable of something.
 
 ### Create and remove bindings
 
@@ -268,6 +282,9 @@ When necessary, add and increment a version query to the resource URL:
 - **Check supported commands** is a separate live-device query and may take several seconds. It is not part of the normal binding-table scan.
 - Some devices do not respond to Zigbee command-discovery requests. An empty response is therefore reported as inconclusive rather than treated as proof that the device supports no commands.
 - Very large capability scans may not fit in a pre-filled GitHub issue URL. In that case, the card copies the formatted JSON so it can be pasted into the prepared issue manually.
+- The Zigbee Capability Explorer view only reflects devices that have been scanned and shared. A missing result is a coverage gap, not evidence that a device cannot do something.
+- Firmware comparisons in the Capability Explorer are intentionally conservative. If a device's reported firmware string isn't in a directly comparable format to the community dataset — Home Assistant's device registry `sw_version` frequently differs from the Basic cluster's `sw_build_id` that submissions actually use — no comparison is shown rather than an inferred one.
+- The Capability Explorer dataset is fetched from GitHub and needs outbound internet access from the browser. Results are cached in `localStorage` for six hours.
 - There is currently no visual Lovelace configuration editor, although the card requires only one YAML line.
 - Printing to PDF uses the browser's print dialog and may require pop-ups to be allowed for Home Assistant.
 
@@ -299,7 +316,7 @@ Its design principles are:
 
 - Home Assistant's native **ZHA → Manage Zigbee Device → Bindings** interface can create bindings, but does not provide a network-wide view of existing binding tables.
 - [`zigbee-floorplan-card`](https://github.com/TheLarsinator/zigbee-floorplan-card) visualises Zigbee mesh routing and link quality, primarily for Zigbee2MQTT. It does not read or manage ZHA binding tables.
-- [`zha-device-capabilities`](https://github.com/hsolgaard/zha-device-capabilities) is the openly licensed community dataset populated by reviewed capability scans shared from ZHA Bindings Manager.
+- [`zigbee-capabilities`](https://github.com/hsolgaard/zigbee-capabilities) is the openly licensed community device-capability dataset behind the Zigbee Capability Explorer view. ZHA Bindings Manager is one contributor and one consumer of it, not the other way around — the dataset itself is usable independently of this card, and of Home Assistant entirely.
 
 ## Credits
 

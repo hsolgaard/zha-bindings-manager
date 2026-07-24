@@ -2,6 +2,120 @@
 
 All notable changes to ZHA Bindings Manager are documented here.
 
+## [0.23.0] — 24 July 2026 (local testing build — not yet released)
+
+### Added
+
+- **Compare My Device.** After a live "Check supported commands" scan in the
+  exploded device view, the card now checks that device's own confirmed
+  firmware against every firmware the community database has on file for the
+  same manufacturer/model, right there in the dialog — no need to switch to
+  the Capability Explorer tab. Same conservative rule as the existing
+  firmware-currency flag: it only ever says what the community has
+  *observed*, never claims to know the manufacturer's true "latest," and says
+  plainly when there's newer firmware but nobody's compared it against your
+  exact version yet, rather than guessing. Loads the community index in the
+  background as soon as a scan starts, so the panel resolves without the user
+  needing to do anything extra.
+- **Search Database fields are now dropdowns**, populated live from whatever
+  manufacturers, models, clusters, commands, attributes, and firmware
+  versions actually exist in the community index — instead of free-text
+  boxes where a typo or wrong capitalization silently returned nothing. The
+  example-search chips now resolve to one of those real options rather than
+  a guessed substring.
+
+- **Community database repo renamed** from `zha-device-capabilities` to
+  [`zigbee-capabilities`](https://github.com/hsolgaard/zigbee-capabilities) —
+  it's grown into its own first-class project rather than a sub-project of
+  this card (see the Product Requirements Document v2). `CAPABILITY_DB_REPO`
+  in `src/constants.js` is the single place this is configured, so nothing
+  else in the card needed to change. GitHub's own redirects mean old
+  bookmarks/links to the previous name keep working.
+
+### Changed
+
+- **Contributor Feedback.** The GitHub issue comment posted after a
+  submission is processed now summarizes what that specific submission
+  actually added — a new firmware observation, improved confidence from a
+  repeat scan, newly confirmed commands, or newly seen attributes — computed
+  as a plain diff against the file's previous state. Requires the updated
+  `zigbee-capabilities-ingest-submission.yml` workflow in the
+  `zigbee-capabilities` repo.
+
+## [0.22.0] — 24 July 2026
+
+### Changed
+
+- **Zigbee Capability Explorer redesigned around "what can this device do", not
+  "what did the scan return".** The first version read like a diagnostic dump —
+  raw command names in an unlabeled pill wall, no explanation of why the tab
+  existed. This pass reworks it around the product spec's actual intent:
+  - A community strip up top credits contributors and shows how many devices
+    are confirmed so far — this is a community-built resource, not a static
+    database, and the framing says so.
+  - Each mode now leads with the real question it answers ("What can this
+    device do?", "Which device should I buy for X?", "What changed in this
+    update?") instead of a generic label.
+  - Explore My Devices groups capabilities under a "Supports" heading with an
+    evidence line (scans, firmware versions, last seen) and a confidence badge
+    (Single observation / Repeated observation / Strong evidence / Conflicting
+    evidence), rather than a flat tag cloud with no context.
+  - Capabilities that vary across firmware versions are flagged
+    "firmware-dependent" right in the tag list, instead of reading identically
+    to ones that have never changed.
+  - **New: firmware-currency flag.** If a device's live firmware doesn't match
+    the newest firmware the community has confirmed for that model, Explore
+    mode now says so and summarizes what changed — using only data this card
+    already has (never claims to know the true "latest" firmware from the
+    manufacturer, only what's actually been scanned and shared). Deliberately
+    conservative: it only compares firmware strings it can confidently parse,
+    and says nothing rather than guessing when a local device's reported
+    firmware doesn't look comparable (Home Assistant's device registry
+    firmware field is frequently a different value entirely from the one
+    community submissions use).
+  - Search Database gained a row of example searches ("Reports occupancy",
+    "Supports on/off control", etc.) so a blank form isn't the first thing
+    anyone sees, plus the two columns the product spec always called for and
+    the first version was missing: **Not reported commands** and
+    **Confidence**.
+  - A coverage caveat now appears up front: this only covers devices someone's
+    scanned and shared, so no results means a gap, not proof a device can't do
+    something.
+
+### Data model
+
+- `data/index.json` entries now carry a `last_seen` timestamp (most recent
+  submission backing that capability record) — requires the updated
+  `ingest-submission.yml` and `rebuild-capability-index.yml` workflows in the
+  `zha-device-capabilities` repo; older records without one just omit that
+  part of the evidence line rather than showing anything wrong.
+
+## [0.21.0] — 24 July 2026
+
+### Added
+
+- **New "Zigbee Capability Explorer" tab.** Cross-references your devices against
+  the community-submitted [zha-device-capabilities](https://github.com/hsolgaard/zha-device-capabilities)
+  database — what other people's identical hardware has actually been
+  confirmed to do, not what a datasheet claims. Nothing about your devices
+  (IEEE addresses, entities, areas, names) ever leaves your browser; only the
+  manufacturer/model strings needed to match against the public database are
+  used, and only locally. Three modes:
+  - **Explore My Devices** — every local device that has community data
+    shows its confirmed capabilities, firmware versions seen, and total scan
+    count, expandable to a per-firmware breakdown. Devices with no community
+    data yet get a direct "Scan & share" nudge into the existing exploded
+    device view, so closing that gap is one click away.
+  - **Search Community Database** — facet search across manufacturer,
+    model, cluster, command, attribute, and firmware, live-filtered against
+    every record in the database.
+  - **Compare Firmware** — pick a manufacturer, model, and two firmware
+    versions to see exactly what commands, clusters, or attributes changed
+    between them.
+  - The data layer (`src/capexplorer.js`) is deliberately DOM-free and
+    reusable outside this card, per the product spec's future plans for a
+    standalone app and/or GitHub Pages site.
+
 ## [0.20.1] — 21 July 2026
 
 ### Fixed

@@ -21,12 +21,12 @@
  * zha_toolkit MUST be installed (via HACS) and working for bind/unbind/scan
  * to function. See README.md for details.
  *
- * Version: 0.23.0
+ * Version: 0.24.0
  */
 (() => {
   // src/constants.js
   var ZTK_DOMAIN = "zha_toolkit";
-  var CARD_VERSION = "0.23.0";
+  var CARD_VERSION = "0.24.0";
   var CAPABILITY_DB_REPO = "hsolgaard/zigbee-capabilities";
   var DEFAULT_BINDABLE_OUT_CLUSTERS = [5, 6, 8, 258, 768];
   var MEMBERSHIP_EDGE_COLOR = "#8e24aa";
@@ -108,6 +108,37 @@
   function clusterFriendlyPhrase(id) {
     const n = Number(id);
     return CLUSTER_FRIENDLY_PHRASE[n] || `${clusterName(n)} control`;
+  }
+  var CAPABILITY_OUTCOME_PHRASE = {
+    5: "Scene control",
+    6: "On/off control",
+    7: "On/off switch configuration",
+    8: "Brightness control",
+    257: "Lock control",
+    258: "Open/close control",
+    512: "Pump control",
+    513: "Thermostat control",
+    514: "Fan speed control",
+    515: "Dehumidification control",
+    768: "Color control",
+    769: "Ballast control",
+    1024: "Illuminance sensing",
+    1025: "Illuminance level sensing",
+    1026: "Temperature sensing",
+    1027: "Pressure sensing",
+    1028: "Flow sensing",
+    1029: "Humidity sensing",
+    1030: "Occupancy sensing",
+    1280: "Motion/intrusion alarm",
+    1281: "Alarm control (ACE)",
+    1282: "Siren/warning device",
+    1794: "Energy metering",
+    2817: "Meter identification",
+    2820: "Electrical measurement"
+  };
+  function capabilityOutcomePhrase(id, fallbackName) {
+    const n = Number(id);
+    return CAPABILITY_OUTCOME_PHRASE[n] || fallbackName || clusterName(n);
   }
   var CLUSTER_COMMANDS = {
     5: {
@@ -1141,6 +1172,10 @@
 .capexp-strip { display:flex; align-items:center; gap:8px; background: rgba(76,154,255,0.1);
   border:1px solid rgba(76,154,255,0.3); border-radius:10px; padding:8px 12px; margin-bottom:10px; font-size:0.85em; }
 .capexp-mission { font-size:1em; font-weight:600; margin: 0 0 4px; }
+.capexp-discoveries { background: var(--secondary-background-color, #fafafa); border:1px solid var(--divider-color, #eee);
+  border-radius:10px; padding:8px 12px; margin: 8px 0; }
+.capexp-discoveries-label { font-size:0.78em; font-weight:600; color: var(--secondary-text-color); margin-bottom:4px; }
+.capexp-discoveries-list { margin:0; padding-left:18px; display:flex; flex-direction:column; gap:3px; font-size:0.88em; }
 .capexp-modes { display:flex; gap:8px; flex-wrap:wrap; margin-bottom:2px; }
 .capexp-mode-btn { display:flex; flex-direction:column; align-items:flex-start; gap:2px; text-align:left;
   border:1px solid var(--divider-color, #ccc); background: var(--card-background-color); color: var(--primary-text-color);
@@ -1164,7 +1199,9 @@
 .capexp-chevron { margin-left:auto; opacity:0.6; }
 .capexp-device-summary { font-size:0.85em; margin-top:4px; }
 .capexp-cap-label { font-size:0.78em; color: var(--secondary-text-color); margin-top:8px; margin-bottom:2px; }
-.capexp-cap-tags { display:flex; flex-wrap:wrap; gap:5px; margin-top:2px; }
+.capexp-cap-groups { display:flex; flex-direction:column; gap:6px; margin-top:2px; }
+.capexp-cap-group-label { font-size:0.85em; font-weight:600; }
+.capexp-cap-tags { display:flex; flex-wrap:wrap; gap:5px; margin-top:3px; }
 .capexp-tag { display:inline-block; font-size:0.78em; padding:3px 9px; border-radius:10px;
   background: rgba(76,154,255,0.15); color: #2f6fce; }
 .capexp-tag-conflict { background: rgba(219,68,55,0.15); color: var(--error-color, #db4437); }
@@ -1382,6 +1419,90 @@
       if (states.size > 1) result.add(name);
     });
     return result;
+  }
+  function groupCapabilitiesByOutcome(entries) {
+    const fwDependent = firmwareDependentCapabilities(entries);
+    const groups = /* @__PURE__ */ new Map();
+    entries.forEach((entry) => {
+      Object.entries(entry.clusters || {}).forEach(([clusterId, cluster]) => {
+        if (!groups.has(clusterId)) {
+          groups.set(clusterId, { clusterName: cluster.name || clusterId, items: /* @__PURE__ */ new Set() });
+        }
+        const g = groups.get(clusterId);
+        if (cluster.name) g.clusterName = cluster.name;
+        (cluster.commands_received || []).filter((r) => r.present === true).forEach((r) => g.items.add(r.name));
+      });
+    });
+    return [...groups.entries()].map(([clusterId, g]) => {
+      const items = [...g.items].sort().map((name) => ({ name, firmwareDependent: fwDependent.has(name) }));
+      return {
+        clusterId,
+        label: capabilityOutcomePhrase(clusterId, g.clusterName),
+        reportsOnly: items.length === 0,
+        items
+      };
+    }).sort((a, b) => a.label.localeCompare(b.label));
+  }
+  function interestingDiscoveries(index, opts = {}) {
+    const {
+      minScansForMostConfirmed = 5,
+      minFirmwareVariety = 3,
+      minScansForFwDependent = 2,
+      maxResults = 4
+    } = opts;
+    const discoveries = [];
+    const byDevice = groupByDevice(index);
+    let mostConfirmed = null;
+    byDevice.forEach((entries) => {
+      const total = entries.reduce((sum, e) => sum + (e.scan_count || 0), 0);
+      if (total >= minScansForMostConfirmed && (!mostConfirmed || total > mostConfirmed.total)) {
+        mostConfirmed = { manufacturer: entries[0].manufacturer, model: entries[0].model, total };
+      }
+    });
+    if (mostConfirmed) {
+      discoveries.push({
+        id: "most-confirmed",
+        text: `Most-confirmed device so far: ${mostConfirmed.manufacturer} ${mostConfirmed.model}, backed by ${mostConfirmed.total} scans.`
+      });
+    }
+    let mostFirmware = null;
+    byDevice.forEach((entries) => {
+      const versions = firmwareVersions(entries);
+      if (versions.length >= minFirmwareVariety && (!mostFirmware || versions.length > mostFirmware.count)) {
+        mostFirmware = { manufacturer: entries[0].manufacturer, model: entries[0].model, count: versions.length };
+      }
+    });
+    if (mostFirmware) {
+      discoveries.push({
+        id: "most-firmware-variety",
+        text: `${mostFirmware.manufacturer} ${mostFirmware.model} has the most firmware variety on file: ${mostFirmware.count} distinct versions observed.`
+      });
+    }
+    let fwDependentExample = null;
+    byDevice.forEach((entries) => {
+      if (entries.some((e) => (e.scan_count || 0) < minScansForFwDependent)) return;
+      const changed = firmwareDependentCapabilities(entries);
+      if (changed.size && !fwDependentExample) {
+        fwDependentExample = { manufacturer: entries[0].manufacturer, model: entries[0].model, names: [...changed] };
+      }
+    });
+    if (fwDependentExample) {
+      discoveries.push({
+        id: "firmware-dependent-example",
+        text: `${fwDependentExample.manufacturer} ${fwDependentExample.model}'s confirmed capabilities actually differ by firmware version (e.g. "${fwDependentExample.names[0]}") \u2014 worth checking Compare Firmware before assuming an update is safe.`
+      });
+    }
+    let newest = null;
+    index.forEach((entry) => {
+      if (entry.last_seen && (!newest || entry.last_seen > newest.last_seen)) newest = entry;
+    });
+    if (newest) {
+      discoveries.push({
+        id: "newest-contribution",
+        text: `Newest contribution: ${newest.manufacturer} ${newest.model} on firmware ${newest.firmware || "unknown"}, confirmed by the community on ${newest.last_seen.slice(0, 10)}.`
+      });
+    }
+    return discoveries.slice(0, maxResults);
   }
   function compareFirmwareStrings(a, b) {
     if (!a || !b) return null;
@@ -4661,6 +4782,7 @@
           already scanned and shared, so a gap here means nobody's confirmed it yet, not that it doesn't exist. See
           the <a href="https://github.com/${CAPABILITY_DB_REPO}" target="_blank" rel="noopener">zigbee-capabilities</a>
           database.</p>
+        <div id="capexp-discoveries"></div>
         <div class="capexp-modes">
           <button class="capexp-mode-btn active" data-capexp-mode="explore">
             <span class="capexp-mode-title">Explore my devices</span>
@@ -4741,6 +4863,14 @@
         const uniqueDevices = new Set(this._capExpIndex.map((e) => `${e.manufacturer_slug}|${e.model_slug}`));
         stripCountEl.textContent = uniqueDevices.size;
       }
+      const discoveriesEl = this._q("#capexp-discoveries");
+      if (discoveriesEl) {
+        const discoveries = interestingDiscoveries(this._capExpIndex);
+        discoveriesEl.innerHTML = discoveries.length ? `<div class="capexp-discoveries">
+             <div class="capexp-discoveries-label">Interesting so far</div>
+             <ul class="capexp-discoveries-list">${discoveries.map((d) => `<li>${escapeHtml(d.text)}</li>`).join("")}</ul>
+           </div>` : "";
+      }
       if (this._capExpMode === "explore") {
         bodyEl.dataset.capexpBodyMode = "explore";
         this._renderCapExpExplore(bodyEl);
@@ -4808,16 +4938,7 @@
         const fw = firmwareVersions(m.entries);
         const fwLabel = fw.length ? fw.map((f) => f === null ? "unknown" : f).join(", ") : "unknown";
         const totalScans = m.entries.reduce((sum, e) => sum + (e.scan_count || 0), 0);
-        const capNames = /* @__PURE__ */ new Set();
-        m.entries.forEach((entry) => {
-          confirmedCommands(entry).forEach((c) => capNames.add(c.name));
-          Object.values(entry.clusters || {}).forEach((cl) => {
-            const anyConfirmedCommand = (cl.commands_received || []).some((r) => r.present === true);
-            if (!anyConfirmedCommand && cl.name) capNames.add(cl.name);
-          });
-        });
-        const capList = [...capNames].sort();
-        const fwDependent = firmwareDependentCapabilities(m.entries);
+        const capGroups = groupCapabilitiesByOutcome(m.entries);
         const reports = m.entries.some((entry) => reportsState(entry));
         const lastSeenTimes = m.entries.map((e) => e.last_seen).filter(Boolean).sort();
         const lastSeen = lastSeenTimes.length ? lastSeenTimes[lastSeenTimes.length - 1] : null;
@@ -4841,9 +4962,15 @@
                   Confirmed by ${totalScans} scan${totalScans === 1 ? "" : "s"} across ${fw.length} firmware
                   version${fw.length === 1 ? "" : "s"} (${escapeHtml(fwLabel)})${lastSeen ? ` \xB7 last seen ${escapeHtml(this._capExpFormatDate(lastSeen))}` : ""}
                 </div>
-                ${capList.length ? `<div class="capexp-cap-label">Supports</div>
-                       <div class="capexp-cap-tags">${capList.map(
-          (c) => `<span class="capexp-tag${fwDependent.has(c) ? " capexp-tag-fwdep" : ""}">${escapeHtml(c)}${fwDependent.has(c) ? " \xB7 firmware-dependent" : ""}</span>`
+                ${capGroups.length ? `<div class="capexp-cap-label">Supports</div>
+                       <div class="capexp-cap-groups">${capGroups.map(
+          (g) => `
+                           <div class="capexp-cap-group">
+                             <span class="capexp-cap-group-label">${escapeHtml(g.label)}</span>
+                             ${g.items.length ? `<div class="capexp-cap-tags">${g.items.map(
+            (i) => `<span class="capexp-tag${i.firmwareDependent ? " capexp-tag-fwdep" : ""}">${escapeHtml(i.name)}${i.firmwareDependent ? " \xB7 firmware-dependent" : ""}</span>`
+          ).join("")}</div>` : ""}
+                           </div>`
         ).join("")}</div>` : `<p class="muted">No confirmed commands or reporting clusters recorded yet.</p>`}
                 <div class="capexp-report-line muted">Reports state: ${reports ? "yes" : "no"}</div>
                 ${gap ? `<div class="capexp-fwgap-alert">Your device is on ${escapeHtml(

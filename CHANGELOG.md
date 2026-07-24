@@ -2,6 +2,35 @@
 
 All notable changes to ZHA Bindings Manager are documented here.
 
+## [0.24.0] — 24 July 2026
+
+This completes the Capability Explorer's PRD v2 Phase 2 scope — all four
+planned features (Contributor Feedback, Compare My Device, and the two
+below) are now built.
+
+### Added
+
+- **Capability Outcomes.** Explore My Devices' "Supports" section now groups
+  confirmed commands under a plain-English cluster heading — "Brightness
+  control: Move to level, Step, Stop" instead of every command from every
+  cluster flattened into one alphabetical tag wall mixing color, lock, and
+  on/off commands together. Nothing about the underlying evidence is
+  summarized away or hidden: a firmware-dependent command still shows up by
+  its exact name, just organized under the cluster it actually belongs to.
+  Sensor/reporting clusters (Occupancy, Illuminance, etc.) get their own
+  group heading with no items, since their presence *is* the capability.
+- **Interesting Discoveries.** A new panel above the mode picker surfaces a
+  handful of factual highlights from the whole community database: the
+  most-confirmed device, a device with real firmware-dependent capability
+  differences worth checking before updating, and the newest contribution.
+  Deliberately does **not** include any cross-manufacturer percentage or
+  ratio claim (e.g. "manufacturer X's devices report bugs more often") —
+  at the database's current scale (a few dozen devices) that kind of claim
+  would be confidently wrong as often as right. Every discovery is either a
+  plain fact (newest contribution) or gated behind a minimum sample size;
+  anything that doesn't clear its threshold is simply omitted, never shown
+  with a hedge.
+
 ## [0.23.0] — 24 July 2026 (local testing build — not yet released)
 
 ### Added

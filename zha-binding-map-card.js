@@ -21,13 +21,64 @@
  * zha_toolkit MUST be installed (via HACS) and working for bind/unbind/scan
  * to function. See README.md for details.
  *
- * Version: 0.24.0
+ * Version: 0.29.0
  */
 (() => {
+  // src/capexplorer-constants.js
+  var CAPABILITY_DB_REPO = "hsolgaard/zigbee-capabilities";
+  var CAPABILITY_OUTCOME_PHRASE = {
+    5: "Scene control",
+    6: "On/off control",
+    7: "On/off switch configuration",
+    8: "Brightness control",
+    257: "Lock control",
+    258: "Open/close control",
+    512: "Pump control",
+    513: "Thermostat control",
+    514: "Fan speed control",
+    515: "Dehumidification control",
+    768: "Color control",
+    769: "Ballast control",
+    1024: "Illuminance sensing",
+    1025: "Illuminance level sensing",
+    1026: "Temperature sensing",
+    1027: "Pressure sensing",
+    1028: "Flow sensing",
+    1029: "Humidity sensing",
+    1030: "Occupancy sensing",
+    1280: "Motion/intrusion alarm",
+    1281: "Alarm control (ACE)",
+    1282: "Siren/warning device",
+    1794: "Energy metering",
+    2817: "Meter identification",
+    2820: "Electrical measurement",
+    // 0xFC00-0xFFFF is the manufacturer-specific cluster range, so IDs in it
+    // are normally NOT safe to map by number alone — the same numeric ID gets
+    // reused by unrelated vendors for unrelated purposes (see
+    // MANUFACTURER_SPECIFIC_CLUSTER_NAMES below for those). 0xFC57 is the one
+    // documented exception: it's the semi-standardized "Works with all Hubs"
+    // (WWAH) cluster, used consistently across multiple vendors (confirmed on
+    // IKEA devices and referenced generally for hub-compatibility signaling,
+    // e.g. when a device connects to Amazon Alexa/Echo) rather than being
+    // vendor-private — verified via zigpy/zigpy#823 and community device
+    // handler sources, not guessed from the hex ID alone.
+    64599: "Works with all hubs (WWAH)"
+  };
+  var MANUFACTURER_SPECIFIC_CLUSTER_NAMES = {
+    sonoff: {
+      64529: "Device settings (Sonoff)"
+    }
+  };
+  function capabilityOutcomePhrase(id, fallbackName, manufacturer) {
+    const n = Number(id);
+    const vendorKey = (manufacturer || "").toString().trim().toLowerCase();
+    const vendorMap = MANUFACTURER_SPECIFIC_CLUSTER_NAMES[vendorKey];
+    return vendorMap && vendorMap[n] || CAPABILITY_OUTCOME_PHRASE[n] || fallbackName || `Cluster 0x${n.toString(16).padStart(4, "0")}`;
+  }
+
   // src/constants.js
   var ZTK_DOMAIN = "zha_toolkit";
-  var CARD_VERSION = "0.24.0";
-  var CAPABILITY_DB_REPO = "hsolgaard/zigbee-capabilities";
+  var CARD_VERSION = "0.29.0";
   var DEFAULT_BINDABLE_OUT_CLUSTERS = [5, 6, 8, 258, 768];
   var MEMBERSHIP_EDGE_COLOR = "#8e24aa";
   var HISTORY_LIMIT = 10;
@@ -36,6 +87,17 @@
   var DEFAULT_SCAN_BATCH_SIZE = 10;
   var DEFAULT_FP_MARKER_SCALE = 100;
   var GREEN_POWER_ENDPOINT = 242;
+  var AMBIGUOUS_TUYA_MODELS = [
+    "TS0601",
+    "TS011F",
+    "TS0201",
+    "TS0203",
+    "TS0041",
+    "TS0042",
+    "TS0043",
+    "TS0044",
+    "TS0121"
+  ];
   var ENDPOINT_CONTROL_TYPES = [
     "Not set",
     "Light",
@@ -109,38 +171,31 @@
     const n = Number(id);
     return CLUSTER_FRIENDLY_PHRASE[n] || `${clusterName(n)} control`;
   }
-  var CAPABILITY_OUTCOME_PHRASE = {
-    5: "Scene control",
-    6: "On/off control",
-    7: "On/off switch configuration",
-    8: "Brightness control",
-    257: "Lock control",
-    258: "Open/close control",
-    512: "Pump control",
-    513: "Thermostat control",
-    514: "Fan speed control",
-    515: "Dehumidification control",
-    768: "Color control",
-    769: "Ballast control",
-    1024: "Illuminance sensing",
-    1025: "Illuminance level sensing",
-    1026: "Temperature sensing",
-    1027: "Pressure sensing",
-    1028: "Flow sensing",
-    1029: "Humidity sensing",
-    1030: "Occupancy sensing",
-    1280: "Motion/intrusion alarm",
-    1281: "Alarm control (ACE)",
-    1282: "Siren/warning device",
-    1794: "Energy metering",
-    2817: "Meter identification",
-    2820: "Electrical measurement"
-  };
-  function capabilityOutcomePhrase(id, fallbackName) {
-    const n = Number(id);
-    return CAPABILITY_OUTCOME_PHRASE[n] || fallbackName || clusterName(n);
-  }
   var CLUSTER_COMMANDS = {
+    // Basic, Identify, and Groups are near-universal — almost every Zigbee
+    // device declares them regardless of type — which is exactly why their
+    // absence here mattered more than any other gap: unlike a specialized
+    // cluster, a raw snake_case command name on one of these (e.g.
+    // "reset_fact_default", "identify_query", "add_if_identifying") showed up
+    // on nearly every device in the Capability Explorer, real user feedback
+    // on a live SONOFF ZBMINIR2 screenshot. Command names/IDs verified
+    // against the ZCL General clusters (zigpy's zcl/clusters/general.py).
+    0: {
+      0: "Reset to factory defaults"
+    },
+    3: {
+      0: "Identify",
+      1: "Identify query",
+      64: "Trigger identify effect"
+    },
+    4: {
+      0: "Add to group",
+      1: "View group",
+      2: "Get group membership",
+      3: "Remove from group",
+      4: "Remove from all groups",
+      5: "Add to group if identifying"
+    },
     5: {
       0: "Add",
       1: "View",
@@ -1175,6 +1230,7 @@
 .capexp-discoveries { background: var(--secondary-background-color, #fafafa); border:1px solid var(--divider-color, #eee);
   border-radius:10px; padding:8px 12px; margin: 8px 0; }
 .capexp-discoveries-label { font-size:0.78em; font-weight:600; color: var(--secondary-text-color); margin-bottom:4px; }
+.capexp-discoveries-lead { margin:0 0 6px; font-size:0.88em; }
 .capexp-discoveries-list { margin:0; padding-left:18px; display:flex; flex-direction:column; gap:3px; font-size:0.88em; }
 .capexp-modes { display:flex; gap:8px; flex-wrap:wrap; margin-bottom:2px; }
 .capexp-mode-btn { display:flex; flex-direction:column; align-items:flex-start; gap:2px; text-align:left;
@@ -1194,38 +1250,67 @@
 .capexp-device-list { display:flex; flex-direction:column; gap:8px; }
 .capexp-device-card { border:1px solid var(--divider-color, #e0e0e0); border-radius:10px; padding:10px 12px;
   background: var(--secondary-background-color, #fafafa); }
-.capexp-device-header { display:flex; align-items:center; gap:8px; cursor:pointer; user-select:none; flex-wrap:wrap; }
+.capexp-device-header { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
 .capexp-device-name { font-weight:600; }
 .capexp-chevron { margin-left:auto; opacity:0.6; }
-.capexp-device-summary { font-size:0.85em; margin-top:4px; }
+.capexp-techtoggle { display:flex; align-items:center; gap:4px; cursor:pointer; user-select:none;
+  margin-top:10px; padding-top:8px; border-top:1px solid var(--divider-color, #e0e0e0);
+  font-size:0.78em; font-weight:600; color: var(--secondary-text-color); }
+.capexp-techtoggle:hover { color: var(--primary-text-color); }
+.capexp-chevron-inline { opacity:0.7; }
+.capexp-tech-panel { margin-top:6px; }
+.capexp-trust-panel { display:flex; align-items:center; gap:8px; margin-top:6px; }
+.capexp-trust-stars { font-size:1.05em; letter-spacing:1px; color:#e0a400; white-space:nowrap; }
+.capexp-trust-conflict { font-size:0.82em; letter-spacing:normal; color: var(--error-color, #db4437); font-weight:600; }
+.capexp-trust-text { display:flex; flex-direction:column; }
+.capexp-trust-label { font-size:0.78em; font-weight:600; color: var(--secondary-text-color); }
+.capexp-trust-detail { font-size:0.8em; }
 .capexp-cap-label { font-size:0.78em; color: var(--secondary-text-color); margin-top:8px; margin-bottom:2px; }
 .capexp-cap-groups { display:flex; flex-direction:column; gap:6px; margin-top:2px; }
 .capexp-cap-group-label { font-size:0.85em; font-weight:600; }
 .capexp-cap-tags { display:flex; flex-wrap:wrap; gap:5px; margin-top:3px; }
+.capexp-cap-reportsonly { margin-top:2px; }
+.capexp-cap-group-unidentified .capexp-cap-group-label { font-weight:500; font-style:italic; }
 .capexp-tag { display:inline-block; font-size:0.78em; padding:3px 9px; border-radius:10px;
   background: rgba(76,154,255,0.15); color: #2f6fce; }
 .capexp-tag-conflict { background: rgba(219,68,55,0.15); color: var(--error-color, #db4437); }
 .capexp-tag-fwdep { background: rgba(142,36,170,0.13); color: #6a1b78; }
 .capexp-report-line { font-size:0.85em; margin-top:8px; }
+.capexp-discovery-note { font-size:0.8em; margin-top:6px; padding:4px 8px; border-radius:6px;
+  background: rgba(76,154,255,0.10); color: #2f6fce; display:inline-block; }
+.capexp-goodfor { margin-top:8px; }
+.capexp-goodfor-tags { display:flex; flex-wrap:wrap; gap:5px; margin-top:3px; }
+.capexp-goodfor-tag { background: rgba(76,206,172,0.15); color: #1f7a63; }
 .capexp-fwgap-alert { margin-top:8px; padding:7px 10px; border-radius:8px; font-size:0.82em;
   background: rgba(255,179,0,0.12); border:1px solid rgba(255,179,0,0.35); color: var(--primary-text-color); }
 .capexp-confidence-badge { display:inline-block; font-size:0.72em; padding:3px 9px; border-radius:10px;
   white-space:nowrap; background: var(--divider-color, #e0e0e0); color: var(--secondary-text-color); }
 .capexp-confidence-strong-evidence { background: rgba(76,206,172,0.18); color: #2e9e83; }
+.capexp-confidence-well-confirmed { background: rgba(76,154,255,0.15); color: #2f6fce; }
 .capexp-confidence-repeated-observation { background: rgba(76,154,255,0.15); color: #2f6fce; }
 .capexp-confidence-single-observation { background: rgba(255,179,0,0.18); color: #b26a00; }
 .capexp-confidence-conflicting-evidence { background: rgba(219,68,55,0.15); color: var(--error-color, #db4437); }
 .capexp-device-detail { margin-top:10px; padding-top:8px; border-top:1px solid var(--divider-color, #e0e0e0);
-  display:flex; flex-direction:column; gap:10px; }
-.capexp-entry-title { font-size:0.85em; font-weight:600; margin-bottom:4px; }
+  display:flex; flex-direction:column; gap:10px; opacity:0.85; }
+.capexp-techlabel { font-size:0.7em; font-weight:600; text-transform:uppercase; letter-spacing:0.04em;
+  color: var(--secondary-text-color); margin-bottom:2px; }
+.capexp-entry-title { font-size:0.8em; font-weight:400; color: var(--secondary-text-color); margin-bottom:4px; }
 .capexp-nomatch-list { display:flex; flex-direction:column; gap:6px; }
 .capexp-nomatch-row { display:flex; align-items:center; justify-content:space-between; gap:10px;
   padding:6px 10px; border-radius:8px; background: var(--secondary-background-color, #fafafa);
   border:1px solid var(--divider-color, #eee); font-size:0.9em; }
-.capexp-search-examples { display:flex; flex-wrap:wrap; gap:6px; margin-bottom:10px; }
-.capexp-search-form { display:flex; flex-wrap:wrap; gap:8px; margin-bottom:8px; }
+.capexp-search-example-group { margin-bottom:8px; }
+.capexp-search-example-category { font-size:0.72em; font-weight:600; text-transform:uppercase; letter-spacing:0.04em;
+  color: var(--secondary-text-color); margin-bottom:4px; }
+.capexp-search-examples { display:flex; flex-wrap:wrap; gap:6px; margin-bottom:2px; }
+.capexp-advanced-filters { margin:10px 0; }
+.capexp-advanced-filters summary { cursor:pointer; font-size:0.85em; font-weight:600; color: var(--secondary-text-color); }
+.capexp-search-form { display:flex; flex-wrap:wrap; gap:8px; margin-top:8px; margin-bottom:8px; }
 .capexp-search-form input, .capexp-search-form select { flex: 1 1 150px; min-width:120px; padding:6px 8px; border-radius:6px;
   border:1px solid var(--divider-color, #ccc); background: var(--card-background-color); color: var(--primary-text-color); }
+.capexp-empty-search { padding:12px; border-radius:10px; background: var(--secondary-background-color, #fafafa);
+  border:1px solid var(--divider-color, #eee); }
+.capexp-empty-search p { margin: 0 0 6px; }
 .capexp-compare-form { display:flex; flex-wrap:wrap; gap:12px; margin-bottom:12px; }
 .capexp-compare-form label { display:flex; flex-direction:column; gap:4px; font-size:0.85em;
   color: var(--secondary-text-color); flex: 1 1 160px; }
@@ -1379,31 +1464,62 @@
       return true;
     });
   }
-  function notReportedCommands(entry) {
-    const out = [];
-    Object.entries(entry.clusters || {}).forEach(([clusterId, cluster]) => {
-      (cluster.commands_received || []).forEach((row) => {
-        if (row.present === false) {
-          out.push({ clusterId, clusterName: cluster.name, ...row });
-        }
+  function groupSearchResultsByDevice(matchingEntries, fullIndex) {
+    const matchedKeys = new Set(matchingEntries.map((e) => `${e.manufacturer_slug}|${e.model_slug}`));
+    const byDevice = groupByDevice(fullIndex);
+    const results = [];
+    matchedKeys.forEach((key) => {
+      const entries = byDevice.get(key) || [];
+      if (!entries.length) return;
+      const first = entries[0];
+      const rating = confidenceStars(entries);
+      const fw = firmwareVersions(entries);
+      const totalScans = entries.reduce((sum, e) => sum + (e.scan_count || 0), 0);
+      const lastSeenTimes = entries.map((e) => e.last_seen).filter(Boolean).sort();
+      results.push({
+        manufacturerSlug: first.manufacturer_slug,
+        modelSlug: first.model_slug,
+        manufacturer: first.manufacturer,
+        model: first.model,
+        entries,
+        rating,
+        goodFor: useCaseTags(entries),
+        firmwareCount: fw.length,
+        totalScans,
+        lastSeen: lastSeenTimes.length ? lastSeenTimes[lastSeenTimes.length - 1] : null
       });
     });
-    return out;
+    const starRank = (r) => r.conflicting ? -1 : r.stars || 0;
+    results.sort((a, b) => {
+      if (starRank(b.rating) !== starRank(a.rating)) return starRank(b.rating) - starRank(a.rating);
+      const aLast = a.lastSeen || "";
+      const bLast = b.lastSeen || "";
+      if (bLast !== aLast) return bLast.localeCompare(aLast);
+      if (b.firmwareCount !== a.firmwareCount) return b.firmwareCount - a.firmwareCount;
+      return `${a.manufacturer || ""} ${a.model || ""}`.localeCompare(`${b.manufacturer || ""} ${b.model || ""}`);
+    });
+    return results;
   }
   function reportsState(entry) {
     return Object.values(entry.clusters || {}).some(
       (cluster) => (cluster.attributes_confirmed || []).some((a) => String(a.access || "").includes("REPORT"))
     );
   }
-  function confidenceLabel(entry) {
-    const anyConflicting = Object.values(entry.clusters || {}).some(
-      (cluster) => (cluster.commands_received || []).some((row) => row.conflicting)
+  function confidenceStars(entries) {
+    const anyConflicting = (entries || []).some(
+      (entry) => Object.values(entry.clusters || {}).some(
+        (cluster) => (cluster.commands_received || []).some((row) => row.conflicting)
+      )
     );
-    if (anyConflicting) return "Conflicting evidence";
-    const scans = entry.scan_count || 0;
-    if (scans <= 1) return "Single observation";
-    if (scans < 5) return "Repeated observation";
-    return "Strong evidence";
+    const totalScans = (entries || []).reduce((sum, e) => sum + (e.scan_count || 0), 0);
+    if (anyConflicting) return { stars: null, conflicting: true, totalScans };
+    let stars;
+    if (totalScans >= 20) stars = 5;
+    else if (totalScans >= 10) stars = 4;
+    else if (totalScans >= 5) stars = 3;
+    else if (totalScans >= 2) stars = 2;
+    else stars = 1;
+    return { stars, conflicting: false, totalScans };
   }
   function firmwareDependentCapabilities(entries) {
     if (entries.length < 2) return /* @__PURE__ */ new Set();
@@ -1422,6 +1538,7 @@
   }
   function groupCapabilitiesByOutcome(entries) {
     const fwDependent = firmwareDependentCapabilities(entries);
+    const manufacturer = (entries[0] || {}).manufacturer;
     const groups = /* @__PURE__ */ new Map();
     entries.forEach((entry) => {
       Object.entries(entry.clusters || {}).forEach(([clusterId, cluster]) => {
@@ -1435,74 +1552,167 @@
     });
     return [...groups.entries()].map(([clusterId, g]) => {
       const items = [...g.items].sort().map((name) => ({ name, firmwareDependent: fwDependent.has(name) }));
+      const label = capabilityOutcomePhrase(clusterId, g.clusterName, manufacturer);
       return {
         clusterId,
-        label: capabilityOutcomePhrase(clusterId, g.clusterName),
+        label,
         reportsOnly: items.length === 0,
+        // Whether this label actually tells a user anything, or is just
+        // the generic "Cluster 0xNNNN" fallback (no plain-English phrase
+        // mapped, and no real cluster name was ever resolved either).
+        // Matters for reportsOnly groups specifically: "the group label
+        // alone is the capability" only holds up when the label is
+        // meaningful (e.g. "Occupancy Sensing") — a bare, unidentified
+        // "Cluster 0xfbfe" heading with nothing underneath just reads as
+        // broken, not as "reports data." The card combines these into one
+        // summary line instead of giving each its own confusing heading.
+        identified: !/^Cluster 0x[0-9a-f]{4}$/i.test(label),
         items
       };
     }).sort((a, b) => a.label.localeCompare(b.label));
+  }
+  var USE_CASE_RULES = [
+    { id: "switch-onoff", clusterId: "0x0006", kind: "command", label: "Switch things on/off" },
+    { id: "dimmer", clusterId: "0x0008", kind: "command", label: "Dim brightness / adjust level" },
+    { id: "color", clusterId: "0x0300", kind: "command", label: "Color control" },
+    { id: "lock", clusterId: "0x0101", kind: "command", label: "Lock / unlock" },
+    { id: "cover", clusterId: "0x0102", kind: "command", label: "Open / close covers" },
+    { id: "thermostat", clusterId: "0x0201", kind: "command", label: "Control heating / cooling" },
+    { id: "scenes", clusterId: "0x0005", kind: "command", label: "Scene control" },
+    { id: "temperature", clusterId: "0x0402", kind: "presence", label: "Temperature sensing" },
+    { id: "humidity", clusterId: "0x0405", kind: "presence", label: "Monitor humidity" },
+    { id: "occupancy", clusterId: "0x0406", kind: "presence", label: "Detect motion / occupancy" },
+    { id: "illuminance", clusterId: "0x0400", kind: "presence", label: "Monitor light level" },
+    { id: "pressure", clusterId: "0x0403", kind: "presence", label: "Monitor air pressure" },
+    { id: "flow", clusterId: "0x0404", kind: "presence", label: "Monitor water / air flow" },
+    { id: "metering", clusterId: "0x0702", kind: "presence", label: "Energy monitoring" },
+    { id: "electrical", clusterId: "0x0b04", kind: "presence", label: "Track power draw" },
+    { id: "ias-zone", clusterId: "0x0500", kind: "presence", label: "Raise security / contact alerts" }
+  ];
+  var CONTROLLER_CLUSTER_IDS = ["0x0006", "0x0008", "0x0300", "0x0005"];
+  function useCaseTags(entries, localFirmware = null) {
+    if (!entries || !entries.length) return [];
+    const tags = [];
+    USE_CASE_RULES.forEach((rule) => {
+      const confirmingFirmwares = /* @__PURE__ */ new Set();
+      entries.forEach((entry) => {
+        const cluster = (entry.clusters || {})[rule.clusterId];
+        const hit = rule.kind === "command" ? !!cluster && (cluster.commands_received || []).some((r) => r.present === true) : !!cluster || (entry.in_clusters || []).includes(rule.clusterId);
+        if (hit) confirmingFirmwares.add(entry.firmware || null);
+      });
+      if (confirmingFirmwares.size) {
+        tags.push({
+          id: rule.id,
+          label: rule.label,
+          exactFirmware: !localFirmware || confirmingFirmwares.has(localFirmware)
+        });
+      }
+    });
+    let controllerFirmwares = /* @__PURE__ */ new Set();
+    let everConfirmedAsInput = false;
+    entries.forEach((entry) => {
+      CONTROLLER_CLUSTER_IDS.forEach((clusterId) => {
+        if ((entry.out_clusters || []).includes(clusterId)) controllerFirmwares.add(entry.firmware || null);
+        const cluster = (entry.clusters || {})[clusterId];
+        if (cluster && (cluster.commands_received || []).some((r) => r.present === true)) everConfirmedAsInput = true;
+      });
+    });
+    if (controllerFirmwares.size && !everConfirmedAsInput) {
+      tags.push({
+        id: "controller",
+        label: "Act as a remote / controller",
+        exactFirmware: !localFirmware || controllerFirmwares.has(localFirmware)
+      });
+    }
+    return tags;
   }
   function interestingDiscoveries(index, opts = {}) {
     const {
       minScansForMostConfirmed = 5,
       minFirmwareVariety = 3,
       minScansForFwDependent = 2,
+      minRecentActivity = 3,
+      recentActivityWindowDays = 14,
       maxResults = 4
     } = opts;
     const discoveries = [];
     const byDevice = groupByDevice(index);
     let mostConfirmed = null;
-    byDevice.forEach((entries) => {
+    byDevice.forEach((entries, deviceKey) => {
+      if (!entries[0].manufacturer || !entries[0].model) return;
       const total = entries.reduce((sum, e) => sum + (e.scan_count || 0), 0);
       if (total >= minScansForMostConfirmed && (!mostConfirmed || total > mostConfirmed.total)) {
-        mostConfirmed = { manufacturer: entries[0].manufacturer, model: entries[0].model, total };
+        mostConfirmed = { deviceKey, manufacturer: entries[0].manufacturer, model: entries[0].model, total };
       }
     });
     if (mostConfirmed) {
       discoveries.push({
         id: "most-confirmed",
+        deviceKey: mostConfirmed.deviceKey,
+        cardNote: "Most-confirmed device in the community database.",
         text: `Most-confirmed device so far: ${mostConfirmed.manufacturer} ${mostConfirmed.model}, backed by ${mostConfirmed.total} scans.`
       });
     }
     let mostFirmware = null;
-    byDevice.forEach((entries) => {
+    byDevice.forEach((entries, deviceKey) => {
+      if (!entries[0].manufacturer || !entries[0].model) return;
       const versions = firmwareVersions(entries);
       if (versions.length >= minFirmwareVariety && (!mostFirmware || versions.length > mostFirmware.count)) {
-        mostFirmware = { manufacturer: entries[0].manufacturer, model: entries[0].model, count: versions.length };
+        mostFirmware = { deviceKey, manufacturer: entries[0].manufacturer, model: entries[0].model, count: versions.length };
       }
     });
     if (mostFirmware) {
       discoveries.push({
         id: "most-firmware-variety",
+        deviceKey: mostFirmware.deviceKey,
+        cardNote: "Most firmware variety of any device on file.",
         text: `${mostFirmware.manufacturer} ${mostFirmware.model} has the most firmware variety on file: ${mostFirmware.count} distinct versions observed.`
       });
     }
     let fwDependentExample = null;
-    byDevice.forEach((entries) => {
+    byDevice.forEach((entries, deviceKey) => {
+      if (!entries[0].manufacturer || !entries[0].model) return;
       if (entries.some((e) => (e.scan_count || 0) < minScansForFwDependent)) return;
       const changed = firmwareDependentCapabilities(entries);
       if (changed.size && !fwDependentExample) {
-        fwDependentExample = { manufacturer: entries[0].manufacturer, model: entries[0].model, names: [...changed] };
+        fwDependentExample = { deviceKey, manufacturer: entries[0].manufacturer, model: entries[0].model, names: [...changed] };
       }
     });
     if (fwDependentExample) {
       discoveries.push({
         id: "firmware-dependent-example",
+        deviceKey: fwDependentExample.deviceKey,
+        cardNote: "Confirmed capabilities differ by firmware version \u2014 see Compare Firmware below.",
         text: `${fwDependentExample.manufacturer} ${fwDependentExample.model}'s confirmed capabilities actually differ by firmware version (e.g. "${fwDependentExample.names[0]}") \u2014 worth checking Compare Firmware before assuming an update is safe.`
       });
     }
     let newest = null;
     index.forEach((entry) => {
+      if (!entry.manufacturer || !entry.model) return;
       if (entry.last_seen && (!newest || entry.last_seen > newest.last_seen)) newest = entry;
     });
     if (newest) {
       discoveries.push({
         id: "newest-contribution",
+        deviceKey: `${slugify(newest.manufacturer)}|${slugify(newest.model)}`,
+        cardNote: "The newest contribution to the community database.",
         text: `Newest contribution: ${newest.manufacturer} ${newest.model} on firmware ${newest.firmware || "unknown"}, confirmed by the community on ${newest.last_seen.slice(0, 10)}.`
       });
     }
+    const cutoff = Date.now() - recentActivityWindowDays * 24 * 60 * 60 * 1e3;
+    const recentCount = index.filter((e) => e.last_seen && new Date(e.last_seen).getTime() >= cutoff).length;
+    if (recentCount >= minRecentActivity) {
+      discoveries.push({
+        id: "recent-activity",
+        deviceKey: null,
+        text: `${recentCount} firmware observations added to the community database in the last ${recentActivityWindowDays} days \u2014 this is a living, actively-growing resource.`
+      });
+    }
     return discoveries.slice(0, maxResults);
+  }
+  function discoveryForDevice(discoveries, manufacturerSlug, modelSlug) {
+    const key = `${manufacturerSlug}|${modelSlug}`;
+    return discoveries.find((d) => d.deviceKey === key) || null;
   }
   function compareFirmwareStrings(a, b) {
     if (!a || !b) return null;
@@ -1610,6 +1820,7 @@
       this._capExpSearch = { manufacturer: "", model: "", cluster: "", command: "", attribute: "", firmware: "" };
       this._capExpCompare = { manufacturer: "", model: "", firmwareA: "", firmwareB: "" };
       this._capExpExpanded = /* @__PURE__ */ new Set();
+      this._capExpSearchExpanded = /* @__PURE__ */ new Set();
       this._status = null;
       this._scanState = { running: false, done: 0, total: 0 };
       this._selectedEdgeId = null;
@@ -2282,9 +2493,16 @@
      *  anything not confirmed — the exploded view always falls back to a
      *  generic gang-count shape if the image 404s, and this entire lookup is
      *  skippable via the "Show device photos" toggle for anyone who'd rather
-     *  this card never talk to the internet. */
+     *  this card never talk to the internet.
+     *  Deliberately returns null (no lookup at all) for AMBIGUOUS_TUYA_MODELS
+     *  — those model strings are reused across many unrelated physical
+     *  products, so a same-model-string lookup doesn't just risk a 404, it
+     *  can confidently return a real photo of the *wrong device*. Silently
+     *  showing a wrong photo is worse than the generic shape fallback, so
+     *  this skips the guess entirely rather than making it and hoping. */
     _deviceImageUrl(d) {
       if (!d.model) return null;
+      if (AMBIGUOUS_TUYA_MODELS.includes(d.model)) return null;
       return `https://www.zigbee2mqtt.io/images/devices/${encodeURIComponent(d.model.replace(/\//g, "-"))}.png`;
     }
     /** Offline, always-available fallback: a simple wall-plate shape with one
@@ -3440,6 +3658,7 @@
       </div>
       ${roleNote}
       <div class="ep-grid">${cards}</div>
+      ${this._deviceShareSectionHtml(d)}
       <div class="dialog-actions">
         <button class="btn" id="explode-close">Close</button>
       </div>`;
@@ -3464,8 +3683,8 @@
           this._renderExplodedView(d);
         });
       });
-      this._qa(".ep-cmd-share").forEach((btn) => {
-        btn.addEventListener("click", () => this._shareCommandScan(d, Number(btn.dataset.ep)));
+      this._qa(".device-cmd-share").forEach((btn) => {
+        btn.addEventListener("click", () => this._shareDeviceCapabilities(d));
       });
       this._qa(".ep-cmd-share-cancel").forEach((btn) => {
         btn.addEventListener("click", () => {
@@ -3575,23 +3794,42 @@
       );
       const relevantIds = [...declaredIds].filter((id) => CLUSTER_COMMANDS[id]).sort((a, b) => a - b);
       if (!relevantIds.length) {
+        const hasTuyaCluster = declaredIds.has(61184);
+        if (hasTuyaCluster) {
+          return `<p class="hint ep-cmd-status">This endpoint uses Tuya's private cluster (0xEF00) to tunnel its real functionality instead of standard Zigbee commands \u2014 generic command discovery can't see into it, so there's nothing for this card to check.</p>`;
+        }
+        const outClusterIds = [
+          ...new Set(clusters.filter((c) => c.type === "out" && c.endpoint_id === ep).map((c) => Number(c.id)))
+        ].filter((id) => CLUSTER_COMMANDS[id]);
+        if (outClusterIds.length) {
+          const outNames = outClusterIds.map((id) => clusterName(id)).join(", ");
+          return `<p class="hint ep-cmd-status">This endpoint is a controller, not a receiver: it's built to send ${escapeHtml(
+            outNames
+          )} commands out to whatever it's bound to, rather than accept them itself \u2014 there's nothing for a command-support scan to discover here. To see what it actually controls, look at the relationship badges above; to check what a light or plug will respond to, run this same check on its own endpoint instead.</p>`;
+        }
         return `<p class="hint ep-cmd-status">This endpoint doesn't declare any clusters this card has command data for.</p>`;
       }
       const key = this._commandScanKey(d.ieee, ep);
       const entry = this._commandScans.get(key);
+      const isBattery = this._isBatteryDevice(d);
+      const wakeHint = isBattery ? `<div class="scan-wake-hint">May be asleep \u2014 press a button on it first if this doesn't complete.</div>` : "";
       let actionHtml;
       if (!entry) {
-        actionHtml = `<button class="btn btn-small ep-cmd-check" data-ep="${ep}">Check supported commands</button>`;
+        actionHtml = `
+        ${wakeHint}
+        <button class="btn btn-small ep-cmd-check" data-ep="${ep}">Check supported commands</button>`;
       } else if (entry.status === "loading") {
-        actionHtml = `<p class="hint ep-cmd-status">Checking supported commands&hellip; this queries the device directly and can take a while.</p>`;
+        actionHtml = `
+        <p class="hint ep-cmd-status">Checking supported commands&hellip; this queries the device directly and can take a while.</p>
+        ${wakeHint}`;
       } else if (entry.status === "error") {
+        const errorWakeHint = isBattery ? `<div class="scan-wake-hint">May be asleep \u2014 press a button on it, then try again.</div>` : `<div class="scan-wake-hint">Not responding \u2014 check it's powered on and in range, then try again.</div>`;
         actionHtml = `
         <p class="hint ep-cmd-status">Couldn't check supported commands: ${escapeHtml(entry.error)}</p>
-        <button class="btn btn-small ep-cmd-check" data-ep="${ep}">Try again</button>`;
+        ${errorWakeHint}
+        <button class="btn btn-small ep-cmd-check" data-ep="${ep}">${isBattery ? "Wake & try again" : "Try again"}</button>`;
       } else {
-        actionHtml = `
-        <button class="btn btn-small ep-cmd-check" data-ep="${ep}">Re-check</button>
-        <button class="btn btn-small ep-cmd-share" data-ep="${ep}">Share this scan</button>`;
+        actionHtml = `<button class="btn btn-small ep-cmd-check" data-ep="${ep}">Re-check</button>`;
       }
       const scanned = !!(entry && entry.status === "done");
       const epScan = scanned ? (entry.scan && entry.scan.endpoints || []).find((e) => Number(e.id) === Number(ep)) : null;
@@ -3637,13 +3875,36 @@
             ${expanded ? `<div class="ep-cmd-cluster-body">${bodyHtml}</div>` : ""}
           </div>`;
       }).join("");
-      const shareHtml = this._shareDraft && this._shareDraft.key === key ? this._shareDraftHtml(this._shareDraft) : "";
       const compareHtml = scanned ? this._capExpCompareMyDeviceHtml(d, ep, entry.scan) : "";
       return `
       <div class="ep-cmd-actions">${actionHtml}</div>
       ${compareHtml}
-      <div class="ep-cmd-results">${rows}</div>
-      ${shareHtml}`;
+      <div class="ep-cmd-results">${rows}</div>`;
+    }
+    /** Device-level "share to community database" section, shown once under
+     *  the endpoint grid rather than per-endpoint — see
+     *  _buildDeviceCapabilityRecord() for why: one GitHub issue now covers
+     *  every endpoint on the device instead of forcing a separate issue per
+     *  endpoint (the friction MattWestb hit on a multi-endpoint device,
+     *  zigbee-capabilities#57). Only appears once at least one endpoint has a
+     *  completed scan — nothing to share otherwise. */
+    _deviceShareSectionHtml(d) {
+      const epIds = this._deviceEndpointsIncludingGP(d);
+      if (!epIds.length) return "";
+      const scannedCount = epIds.filter((ep) => {
+        const e = this._commandScans.get(this._commandScanKey(d.ieee, ep));
+        return e && e.status === "done";
+      }).length;
+      if (!scannedCount) return "";
+      if (this._shareDraft && this._shareDraft.key === d.ieee) {
+        return `<div class="device-share-section">${this._shareDraftHtml(this._shareDraft)}</div>`;
+      }
+      return `
+      <div class="device-share-section">
+        <button class="btn btn-small device-cmd-share" type="button">
+          Share scan to community database (${scannedCount}/${epIds.length} endpoint${epIds.length === 1 ? "" : "s"} checked)
+        </button>
+      </div>`;
     }
     /** "Compare My Device" (PRD v2, Phase 2) — once a live scan has confirmed
      *  this device's own firmware, checks it against every firmware the
@@ -3651,12 +3912,13 @@
      *  says plainly whether anything newer has been *observed* (never
      *  "latest" — see newestFirmwareGap's own doc comment; this card has no
      *  way to know the true manufacturer OTA latest, only what's been shared).
-     *  Reuses the same live-scan sw_build_id _buildCapabilityRecord already
-     *  extracts for the share-to-database flow, so there's no separate
-     *  identity lookup to keep in sync. */
+     *  Reuses the same live-scan sw_build_id _extractIdentity() also supplies
+     *  to the share-to-database flow, so there's no separate identity lookup
+     *  to keep in sync. */
     _capExpCompareMyDeviceHtml(d, ep, scan) {
-      const record = this._buildCapabilityRecord(d, ep, scan);
-      const liveFirmware = record && record.identity && record.identity.sw_build_id;
+      const epScan = (scan && scan.endpoints || []).find((e) => Number(e.id) === Number(ep));
+      const identity = epScan && this._extractIdentity(epScan);
+      const liveFirmware = identity && identity.sw_build_id;
       if (!liveFirmware) return "";
       if (!this._capExpIndex) {
         if (!this._capExpLoading) this._capExpLoadIndex();
@@ -3715,11 +3977,11 @@
       }
       return items;
     }
-    /** Inline "review before sharing" block for a completed command scan —
-     *  see _shareCommandScan(). Shown directly under the cluster list rather
-     *  than as a separate dialog (the exploded view is already a dialog, and
-     *  this card has no nested-dialog support), so nothing is ever sent
-     *  anywhere without the user seeing exactly what's in it first.
+    /** Inline "review before sharing" block for a device's completed scans —
+     *  see _shareDeviceCapabilities(). Shown once under the endpoint grid
+     *  rather than as a separate dialog (the exploded view is already a
+     *  dialog, and this card has no nested-dialog support), so nothing is
+     *  ever sent anywhere without the user seeing exactly what's in it first.
      *  When the payload's too large to pre-fill the whole issue, the title
      *  still gets pre-filled (titles are always short) and the one open/link
      *  action also copies the JSON in the same click — down to one manual
@@ -3741,31 +4003,45 @@
         </div>
       </div>`;
     }
-    /** Assembles the shareable capability record for one endpoint's completed
-     *  scan_device result, matching the schema described in the
-     *  zigbee-capabilities repo's README. Pure function of
-     *  (device, endpoint, scan) — unit-tested in smoke-test.js — so it's
-     *  never guessing at the scan's shape; every field read here is verified
-     *  against zha_toolkit's actual scan_device.py (scan_endpoint/scan_cluster/
-     *  discover_attributes_extended).
-     *  Deliberately excludes anything that identifies this specific device or
-     *  network — no IEEE, no entity IDs, no area, no binding data — only what
-     *  the device model/firmware is capable of. Covers every cluster the scan
-     *  touched (not just the known-command ones the UI itself displays),
-     *  since attribute-only clusters (e.g. Basic, Power Configuration) are
-     *  still genuinely useful capability data for the shared database even
-     *  though this card has nothing to check them against. */
-    _buildCapabilityRecord(d, ep, scan) {
-      const epScan = (scan && scan.endpoints || []).find((e) => Number(e.id) === Number(ep));
-      if (!epScan) return null;
-      const inClusters = epScan.in_clusters || {};
-      const outClusters = epScan.out_clusters || {};
+    /** Basic cluster (0x0000) identity attributes from one endpoint's
+     *  completed scan, matched by their already-decoded name (scan_device
+     *  resolves attribute names via zigpy's own cluster.attributes
+     *  definitions) rather than a hardcoded attribute ID we'd have to verify
+     *  ourselves. Shared by Compare My Device (one endpoint's live firmware)
+     *  and the device-level capability record below (identity is a whole-
+     *  device fact, so the first scanned endpoint that has it wins). */
+    _extractIdentity(epScan) {
+      const inClusters = epScan && epScan.in_clusters || {};
       const basic = inClusters["0x0000"];
       const findIdentityAttr = (name) => {
         if (!basic || !basic.attributes) return null;
         const hit = Object.values(basic.attributes).find((a) => a.attribute_name === name);
         return hit && hit.attribute_value != null ? hit.attribute_value : null;
       };
+      return {
+        sw_build_id: findIdentityAttr("sw_build_id"),
+        hw_version: findIdentityAttr("hw_version"),
+        date_code: findIdentityAttr("date_code")
+      };
+    }
+    /** Builds the `clusters` block of a shareable capability record from one
+     *  endpoint's completed scan_device result — unit-tested in
+     *  smoke-test.js, every field read here verified against zha_toolkit's
+     *  actual scan_device.py (scan_endpoint/scan_cluster/
+     *  discover_attributes_extended). Covers every cluster the scan touched
+     *  (not just the known-command ones the UI itself displays), since
+     *  attribute-only clusters (e.g. Basic, Power Configuration) are still
+     *  genuinely useful capability data even though this card has nothing to
+     *  check them against.
+     *  Prefers the scan's own already-resolved cluster title (zha_toolkit/
+     *  zigpy names plenty of manufacturer-specific clusters this card's own
+     *  CLUSTER_INFO table doesn't know about — e.g. IKEA's 0xfc7d as "Ikea
+     *  Airpurifier") over the generic clusterName() fallback, which used to
+     *  silently replace those real names with "Cluster 0xNNNN" in the shared
+     *  record — a real information loss MattWestb flagged via a live
+     *  STARKVIND scan (zigbee-capabilities#57). */
+    _clustersBlockFromScan(epScan) {
+      const inClusters = epScan && epScan.in_clusters || {};
       const clusters = {};
       Object.keys(inClusters).forEach((hexKey) => {
         const clusterData = inClusters[hexKey] || {};
@@ -3781,57 +4057,108 @@
           access: info.access
         }));
         clusters[hexKey] = {
-          name: clusterName(clusterId),
+          name: clusterData.title || clusterName(clusterId),
           commands_received: commandsReceived.rows,
           commands_received_confirmed: commandsReceived.confirmed,
           commands_generated: commandsGenerated,
           attributes_confirmed: attributesConfirmed
         };
       });
+      return clusters;
+    }
+    /** Every endpoint ID a device declares, Green Power proxy included — the
+     *  complement to _deviceEndpoints() (which deliberately excludes it for
+     *  the binding-relationship UI, since GP endpoints have no ZHA entities
+     *  or bindings to show). Capability submissions are a different concern:
+     *  MattWestb pointed out that silently dropping the GP endpoint made
+     *  device submissions incomplete (zigbee-capabilities#57), so the shared
+     *  record below includes it as a declared-but-unscanned endpoint rather
+     *  than omitting it. */
+    _deviceEndpointsIncludingGP(d) {
+      const clusters = this._clusterCache.get(d.ieee) || [];
+      return [...new Set(clusters.map((c) => c.endpoint_id))].sort((a, b) => a - b);
+    }
+    /** Assembles the shareable capability record for a whole device — one
+     *  GitHub issue covers every endpoint, not one issue per endpoint.
+     *  MattWestb's STARKVIND example showed the old one-record-per-endpoint
+     *  design forcing multi-endpoint devices into several separate issues
+     *  (zigbee-capabilities#57); this walks every endpoint the device
+     *  declares (via the cluster cache, GP proxy included) and includes a
+     *  full clusters block for any endpoint that's been scanned, or a bare
+     *  declared-clusters stub for one that hasn't (either not yet checked, or
+     *  not scannable at all, like Green Power) — so a partial submission
+     *  never claims more than it knows, but also never silently drops an
+     *  endpoint the device actually has.
+     *  Deliberately excludes anything that identifies this specific device or
+     *  network — no IEEE, no entity IDs, no area, no binding data — only what
+     *  the device model/firmware is capable of. */
+    _buildDeviceCapabilityRecord(d) {
+      const epIds = this._deviceEndpointsIncludingGP(d);
+      if (!epIds.length) return null;
+      const rawClusters = this._clusterCache.get(d.ieee) || [];
+      let identity = { sw_build_id: null, hw_version: null, date_code: null };
+      const endpoints = epIds.map((epId) => {
+        const key = this._commandScanKey(d.ieee, epId);
+        const entry = this._commandScans.get(key);
+        const epScan = entry && entry.status === "done" ? (entry.scan && entry.scan.endpoints || []).find((e) => Number(e.id) === Number(epId)) : null;
+        if (epScan) {
+          const scannedIdentity = this._extractIdentity(epScan);
+          if (scannedIdentity.sw_build_id) identity = scannedIdentity;
+          return {
+            endpoint: {
+              id: epId,
+              profile: epScan.profile || null,
+              device_type: epScan.device_type || null,
+              in_clusters: Object.keys(epScan.in_clusters || {}),
+              out_clusters: Object.keys(epScan.out_clusters || {})
+            },
+            scanned: true,
+            clusters: this._clustersBlockFromScan(epScan)
+          };
+        }
+        const epClusters = rawClusters.filter((c) => c.endpoint_id === epId);
+        return {
+          endpoint: {
+            id: epId,
+            in_clusters: epClusters.filter((c) => c.type === "in").map((c) => hex4(c.id)),
+            out_clusters: epClusters.filter((c) => c.type === "out").map((c) => hex4(c.id))
+          },
+          scanned: false
+        };
+      });
       return {
         manufacturer: d.manufacturer || null,
         model: d.model || null,
-        identity: {
-          sw_build_id: findIdentityAttr("sw_build_id"),
-          hw_version: findIdentityAttr("hw_version"),
-          date_code: findIdentityAttr("date_code")
-        },
-        endpoint: {
-          id: ep,
-          profile: epScan.profile || null,
-          device_type: epScan.device_type || null,
-          in_clusters: Object.keys(inClusters),
-          out_clusters: Object.keys(outClusters)
-        },
-        clusters,
+        identity,
+        endpoints,
         provenance: {
           submitted_at: (/* @__PURE__ */ new Date()).toISOString(),
           card_version: CARD_VERSION
         }
       };
     }
-    /** Builds the review draft for sharing a completed command scan to the
+    /** Builds the review draft for sharing a device's completed scans to the
      *  community capability database (see CAPABILITY_DB_REPO) and shows it
-     *  inline for confirmation — see _shareDraftHtml(). Always manual, never
-     *  automatic: nothing leaves the browser until the user clicks through to
-     *  GitHub's own "Submit new issue" button themselves, using their own
-     *  GitHub session — this card never touches GitHub credentials. GitHub
-     *  issue pre-fill URLs get unreliable well before any hard browser limit,
-     *  so 6000 characters is a conservative cutoff, not the actual ceiling.
-     *  The URL attempt uses compact (unindented) JSON specifically to
-     *  maximize how often a scan fits under that cutoff — pretty-printing's
-     *  whitespace alone is often 30-50% of the encoded size — while the
-     *  on-screen review box and clipboard copy stay pretty-printed for
-     *  readability, since that's what actually gets pasted/submitted. Past
-     *  the cutoff, the title still gets pre-filled (titles are always short)
-     *  with a paste placeholder body — see _shareDraftHtml(). */
-    _shareCommandScan(d, ep) {
-      const key = this._commandScanKey(d.ieee, ep);
-      const entry = this._commandScans.get(key);
-      if (!entry || entry.status !== "done") return;
-      const record = this._buildCapabilityRecord(d, ep, entry.scan);
-      if (!record) {
-        this._setStatus("error", "Nothing to share \u2014 no scan data for this endpoint.");
+     *  inline for confirmation — see _shareDraftHtml(). One issue now covers
+     *  every endpoint on the device (see _buildDeviceCapabilityRecord()),
+     *  not just the one endpoint that happened to trigger the share. Always
+     *  manual, never automatic: nothing leaves the browser until the user
+     *  clicks through to GitHub's own "Submit new issue" button themselves,
+     *  using their own GitHub session — this card never touches GitHub
+     *  credentials. GitHub issue pre-fill URLs get unreliable well before any
+     *  hard browser limit, so 6000 characters is a conservative cutoff, not
+     *  the actual ceiling. The URL attempt uses compact (unindented) JSON
+     *  specifically to maximize how often a scan fits under that cutoff —
+     *  pretty-printing's whitespace alone is often 30-50% of the encoded
+     *  size — while the on-screen review box and clipboard copy stay
+     *  pretty-printed for readability, since that's what actually gets
+     *  pasted/submitted. Past the cutoff, the title still gets pre-filled
+     *  (titles are always short) with a paste placeholder body — see
+     *  _shareDraftHtml(). */
+    _shareDeviceCapabilities(d) {
+      const record = this._buildDeviceCapabilityRecord(d);
+      if (!record || !record.endpoints.some((e) => e.scanned)) {
+        this._setStatus("error", "Nothing to share yet \u2014 check supported commands on at least one endpoint first.");
         return;
       }
       const title = `[Device Submission] ${record.manufacturer || "Unknown"} ${record.model || "Unknown"}${record.identity.sw_build_id ? ` (fw ${record.identity.sw_build_id})` : ""}`;
@@ -3841,7 +4168,7 @@
       const fullUrl = `https://github.com/${CAPABILITY_DB_REPO}/issues/new?title=${encodeURIComponent(title)}&body=${encodeURIComponent(compactBody)}&${labelsParam}`;
       const tooLong = fullUrl.length > 6e3;
       const url = tooLong ? `https://github.com/${CAPABILITY_DB_REPO}/issues/new?title=${encodeURIComponent(title)}&body=${encodeURIComponent("Paste the copied JSON below this line:\n\n")}&${labelsParam}` : fullUrl;
-      this._shareDraft = { key, record, title, body: displayBody, url, tooLong };
+      this._shareDraft = { key: d.ieee, record, title, body: displayBody, url, tooLong };
       this._renderExplodedView(d);
     }
     /** Best-effort clipboard copy with an old-style fallback for HTTP-served
@@ -4776,7 +5103,8 @@
         el.innerHTML = `
         <div class="capexp-strip">Built from real scans shared by ZHA users \u2014 <span id="capexp-strip-count">\u2026</span>
           devices confirmed so far. Every scan you share adds to it.</div>
-        <p class="capexp-mission">Find out what a device can actually do \u2014 before you buy it or wire it up.</p>
+        <p class="capexp-mission">Discover what Zigbee devices really support \u2014 verified from real community
+          scans, not manufacturer claims.</p>
         <p class="hint" style="margin-top:0">Verified from real scans, not manufacturer claims \u2014 nothing about your
           devices (IEEE addresses, entities, areas, names) ever leaves this browser. Only covers devices someone's
           already scanned and shared, so a gap here means nobody's confirmed it yet, not that it doesn't exist. See
@@ -4789,7 +5117,7 @@
             <span class="capexp-mode-sub">What can this device do?</span>
           </button>
           <button class="capexp-mode-btn" data-capexp-mode="search">
-            <span class="capexp-mode-title">Search database</span>
+            <span class="capexp-mode-title">Find a device</span>
             <span class="capexp-mode-sub">Which device should I buy for X?</span>
           </button>
           <button class="capexp-mode-btn" data-capexp-mode="compare">
@@ -4857,7 +5185,7 @@
         bodyEl.dataset.capexpBodyMode = "";
         return;
       }
-      statusEl.textContent = `${this._capExpIndex.length} confirmed endpoint/firmware record${this._capExpIndex.length === 1 ? "" : "s"} from the community database${this._capExpLoading ? " (refreshing\u2026)" : ""}`;
+      statusEl.textContent = `${this._capExpIndex.length} firmware observation${this._capExpIndex.length === 1 ? "" : "s"} from the community database${this._capExpLoading ? " (refreshing\u2026)" : ""}`;
       const stripCountEl = this._q("#capexp-strip-count");
       if (stripCountEl) {
         const uniqueDevices = new Set(this._capExpIndex.map((e) => `${e.manufacturer_slug}|${e.model_slug}`));
@@ -4866,10 +5194,13 @@
       const discoveriesEl = this._q("#capexp-discoveries");
       if (discoveriesEl) {
         const discoveries = interestingDiscoveries(this._capExpIndex);
-        discoveriesEl.innerHTML = discoveries.length ? `<div class="capexp-discoveries">
-             <div class="capexp-discoveries-label">Interesting so far</div>
-             <ul class="capexp-discoveries-list">${discoveries.map((d) => `<li>${escapeHtml(d.text)}</li>`).join("")}</ul>
-           </div>` : "";
+        this._capExpDiscoveries = discoveries;
+        discoveriesEl.innerHTML = `<div class="capexp-discoveries">
+             <div class="capexp-discoveries-label">Community heartbeat</div>
+             <p class="capexp-discoveries-lead">This dataset is entirely community-built. Every scan shared by the
+               community adds real evidence for others deciding whether to buy or configure a device.</p>
+             ${discoveries.length ? `<ul class="capexp-discoveries-list">${discoveries.map((d) => `<li>${escapeHtml(d.text)}</li>`).join("")}</ul>` : ""}
+           </div>`;
       }
       if (this._capExpMode === "explore") {
         bodyEl.dataset.capexpBodyMode = "explore";
@@ -4899,8 +5230,9 @@
       for (const [key, entry] of this._commandScans.entries()) {
         if (key.startsWith(prefix) && entry.status === "done" && entry.scan) {
           const ep = Number(key.slice(prefix.length));
-          const record = this._buildCapabilityRecord(device, ep, entry.scan);
-          if (record && record.identity && record.identity.sw_build_id) return record.identity.sw_build_id;
+          const epScan = (entry.scan.endpoints || []).find((e) => Number(e.id) === ep);
+          const identity = epScan && this._extractIdentity(epScan);
+          if (identity && identity.sw_build_id) return identity.sw_build_id;
         }
       }
       const reg = this._haDeviceRegistryEntry(device.ieee);
@@ -4911,8 +5243,74 @@
       if (isNaN(d.getTime())) return iso;
       return d.toLocaleDateString(void 0, { month: "short", year: "numeric" });
     }
-    _capExpConfidenceClass(label) {
-      return label.toLowerCase().replace(/[^a-z]+/g, "-");
+    // Renders confidenceStars()' rating as a filled/empty star string (★★★★☆)
+    // — or, when the community's own scans conflict with each other, a
+    // distinct "Conflicting" callout instead of a star count, since that's a
+    // data-quality flag rather than simply "less mature evidence" (see
+    // confidenceStars' own doc comment). The full scan count is always in
+    // the tooltip, never hidden — this is a friendlier headline, not a
+    // replacement for the real evidence.
+    _capExpStarsHtml(rating) {
+      if (rating.conflicting) {
+        return `<span class="capexp-trust-stars capexp-trust-conflict" title="Community confidence: the community's own scans disagree with each other for this device \u2014 see Technical evidence below">\u26A0 Conflicting</span>`;
+      }
+      const filled = "\u2605".repeat(rating.stars);
+      const empty = "\u2606".repeat(5 - rating.stars);
+      return `<span class="capexp-trust-stars" title="Community confidence: ${rating.stars}/5, based on ${rating.totalScans} scan${rating.totalScans === 1 ? "" : "s"}">${filled}${empty}</span>`;
+    }
+    // Shared by Explore My Devices and Find a Device — one compact
+    // "Community confidence" panel (star rating + firmware/observation
+    // counts + last confirmed) instead of duplicating this markup per mode.
+    _capExpTrustPanelHtml(rating, fwCount, fwLabel, totalScans, lastSeen) {
+      return `<div class="capexp-trust-panel">
+      ${this._capExpStarsHtml(rating)}
+      <div class="capexp-trust-text">
+        <span class="capexp-trust-label">Community confidence</span>
+        <div class="capexp-trust-detail muted">
+          ${fwCount} firmware version${fwCount === 1 ? "" : "s"}${fwLabel ? ` (${escapeHtml(fwLabel)})` : ""} \xB7
+          ${totalScans} observation${totalScans === 1 ? "" : "s"}${lastSeen ? ` \xB7 last confirmed ${escapeHtml(this._capExpFormatDate(lastSeen))}` : ""}
+        </div>
+      </div>
+    </div>`;
+    }
+    // Shared by Explore My Devices and Find a Device. `possessive` lets each
+    // mode word the caveat correctly — Explore mode is about a device the
+    // reader owns ("...than yours"), Search results are about devices they
+    // may not ("...than this record's firmware").
+    _capExpGoodForHtml(goodFor, possessive = "yours") {
+      if (!goodFor.length) return "";
+      return `<div class="capexp-goodfor">
+      <span class="capexp-cap-label">Good for</span>
+      <div class="capexp-goodfor-tags">${goodFor.map(
+        (t) => `<span class="capexp-tag capexp-goodfor-tag"${t.exactFirmware ? "" : ` title="Confirmed on a different firmware than ${possessive} \u2014 likely still applies, but not verified on that exact version."`}>${escapeHtml(t.label)}${t.exactFirmware ? "" : " *"}</span>`
+      ).join("")}</div>
+    </div>`;
+    }
+    // Shared by Explore My Devices and Find a Device — the "Capabilities"
+    // section (cluster/command groups) rendered inside each mode's
+    // "Technical evidence" / "View capabilities" disclosure.
+    _capExpCapabilitiesHtml(capGroups) {
+      if (!capGroups.length) {
+        return `<p class="muted">No confirmed commands or reporting clusters recorded yet.</p>`;
+      }
+      const shown = capGroups.filter((g) => g.identified || !g.reportsOnly);
+      const unidentifiedEmpty = capGroups.filter((g) => !g.identified && g.reportsOnly);
+      const groupsHtml = shown.map(
+        (g) => `
+        <div class="capexp-cap-group">
+          <span class="capexp-cap-group-label">${escapeHtml(g.label)}</span>
+          ${g.items.length ? `<div class="capexp-cap-tags">${g.items.map(
+          (i) => `<span class="capexp-tag${i.firmwareDependent ? " capexp-tag-fwdep" : ""}">${escapeHtml(i.name)}${i.firmwareDependent ? " \xB7 firmware-dependent" : ""}</span>`
+        ).join("")}</div>` : `<div class="capexp-cap-reportsonly hint">Reports data on this cluster \u2014 no commands to send.</div>`}
+        </div>`
+      ).join("");
+      const unidentifiedHtml = unidentifiedEmpty.length ? `<div class="capexp-cap-group capexp-cap-group-unidentified">
+           <span class="capexp-cap-group-label">Other reported clusters</span>
+           <div class="capexp-cap-reportsonly hint">Also reports on ${unidentifiedEmpty.length} manufacturer-specific cluster${unidentifiedEmpty.length === 1 ? "" : "s"} this card
+             can't yet put a name to (${unidentifiedEmpty.map((g) => escapeHtml(g.clusterId)).join(", ")}) \u2014 no commands confirmed on any of them.</div>
+         </div>` : "";
+      return `<div class="capexp-cap-label">Capabilities</div>
+      <div class="capexp-cap-groups">${groupsHtml}${unidentifiedHtml}</div>`;
     }
     _capExpFwGapSummary(diff) {
       const added = [];
@@ -4927,6 +5325,17 @@
       return parts.length ? parts.join(" and ") : "changed some reporting data";
     }
     // ---- Mode 2: Explore My Devices ----
+    //
+    // Design principle for this whole tab, distilled from real UX feedback
+    // across several rounds of iteration: the summary helps users make
+    // decisions; the technical evidence explains why the summary is true.
+    // Anything new added to a device card should pass a simple test before
+    // it lands here — does it belong in the always-visible summary because
+    // it helps someone decide (manufacturer/model, Community confidence,
+    // Good for, a firmware-currency alert), or in the collapsed Technical
+    // evidence section because it justifies a claim the summary already
+    // made (capability groups, raw commands, per-firmware endpoint detail)?
+    // If it's neither, it probably doesn't belong on the card at all.
     _renderCapExpExplore(bodyEl) {
       const devices = this._devices || [];
       const matches = matchLocalDevices(devices, this._capExpIndex);
@@ -4942,43 +5351,44 @@
         const reports = m.entries.some((entry) => reportsState(entry));
         const lastSeenTimes = m.entries.map((e) => e.last_seen).filter(Boolean).sort();
         const lastSeen = lastSeenTimes.length ? lastSeenTimes[lastSeenTimes.length - 1] : null;
-        const labels = m.entries.map((e) => confidenceLabel(e));
-        const overallConfidence = labels.includes("Conflicting evidence") ? "Conflicting evidence" : labels.includes("Single observation") ? "Single observation" : labels.includes("Repeated observation") ? "Repeated observation" : "Strong evidence";
+        const rating = confidenceStars(m.entries);
         const localFirmware = this._capExpLocalFirmwareFor(m.device);
         const gap = localFirmware ? newestFirmwareGap(localFirmware, m.entries) : null;
+        const discoveryNote = discoveryForDevice(
+          this._capExpDiscoveries || [],
+          m.manufacturerSlug,
+          m.modelSlug
+        );
+        const goodFor = useCaseTags(m.entries, localFirmware);
+        const capabilitiesHtml = this._capExpCapabilitiesHtml(capGroups);
         return `
               <div class="capexp-device-card">
-                <div class="capexp-device-header" data-capexp-toggle="${escapeHtml(key)}">
-                  <span class="capexp-device-name">${escapeHtml(this._deviceLabel(m.device))}</span>
-                  <span class="muted">${escapeHtml(m.device.manufacturer || "\u2014")} \xB7 ${escapeHtml(
+                <div class="capexp-device-header">
+                  <span class="capexp-device-name">${escapeHtml(m.device.manufacturer || "\u2014")} ${escapeHtml(
           m.device.model || "\u2014"
         )}</span>
-                  <span class="capexp-confidence-badge capexp-confidence-${this._capExpConfidenceClass(
-          overallConfidence
-        )}">${escapeHtml(overallConfidence)}</span>
-                  <span class="capexp-chevron">${expanded ? "\u25BE" : "\u25B8"}</span>
+                  ${// Only show the entity's own name as a secondary line
+        // when there actually is one — this database is about
+        // products, not entity names, so a manufacturer/model
+        // repeated twice (the _deviceLabel() fallback when no
+        // custom name exists) would just be noise.
+        m.device.user_given_name || m.device.name ? `<span class="muted">${escapeHtml(m.device.user_given_name || m.device.name)}</span>` : ""}
                 </div>
-                <div class="capexp-device-summary muted">
-                  Confirmed by ${totalScans} scan${totalScans === 1 ? "" : "s"} across ${fw.length} firmware
-                  version${fw.length === 1 ? "" : "s"} (${escapeHtml(fwLabel)})${lastSeen ? ` \xB7 last seen ${escapeHtml(this._capExpFormatDate(lastSeen))}` : ""}
-                </div>
-                ${capGroups.length ? `<div class="capexp-cap-label">Supports</div>
-                       <div class="capexp-cap-groups">${capGroups.map(
-          (g) => `
-                           <div class="capexp-cap-group">
-                             <span class="capexp-cap-group-label">${escapeHtml(g.label)}</span>
-                             ${g.items.length ? `<div class="capexp-cap-tags">${g.items.map(
-            (i) => `<span class="capexp-tag${i.firmwareDependent ? " capexp-tag-fwdep" : ""}">${escapeHtml(i.name)}${i.firmwareDependent ? " \xB7 firmware-dependent" : ""}</span>`
-          ).join("")}</div>` : ""}
-                           </div>`
-        ).join("")}</div>` : `<p class="muted">No confirmed commands or reporting clusters recorded yet.</p>`}
-                <div class="capexp-report-line muted">Reports state: ${reports ? "yes" : "no"}</div>
+                ${this._capExpTrustPanelHtml(rating, fw.length, fwLabel, totalScans, lastSeen)}
+                ${discoveryNote ? `<div class="capexp-discovery-note">${escapeHtml(discoveryNote.cardNote)}</div>` : ""}
+                ${this._capExpGoodForHtml(goodFor, "yours")}
+                <div class="capexp-report-line muted">${reports ? "Reports its state back automatically \u2014 no need to poll it to see changes." : "Doesn't automatically report state changes \u2014 Home Assistant may need to poll it."}</div>
                 ${gap ? `<div class="capexp-fwgap-alert">Your device is on ${escapeHtml(
           localFirmware
         )}. The community has also confirmed ${escapeHtml(
           gap.newestFirmware
         )} for this model${gap.diff && gap.diff.length ? `, which ${this._capExpFwGapSummary(gap.diff)}` : ""}. Nobody's scanned anything newer yet \u2014 share a scan if you are.</div>` : ""}
-                ${expanded ? this._capExpDeviceDetailHtml(m.entries) : ""}
+                <div class="capexp-techtoggle" data-capexp-toggle="${escapeHtml(key)}">
+                  Technical evidence <span class="capexp-chevron-inline">${expanded ? "\u25BE" : "\u25B8"}</span>
+                </div>
+                ${expanded ? `<div class="capexp-tech-panel">${capabilitiesHtml}${this._capExpDeviceDetailHtml(
+          m.entries
+        )}</div>` : ""}
               </div>`;
       }).join("") : `<p class="muted">None of your devices match anything in the community database yet.</p>`;
       const noMatchHtml = noMatch.length ? `
@@ -4999,7 +5409,7 @@
       <div class="capexp-section-title">Devices with confirmed capabilities (${matches.length})</div>
       <div class="capexp-device-list">${matchedHtml}</div>
       ${noMatchHtml}`;
-      this._qa(".capexp-device-header").forEach((h) => {
+      this._qa(".capexp-techtoggle").forEach((h) => {
         h.addEventListener("click", () => {
           const key = h.dataset.capexpToggle;
           if (this._capExpExpanded.has(key)) this._capExpExpanded.delete(key);
@@ -5014,9 +5424,18 @@
         });
       });
     }
+    // Deliberately visually quieter than the Good for / Capabilities summary
+    // above it — this is the raw per-firmware evidence backing that summary,
+    // not a second summary competing for the same attention. Real feedback
+    // was that this section "almost competes with the summary" once a card
+    // is expanded; the label + lighter entry styling (see .capexp-techlabel/
+    // .capexp-entry-title in styles.js) push it back into a supporting role
+    // without hiding it behind an extra click, since it's still genuinely
+    // useful (e.g. spotting which exact firmware a command was confirmed on).
     _capExpDeviceDetailHtml(entries) {
       return `
       <div class="capexp-device-detail">
+        <div class="capexp-techlabel">Per-firmware detail</div>
         ${entries.map((entry) => {
         const cmds = confirmedCommands(entry);
         return `
@@ -5067,20 +5486,59 @@
       return [...set].sort((a, b) => a.localeCompare(b));
     }
     // Canned starting points grounded in the same facets the form itself
-    // exposes. Resolved against the live index so the chip's value is
-    // always one of the dropdown's real options, not a guessed substring.
-    _capExpSearchExamples() {
+    // exposes, resolved against the live index so a chip's value is always
+    // one of the dropdown's real options, not a guessed substring — a chip
+    // never appears if it has nothing to point at. Grouped by category
+    // (Lighting / Sensors / Networking) per real UX feedback asking for a
+    // "quick search" library that grows in terms of what people actually
+    // want to do with a device, not raw Zigbee vocabulary. A category with
+    // zero resolvable examples is omitted entirely rather than shown empty.
+    //
+    // Two deliberate deviations from the requested example list, worth
+    // flagging: "Motion detection" and "Occupancy sensing" were requested
+    // as two separate chips, but both would resolve to the exact same
+    // Occupancy Sensing cluster filter — showing two chips with identical
+    // results would read as broken, not helpful, so they're combined into
+    // one. "Attribute reporting" isn't included: there's no single cluster
+    // or facet value that means "this device reports something" in
+    // general — every reporting cluster reports its own specific
+    // attribute — so wiring a chip to it honestly would need a new kind of
+    // search facet, which is out of scope for a wording/UX pass.
+    _capExpSearchExampleGroups() {
       const resolve = (needle) => {
         const opts = this._capExpFacetValues("cluster");
         return opts.find((v) => v.toLowerCase().includes(needle)) || "";
       };
-      return [
-        { label: "Reports occupancy", field: "cluster", value: resolve("occupancy") },
-        { label: "Reports illuminance", field: "cluster", value: resolve("illuminance") },
-        { label: "Supports on/off control", field: "cluster", value: resolve("on/off") },
-        { label: "Supports dimming", field: "cluster", value: resolve("level") },
-        { label: "Supports color control", field: "cluster", value: resolve("color") }
-      ].filter((ex) => ex.value);
+      const groups = [
+        {
+          category: "Lighting",
+          examples: [
+            { label: "Switch things on/off", field: "cluster", value: resolve("on/off") },
+            { label: "Direct dimming", field: "cluster", value: resolve("level") },
+            { label: "Scene control", field: "cluster", value: resolve("scene") },
+            { label: "Color control", field: "cluster", value: resolve("color") }
+          ]
+        },
+        {
+          category: "Sensors",
+          examples: [
+            { label: "Motion / occupancy sensing", field: "cluster", value: resolve("occupancy") },
+            { label: "Reports illuminance", field: "cluster", value: resolve("illuminance") },
+            { label: "Security / contact sensing (IAS Zone)", field: "cluster", value: resolve("ias zone") },
+            { label: "Temperature monitoring", field: "cluster", value: resolve("temperature") },
+            { label: "Humidity monitoring", field: "cluster", value: resolve("humidity") },
+            { label: "Energy monitoring", field: "cluster", value: resolve("metering") }
+          ]
+        },
+        {
+          category: "Networking",
+          examples: [
+            { label: "Group control", field: "cluster", value: resolve("groups") },
+            { label: "OTA support", field: "cluster", value: resolve("ota") }
+          ]
+        }
+      ];
+      return groups.map((g) => ({ ...g, examples: g.examples.filter((ex) => ex.value) })).filter((g) => g.examples.length);
     }
     _capExpSearchSelectHtml(field, placeholder) {
       const s = this._capExpSearch;
@@ -5092,36 +5550,44 @@
       ).join("")}
       </select>`;
     }
+    // Find a Device (formerly "Search database") — real UX feedback:
+    // outcome-first for people who don't know what a cluster or command is,
+    // while keeping full precision filtering for people who do. Quick
+    // Search chips and the result cards below are the new discovery layer;
+    // the Advanced filters dropdowns underneath are the unchanged precise
+    // query tool this tab always was — same searchIndex() facets, same
+    // dropdown behavior, no functional change there.
     _buildCapExpSearchShell(bodyEl) {
-      const examples = this._capExpSearchExamples();
+      const groups = this._capExpSearchExampleGroups();
       bodyEl.innerHTML = `
-      <p class="hint" style="margin-top:0">Try one of these, or pick exact filters from what's in the database
-        below \u2014 manufacturer, model, cluster, command, attribute, or firmware.</p>
-      ${examples.length ? `<div class="capexp-search-examples">
-              ${examples.map(
-        (ex) => `<button type="button" class="chip capexp-search-example" data-field="${escapeHtml(
-          ex.field
-        )}" data-value="${escapeHtml(ex.value)}">${escapeHtml(ex.label)}</button>`
+      <p class="hint" style="margin-top:0">Try one of these, or use Advanced filters below for exact manufacturer,
+        model, cluster, command, attribute, or firmware matches.</p>
+      ${groups.map(
+        (g) => `
+        <div class="capexp-search-example-group">
+          <div class="capexp-search-example-category">${escapeHtml(g.category)}</div>
+          <div class="capexp-search-examples">
+            ${g.examples.map(
+          (ex) => `<button type="button" class="chip capexp-search-example" data-field="${escapeHtml(
+            ex.field
+          )}" data-value="${escapeHtml(ex.value)}">${escapeHtml(ex.label)}</button>`
+        ).join("")}
+          </div>
+        </div>`
       ).join("")}
-            </div>` : ""}
-      <div class="capexp-search-form">
-        ${this._capExpSearchSelectHtml("manufacturer", "All manufacturers")}
-        ${this._capExpSearchSelectHtml("model", "All models")}
-        ${this._capExpSearchSelectHtml("cluster", "All clusters")}
-        ${this._capExpSearchSelectHtml("command", "All commands")}
-        ${this._capExpSearchSelectHtml("attribute", "All attributes")}
-        ${this._capExpSearchSelectHtml("firmware", "All firmware")}
-      </div>
+      <details class="capexp-advanced-filters">
+        <summary>Advanced filters</summary>
+        <div class="capexp-search-form">
+          ${this._capExpSearchSelectHtml("manufacturer", "All manufacturers")}
+          ${this._capExpSearchSelectHtml("model", "All models")}
+          ${this._capExpSearchSelectHtml("cluster", "All clusters")}
+          ${this._capExpSearchSelectHtml("command", "All commands")}
+          ${this._capExpSearchSelectHtml("attribute", "All attributes")}
+          ${this._capExpSearchSelectHtml("firmware", "All firmware")}
+        </div>
+      </details>
       <div id="capexp-search-count" class="hint"></div>
-      <div class="table-scroll">
-        <table class="bindings-table">
-          <thead><tr>
-            <th>Manufacturer</th><th>Model</th><th>Firmware</th><th>Endpoint</th><th>Confirmed commands</th>
-            <th>Not reported</th><th>Scans</th><th>Confidence</th>
-          </tr></thead>
-          <tbody id="capexp-search-results"></tbody>
-        </table>
-      </div>`;
+      <div id="capexp-search-results" class="capexp-device-list"></div>`;
       ["manufacturer", "model", "cluster", "command", "attribute", "firmware"].forEach((f) => {
         this._q(`#capexp-s-${f}`).addEventListener("change", (e) => {
           this._capExpSearch[f] = e.target.value;
@@ -5143,40 +5609,78 @@
             const select = this._q(`#capexp-s-${f}`);
             if (select) select.value = this._capExpSearch[f];
           });
+          this._q(".capexp-advanced-filters").open = true;
           this._capExpRunSearch();
         });
       });
     }
+    // Renders matched search results as one device card per matched
+    // manufacturer+model (see groupSearchResultsByDevice's own doc comment
+    // for why Community confidence/Good for reflect the whole device, not
+    // just the entries that happened to match this particular search) —
+    // the same summary-first / collapsed-technical-evidence shape as
+    // Explore My Devices, via the shared _capExpTrustPanelHtml/
+    // _capExpGoodForHtml/_capExpCapabilitiesHtml methods, just labeled
+    // "View capabilities" instead of "Technical evidence" to match how a
+    // reader arrives here (already searching for a specific capability,
+    // not exploring a device they already own).
     _capExpRunSearch() {
-      const tbody = this._q("#capexp-search-results");
+      const resultsEl = this._q("#capexp-search-results");
       const countEl = this._q("#capexp-search-count");
-      if (!tbody || !this._capExpIndex) return;
-      const all = searchIndex(this._capExpIndex, this._capExpSearch);
-      const results = all.slice(0, 200);
-      if (countEl) {
-        countEl.textContent = all.length > 200 ? `Showing first 200 of ${all.length} matching records \u2014 narrow your search to see more.` : `${all.length} matching record${all.length === 1 ? "" : "s"}`;
-      }
-      if (!results.length) {
-        tbody.innerHTML = `<tr><td colspan="8" class="muted">No matching records \u2014 that's likely a coverage gap, not proof this device can't do it. Nobody's scanned and shared it yet.</td></tr>`;
+      if (!resultsEl || !this._capExpIndex) return;
+      const matched = searchIndex(this._capExpIndex, this._capExpSearch);
+      const devices = groupSearchResultsByDevice(matched, this._capExpIndex);
+      const shown = devices.slice(0, 100);
+      if (!devices.length) {
+        if (countEl) countEl.textContent = "";
+        resultsEl.innerHTML = `<div class="capexp-empty-search">
+        <p>No community observations currently match this search.</p>
+        <p class="muted">This does not necessarily mean the capability is unsupported \u2014 it simply means nobody
+          has submitted evidence for it yet.</p>
+        <button type="button" class="btn btn-small" id="capexp-empty-contribute">Contribute a scan</button>
+      </div>`;
+        const contributeBtn = this._q("#capexp-empty-contribute");
+        if (contributeBtn) {
+          contributeBtn.addEventListener("click", () => {
+            this._capExpMode = "explore";
+            this._renderCapExpBody();
+          });
+        }
         return;
       }
-      tbody.innerHTML = results.map((entry) => {
-        const cmds = confirmedCommands(entry).map((c) => c.name);
-        const notReported = notReportedCommands(entry).map((c) => c.name);
-        const confidence = confidenceLabel(entry);
-        return `<tr>
-          <td>${escapeHtml(entry.manufacturer || "\u2014")}</td>
-          <td>${escapeHtml(entry.model || "\u2014")}</td>
-          <td>${escapeHtml(entry.firmware || "unknown")}</td>
-          <td>${entry.endpoint ?? "\u2014"}</td>
-          <td>${cmds.length ? escapeHtml(cmds.join(", ")) : `<span class="muted">none confirmed</span>`}</td>
-          <td>${notReported.length ? escapeHtml(notReported.join(", ")) : `<span class="muted">\u2014</span>`}</td>
-          <td>${entry.scan_count || 0}</td>
-          <td><span class="capexp-confidence-badge capexp-confidence-${this._capExpConfidenceClass(
-          confidence
-        )}">${escapeHtml(confidence)}</span></td>
-        </tr>`;
+      if (countEl) {
+        countEl.textContent = devices.length > 100 ? `Showing the top 100 of ${devices.length} matching devices, ranked by community confidence \u2014 narrow your search to see more.` : `${devices.length} matching device${devices.length === 1 ? "" : "s"}, ranked by community confidence`;
+      }
+      resultsEl.innerHTML = shown.map((r) => {
+        const key = `${r.manufacturerSlug}|${r.modelSlug}`;
+        const expanded = this._capExpSearchExpanded.has(key);
+        const capGroups = groupCapabilitiesByOutcome(r.entries);
+        return `
+          <div class="capexp-device-card">
+            <div class="capexp-device-header">
+              <span class="capexp-device-name">${escapeHtml(r.manufacturer || "\u2014")} ${escapeHtml(
+          r.model || "\u2014"
+        )}</span>
+            </div>
+            ${this._capExpTrustPanelHtml(r.rating, r.firmwareCount, null, r.totalScans, r.lastSeen)}
+            ${this._capExpGoodForHtml(r.goodFor, "this record's")}
+            <div class="capexp-techtoggle" data-capexp-toggle="${escapeHtml(key)}">
+              ${expanded ? "Hide capabilities" : "View capabilities"}
+              <span class="capexp-chevron-inline">${expanded ? "\u25BE" : "\u2192"}</span>
+            </div>
+            ${expanded ? `<div class="capexp-tech-panel">${this._capExpCapabilitiesHtml(
+          capGroups
+        )}${this._capExpDeviceDetailHtml(r.entries)}</div>` : ""}
+          </div>`;
       }).join("");
+      this._qa("#capexp-search-results .capexp-techtoggle").forEach((h) => {
+        h.addEventListener("click", () => {
+          const key = h.dataset.capexpToggle;
+          if (this._capExpSearchExpanded.has(key)) this._capExpSearchExpanded.delete(key);
+          else this._capExpSearchExpanded.add(key);
+          this._capExpRunSearch();
+        });
+      });
     }
     // ---- Mode 3: Compare Firmware ----
     _renderCapExpCompare(bodyEl) {

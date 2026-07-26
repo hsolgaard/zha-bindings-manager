@@ -2,6 +2,334 @@
 
 All notable changes to ZHA Bindings Manager are documented here.
 
+## [0.29.0]
+
+A UX refresh of the Search tab, from a user-authored PRD: "transform the
+Search Database from a technical query tool into a device discovery
+tool." No changes to the underlying data or search matching logic —
+matching is still exact-facet, same as before. Applied identically to
+both the card and the standalone site.
+
+### Changed
+
+- **Renamed the mode/tab** from "Search database" to "Find a device", on
+  both the card's mode picker and the standalone site's section heading —
+  matches the subtitle already written for it ("Which device should I buy
+  for X?") and better signals what the tab is actually for.
+- **Search results are now device cards, not per-firmware table rows.**
+  All firmware entries for a matched device are grouped and shown as one
+  card (Community confidence trust panel, Good for tags, a "View
+  capabilities →" disclosure revealing the same Capabilities-groups and
+  per-firmware detail Explore mode shows), instead of one dense row per
+  firmware version. A new pure function, `groupSearchResultsByDevice`,
+  re-fetches every firmware entry for each matched device from the full
+  index (not just the entries that happened to match the search) before
+  computing its rating and tags — same "same model, any firmware" evidence
+  bar the rest of the Explorer already uses, so a device doesn't look
+  thinner in Search than it does in Explore just because only one of its
+  firmware versions matched the query.
+- **Results are ranked**, not left in index order: highest community
+  confidence first, then most recently confirmed, then most firmware
+  versions observed, then alphabetically by manufacturer/model.
+- **Quick Search chips expanded from 3 to 12** and organized under
+  category headings — Lighting (switch on/off, dimming, scene control,
+  color control), Sensors (motion/occupancy, illuminance, security/
+  contact, temperature, humidity, energy monitoring), Networking (group
+  control, OTA support). Picking a chip now also opens the Advanced
+  filters panel, so the underlying filter state it set is visible rather
+  than hidden.
+- **Advanced filters (Manufacturer/Model/Cluster/Command/Attribute/
+  Firmware) are unchanged** in behavior, now collapsed by default behind
+  an "Advanced filters" disclosure so a new visitor sees the
+  discovery-first Quick Search chips before the technical query tool.
+- **Empty search results** now explain that a gap in the data isn't proof
+  a device lacks a capability ("nobody has submitted evidence for it
+  yet"), with a "Contribute a scan" call to action — the card's version
+  switches to Explore My Devices where sharing a scan actually happens;
+  the site's version links to its existing Contribute section.
+- Two deliberate deviations from the PRD's literal chip list, flagged for
+  visibility: "Motion detection" and "Occupancy sensing" were combined
+  into one "Motion / occupancy sensing" chip (both would otherwise filter
+  to the identical Occupancy Sensing cluster); "Attribute reporting" was
+  left out entirely, since no single existing facet value honestly
+  represents "reports something" in general without a scan-schema change.
+
+## [0.28.0]
+
+A UX refinement pass from a user-authored PRD, explicitly scoped small:
+no changes to the capability database or scan logic, purely readability
+and disclosure changes to the Capability Explorer.
+
+### Changed
+
+- **Summary-first cards.** Each device card's always-visible summary is
+  now strictly: manufacturer + model, local device name, the Community
+  confidence trust panel, and Good for tags — everything protocol-level
+  (Capabilities/cluster groups, commands, per-firmware endpoint detail)
+  moved behind a new "Technical evidence ▾" disclosure row. The device
+  header itself is no longer the click target for this (it used to
+  double as both "what device is this" and "click to see raw protocol
+  data", which stopped making sense once the header no longer previewed
+  any of that detail).
+- **Confidence ladder gained a 4th tier.** "Well confirmed" (5-9 scans)
+  now sits between "Repeated observation" (Growing evidence) and "Strong
+  evidence" (now labeled High confidence) — previously a device with 5
+  scans and one with 50 both read as "Strong evidence", flattening a real
+  difference in how well-established the evidence actually is. "Building"
+  is now "Growing evidence" to match the requested wording.
+- **"Good for" tag wording** tightened to match requested vocabulary where
+  it's a safe 1:1 relabel with no change in evidence: Scenes → "Scene
+  control", Metering → "Energy monitoring", Temperature → "Temperature
+  sensing", Color Control → "Color control". Deliberately did not add a
+  "Motion lighting" tag for occupancy sensors — a bare occupancy sensor
+  has no evidence it can control a light itself, only that it detects
+  motion, and this project's tags only ever claim what's actually
+  confirmed.
+- Community heartbeat's lead sentence reworded per the PRD's suggested
+  copy, on both the card and the standalone site.
+- Added a standing design-principle comment above the device-card
+  renderer: the summary helps users decide; the technical evidence
+  explains why the summary is true. Anything added later should pass
+  that test before it lands on the card.
+
+## [0.27.0]
+
+The one feature from the last round of feedback the user asked to build
+after confirming it was still wanted (item was framed more tentatively
+than the others): a single compact trust panel per device card.
+
+### Changed
+
+- Each device card in Explore My Devices now shows one consolidated
+  "Community confidence" panel (a ★★★★☆-style star rating, plus firmware
+  version count, observation count, and last-confirmed date) instead of a
+  confidence badge in the header, a separate scan-count summary line, and
+  a separate discovery-note line spread across the card. The star rating
+  is on its own graduated scale (1/2/3/4/5 stars at 1/2/5/10/20+ scans) —
+  deliberately not a re-skin of confidenceLabel's 3 buckets, which would
+  otherwise show a device with exactly 5 scans and one with 50 scans as
+  the exact same rating. Evidence that conflicts across the community's
+  own scans gets a distinct "⚠ Conflicting" callout instead of a lower
+  star count, since that's a data-quality flag, not just "less mature".
+  The full scan count and firmware breakdown are always available in the
+  panel and the star rating's tooltip — nothing is hidden, just led with
+  a friendlier headline.
+- "Supports" renamed to "Capabilities", the expanded per-firmware detail
+  is now visually de-emphasized and labeled "Technical evidence", the
+  "Interesting so far" panel is now "Community heartbeat" with a framing
+  lead sentence, and confidence badges elsewhere (the search results
+  table, on both the card and the standalone site) show a friendlier
+  trust-tier word with the full label kept as a tooltip — all from the
+  same round of user feedback, shipped in 0.26.1 just before this.
+
+## [0.26.1]
+
+A second round of Capability Explorer polish from follow-up feedback on
+0.26.0 — the reviewer's overall read was that the page now tells a
+coherent story (what is this? → what's it good for? → what evidence backs
+that?); these are refinements to that story, not a re-litigation of it.
+
+### Changed
+
+- "Supports" renamed to "Capabilities" — with "Good for" now leading the
+  card, "Supports" no longer earned its own distinct heading for the same
+  underlying information.
+- The expanded per-firmware technical detail is now visually quieter (a
+  small "Technical evidence" label, lighter text) so it reads as the
+  evidence backing the Good for/Capabilities summary above it, not a
+  second summary competing for the same attention.
+- Confidence badges now show a friendlier trust-tier word (Preliminary /
+  Building / High / Conflicting) instead of the literal evidence-count
+  label (Single observation / Repeated observation / Strong evidence /
+  Conflicting evidence) — the full original wording is kept as the
+  badge's tooltip, and the plain scan/firmware counts underneath are
+  unchanged, so no information is lost, it's just not what greets you
+  first. Applied consistently on the card (device cards + search table)
+  and the standalone site's search table.
+- The "Interesting so far" panel is now "Community heartbeat", leading
+  with a sentence framing the dataset as community-built and something
+  every scan meaningfully contributes to, rather than opening straight
+  into a specific fact like "newest contribution: X on firmware Y" that
+  doesn't obviously matter to someone researching one particular device.
+  The existing gated highlights (most-confirmed, firmware variety,
+  firmware-dependent capabilities, recent activity) still follow
+  underneath. Applied to both the card and the standalone site.
+- Shortened the Capability Explorer's headline copy on both the card and
+  the standalone site (tagline + meta description) to lead harder with
+  what the feature does before explaining why to trust it.
+
+## [0.26.0]
+
+The two larger items from the same round of Capability Explorer feedback —
+scoped and confirmed with the user before building, given how much
+judgment they involve.
+
+### Added
+
+- **"Good for" tags** — the single most-requested item: short, plain-
+  English use-case tags on each device card (e.g. "Switch things on/off",
+  "Detect motion / occupancy", "Act as a remote / controller") answering
+  "what can I actually do with this" without needing to know what a
+  cluster or command is. Evidence bar is "same model, any firmware in the
+  community database" rather than this exact device's exact firmware —
+  firmware-exact coverage is sparse this early on, and a tag whose only
+  confirming evidence came from a different firmware still shows (it's
+  real evidence, not a guess) but is marked with a small caveat rather than
+  presented as fully verified for your exact unit. Also added to the
+  standalone site's expanded search results, which is arguably the more
+  natural home for it — deciding whether to buy a device you don't own yet
+  is exactly this question.
+- Device cards that happen to be the subject of one of the "Interesting so
+  far" panel's highlights (most-confirmed, most firmware variety,
+  firmware-dependent capabilities, newest contribution) now show a short
+  note saying so directly on the card — connecting the global panel to
+  the actual device in front of you, instead of two panels that never
+  visibly related to each other (the root of the "feels trivial" feedback).
+- A new "recent activity" highlight (firmware observations added across
+  the whole database in the last two weeks) gives the panel a real
+  momentum signal instead of leaning on a single arbitrary "newest
+  contribution" example to carry the "this is actively growing" idea.
+
+## [0.25.3]
+
+Readability pass on the Capability Explorer, based directly on user
+feedback about the device-card page reading like it was built for Zigbee
+experts rather than everyday users.
+
+### Changed
+
+- Device cards now lead with manufacturer/model (what the device actually
+  is), with any custom Home Assistant name shown as a secondary line only
+  when one is set — previously the custom name led and manufacturer/model
+  was demoted to a muted subtitle, which duplicated information for
+  unnamed devices and buried the more useful identity for named ones.
+- Basic, Identify, and Groups cluster commands (`reset_fact_default`,
+  `identify_query`, `add_if_identifying`, etc.) now show friendly
+  Title-Case names instead of raw ZCL snake_case — these three clusters
+  were the only ones missing from the command name table; every other
+  cluster already had friendly names.
+- "Reports state: yes/no" replaced with a plain-language sentence
+  explaining what it means in practice: whether the device pushes state
+  changes on its own or Home Assistant has to poll it.
+- Record-count language standardized on "firmware observation(s)" across
+  the card and the standalone site, replacing a mix of "confirmed
+  endpoint/firmware record(s)" and "endpoint/firmware record(s)" that read
+  as inconsistent and jargon-heavy for the same underlying number.
+
+## [0.25.2]
+
+Real names for two manufacturer-specific clusters that were showing as
+"Cluster 0xfc11"/"Cluster 0xfc57" in the "Other reported clusters" summary,
+found on a real SONOFF ZBMINIR2 — researched against the actual zigpy quirk
+source and independent references rather than guessed from the hex ID.
+
+### Added
+
+- `0xFC57` ("Works with all Hubs" / WWAH) is now a recognized cluster name
+  globally — verified as a semi-standardized cluster used consistently
+  across multiple manufacturers for hub-compatibility signaling, not a
+  vendor-private one.
+- `0xFC11` is now recognized as "Device settings (Sonoff)" specifically for
+  SONOFF devices, verified against zigpy/zha-device-handlers'
+  `zhaquirks/sonoff/zbminir2.py` (attribute-only: external trigger mode,
+  detach relay, turbo mode, network LED). This is scoped to SONOFF only,
+  not a global mapping — the 0xFC00-0xFFFF range is manufacturer-private by
+  convention, so the same numeric cluster ID can mean something completely
+  different for another vendor. A global id-only mapping would risk
+  confidently mislabeling another manufacturer's cluster, which is worse
+  than the honest "unidentified" fallback it would replace.
+
+## [0.25.1]
+
+Two more Capability Explorer readability fixes, found while testing 0.25.0
+against real devices.
+
+### Added
+
+- A specific note for pure controller endpoints (buttons, remotes, switches
+  that only declare a cluster like On/Off as *output*, not input) explaining
+  that they send commands rather than receive them, so there's nothing for
+  a command-support scan to discover — the previous generic message left
+  this looking broken rather than expected. This was the exact "no real
+  controllers is not possible scanning" gap MattWestb raised
+  (zigbee-capabilities#57), confirmed live on a SONOFF SNZB-01M.
+- Explore My Devices' "Supports" section no longer gives an unidentified,
+  reports-only cluster (a raw "Cluster 0xNNNN" fallback with nothing under
+  it — confusing, not informative) its own heading; these are combined into
+  one summary line instead. A reports-only cluster this card *can* name
+  (e.g. Occupancy Sensing) now also says plainly "Reports data on this
+  cluster — no commands to send" rather than showing a bare heading with
+  nothing following it. Applied to both the card and the standalone site.
+
+## [0.25.0]
+
+Prompted by real community feedback on the capability database
+(zigbee-capabilities#57, MattWestb) — a device submission format change plus
+several smaller Capability Explorer fixes, alongside internal prep for the
+standalone site.
+
+### Changed
+
+- **One GitHub issue per device, not per endpoint.** Sharing a scan to the
+  community database used to create a separate submission for every
+  endpoint you checked — a multi-endpoint device (e.g. an air purifier with
+  fan control and illuminance on different endpoints) meant filing several
+  issues by hand. "Share this scan" (per-endpoint) is now "Share scan to
+  community database" (per-device), shown once under the endpoint grid,
+  covering every endpoint you've checked in one submission. Endpoints
+  declared but not scanned — not checked yet, or not scannable at all via
+  generic command discovery, such as a Green Power proxy endpoint — are
+  still listed with their declared clusters rather than silently left out.
+  The community-database ingest workflow accepts both the new device-level
+  format and the older single-endpoint format, so nothing filed before this
+  needs resubmitting.
+- Fixed a real data-loss bug this change surfaced: the shared record used to
+  fall back to a generic "Cluster 0x042a"-style placeholder for
+  manufacturer-specific clusters this card's own cluster table doesn't
+  recognize, even when zha_toolkit's own scan had already resolved a real
+  name for it (e.g. IKEA's 0xfc7d as "Ikea Airpurifier"). The scan's own
+  resolved title is now preferred.
+- Fixed the Interesting Discoveries panel showing "Newest contribution: null
+  null" for a submitted record with no manufacturer/model on file (a real
+  data gap, not a code bug — caught live in a v0.25.0 screenshot). All four
+  discovery types now skip an entry they can't actually name, rather than
+  ever rendering "null" to the user.
+
+### Added
+
+- "Check supported commands" now shows a "may be asleep" hint for
+  battery-powered devices while checking or on failure, matching the
+  guidance already shown for the bindings scan — previously this flow gave
+  no wake guidance at all.
+- A specific note for endpoints that use Tuya's private cluster (0xEF00) to
+  tunnel their real functionality, instead of the same generic "no command
+  data for this endpoint" message shown for an ordinary cluster gap.
+- Device photos are no longer fetched for a short list of Tuya model IDs
+  (TS0601, TS011F, and similar) that are reused across many unrelated
+  physical products — showing a confidently wrong photo was worse than the
+  existing generic-shape fallback.
+
+### Infrastructure
+
+No card behavior changed here — a refactor plus a new build step to
+support PRD v2 Phase 3 (the standalone zigbee-capabilities website):
+
+- `CAPABILITY_DB_REPO`, `CAPABILITY_OUTCOME_PHRASE`, and
+  `capabilityOutcomePhrase` moved out of `src/constants.js` into a new
+  `src/capexplorer-constants.js` with zero dependency on the rest of the
+  card. `capexplorer.js` now imports only from that file — the two
+  together are the complete, genuinely standalone Capability Explorer data
+  layer `capexplorer.js`'s own header comment always said it was meant to
+  be. `constants.js` re-exports `CAPABILITY_DB_REPO` so nothing in card.js
+  needed to change.
+- `build.js` now copies `src/capexplorer.js` and
+  `src/capexplorer-constants.js` into a local `docs/` folder on every
+  `npm run build` (not `--watch`), so the standalone site's data layer
+  never drifts out of sync with the card's. `docs/` itself (the actual
+  site — `index.html`, `app.js`, `style.css`) is meant to be copied into
+  the **zigbee-capabilities** repo, not published from this one — see the
+  delivery notes for exact steps.
+
 ## [0.24.0] — 24 July 2026
 
 ### Added

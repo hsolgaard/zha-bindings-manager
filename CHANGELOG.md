@@ -2,6 +2,76 @@
 
 All notable changes to ZHA Bindings Manager are documented here.
 
+## [0.30.1]
+
+Fixes a misleading message from a real forum bug report: a user's Hue
+LWE002 showed "No response to discovery" on every single cluster during
+"Check supported commands," which read like a broken/failing feature.
+Getting them to pull the raw Home Assistant log showed zha_toolkit
+reporting `Status.UNSUP_GENERAL_COMMAND` for every cluster — the device
+was actively replying to say it doesn't implement Zigbee's optional
+command-discovery request at all (common on some vendors' firmware,
+Philips Hue/Signify among them), not staying silent or timing out.
+
+### Changed
+
+- **"Check supported commands" now shows one clear explanation** when a
+  completed scan confirms literally nothing across every relevant
+  cluster on an endpoint, instead of repeating the same vague "no
+  response" line once per cluster: "This scan didn't confirm any
+  commands across N clusters checked. That usually means this device's
+  firmware doesn't implement Zigbee's command-discovery request at all
+  (common on some vendors' devices, Philips Hue/Signify among them)
+  rather than a temporary communication problem — re-checking is
+  unlikely to change the result." The card still can't see the specific
+  status code zha_toolkit logs (that detail only reaches Home
+  Assistant's own log, not the data returned to the card), so this stops
+  short of stating it as certain fact — but it's a specific, honest steer
+  instead of six identical-looking failures with no explanation.
+- This note is deliberately scoped to the all-or-nothing case only: a
+  scan that confirms at least one cluster's commands still shows the
+  ordinary per-cluster detail for whatever didn't come back, unchanged.
+
+## [0.30.0]
+
+A wording-only pass from a user-authored "Capability Evidence Clarity" PRD:
+make it clear what the database knows (what a device reported during a
+scan), what it infers (plain-English use-case tags derived from that), and
+what it doesn't verify (that a capability is currently exposed, usable, or
+functional in your specific integration) — without getting technical.
+No changes to data, matching, or ranking logic. Applied identically to the
+card and the standalone site.
+
+### Changed
+
+- **Renamed "Good for" to "Reported capabilities."** "Good for" read as
+  purchasing advice the Explorer was never in a position to give — these
+  tags are cluster/command evidence a device reported during a community
+  scan, not a confirmed, tested recommendation. Per-tag firmware-mismatch
+  tooltips reworded from "Confirmed on a different firmware... not
+  verified on that exact version" to "Reported on a different firmware...
+  not confirmed on that exact version," dropping "verified" specifically.
+- **Added a standing inference disclaimer** near the top of the Explorer,
+  above the mode picker: "Capabilities are inferred from what the device
+  itself reports — this doesn't necessarily mean they're currently
+  exposed or usable in ZHA or Zigbee2MQTT." Shown once per view rather
+  than repeated on every device card, to avoid drowning results in
+  caveats.
+- **Softened the mission copy.** "Discover what Zigbee devices really
+  support — verified from real community scans" became "Understand what
+  Zigbee devices report — from real community scans," dropping both
+  "support" and "verified" as definitive-sounding claims the underlying
+  scan evidence doesn't back up.
+- **Added a "Reported by device" evidence-level tag** next to the
+  Community confidence label on every device card. Only this one tier
+  exists in the data today; "Community observed," "Function verified,"
+  and "Integration support confirmed" are reserved as future evidence
+  types this project doesn't collect yet, and aren't shown as a
+  placeholder ladder — a single honest tag beat a partially-greyed-out
+  four-tier list that would only confuse a reader this round was
+  explicitly trying not to get too technical for.
+
+
 ## [0.29.0]
 
 A UX refresh of the Search tab, from a user-authored PRD: "transform the

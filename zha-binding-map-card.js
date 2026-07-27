@@ -21,7 +21,7 @@
  * zha_toolkit MUST be installed (via HACS) and working for bind/unbind/scan
  * to function. See README.md for details.
  *
- * Version: 0.29.0
+ * Version: 0.30.1
  */
 (() => {
   // src/capexplorer-constants.js
@@ -78,7 +78,7 @@
 
   // src/constants.js
   var ZTK_DOMAIN = "zha_toolkit";
-  var CARD_VERSION = "0.29.0";
+  var CARD_VERSION = "0.30.1";
   var DEFAULT_BINDABLE_OUT_CLUSTERS = [5, 6, 8, 258, 768];
   var MEMBERSHIP_EDGE_COLOR = "#8e24aa";
   var HISTORY_LIMIT = 10;
@@ -1193,6 +1193,8 @@
 .ep-cmd-section { margin:10px 0; padding:8px 0; border-top:1px solid var(--divider-color, #e0e0e0); border-bottom:1px solid var(--divider-color, #e0e0e0); }
 .ep-cmd-status { margin:4px 0; }
 .ep-cmd-actions { display:flex; gap:6px; flex-wrap:wrap; margin-bottom:8px; }
+.ep-cmd-discovery-note { margin: 0 0 8px; padding:6px 8px; border-radius:8px;
+  background: var(--secondary-background-color, #fafafa); border:1px solid var(--divider-color, #eee); }
 .ep-cmd-results { display:flex; flex-direction:column; gap:6px; margin-bottom:8px; }
 .ep-cmd-cluster { border:1px solid var(--divider-color, #e0e0e0); border-radius:8px; padding:6px 8px; }
 .ep-cmd-cluster-head {
@@ -1264,6 +1266,9 @@
 .capexp-trust-conflict { font-size:0.82em; letter-spacing:normal; color: var(--error-color, #db4437); font-weight:600; }
 .capexp-trust-text { display:flex; flex-direction:column; }
 .capexp-trust-label { font-size:0.78em; font-weight:600; color: var(--secondary-text-color); }
+.capexp-evidence-tag { display:inline-block; align-self:flex-start; font-size:0.68em; font-weight:500;
+  padding:1px 7px; border-radius:8px; margin:2px 0; background: var(--divider-color, #e0e0e0);
+  color: var(--secondary-text-color); }
 .capexp-trust-detail { font-size:0.8em; }
 .capexp-cap-label { font-size:0.78em; color: var(--secondary-text-color); margin-top:8px; margin-bottom:2px; }
 .capexp-cap-groups { display:flex; flex-direction:column; gap:6px; margin-top:2px; }
@@ -3834,6 +3839,7 @@
       const scanned = !!(entry && entry.status === "done");
       const epScan = scanned ? (entry.scan && entry.scan.endpoints || []).find((e) => Number(e.id) === Number(ep)) : null;
       const inClusters = epScan && epScan.in_clusters || {};
+      let confirmedClusterCount = 0;
       const rows = relevantIds.map((clusterId) => {
         const hexKey = hex4(clusterId);
         const c = inClusters[hexKey];
@@ -3849,9 +3855,10 @@
           } else {
             const cls = this._classifyClusterCommands(clusterId, c.commands_received);
             if (!cls.confirmed) {
-              summary = "No response to discovery";
-              bodyHtml = `<p class="hint">No commands reported \u2014 this device may not support command discovery.</p>`;
+              summary = "No commands confirmed";
+              bodyHtml = `<p class="hint">No commands reported for this cluster during discovery.</p>`;
             } else {
+              confirmedClusterCount++;
               const presentCount = cls.rows.filter((r) => r.present).length;
               summary = `${presentCount} of ${cls.rows.length} confirmed`;
               bodyHtml = cls.rows.map(
@@ -3875,10 +3882,14 @@
             ${expanded ? `<div class="ep-cmd-cluster-body">${bodyHtml}</div>` : ""}
           </div>`;
       }).join("");
+      const discoveryNote = scanned && relevantIds.length > 0 && confirmedClusterCount === 0 ? `<p class="hint ep-cmd-discovery-note">This scan didn't confirm any commands across ${relevantIds.length} cluster${relevantIds.length === 1 ? "" : "s"} checked. That usually means this device's firmware doesn't implement Zigbee's command-discovery request at all
+            (common on some vendors' devices, Philips Hue/Signify among them) rather than a temporary communication problem
+            \u2014 re-checking is unlikely to change the result.</p>` : "";
       const compareHtml = scanned ? this._capExpCompareMyDeviceHtml(d, ep, entry.scan) : "";
       return `
       <div class="ep-cmd-actions">${actionHtml}</div>
       ${compareHtml}
+      ${discoveryNote}
       <div class="ep-cmd-results">${rows}</div>`;
     }
     /** Device-level "share to community database" section, shown once under
@@ -5103,13 +5114,15 @@
         el.innerHTML = `
         <div class="capexp-strip">Built from real scans shared by ZHA users \u2014 <span id="capexp-strip-count">\u2026</span>
           devices confirmed so far. Every scan you share adds to it.</div>
-        <p class="capexp-mission">Discover what Zigbee devices really support \u2014 verified from real community
-          scans, not manufacturer claims.</p>
-        <p class="hint" style="margin-top:0">Verified from real scans, not manufacturer claims \u2014 nothing about your
+        <p class="capexp-mission">Understand what Zigbee devices report \u2014 from real community scans, not
+          manufacturer claims.</p>
+        <p class="hint" style="margin-top:0">Based on real scans, not manufacturer claims \u2014 nothing about your
           devices (IEEE addresses, entities, areas, names) ever leaves this browser. Only covers devices someone's
           already scanned and shared, so a gap here means nobody's confirmed it yet, not that it doesn't exist. See
           the <a href="https://github.com/${CAPABILITY_DB_REPO}" target="_blank" rel="noopener">zigbee-capabilities</a>
           database.</p>
+        <p class="hint" style="margin-top:0">Capabilities are inferred from what the device itself reports \u2014 this
+          doesn't necessarily mean they're currently exposed or usable in ZHA or Zigbee2MQTT.</p>
         <div id="capexp-discoveries"></div>
         <div class="capexp-modes">
           <button class="capexp-mode-btn active" data-capexp-mode="explore">
@@ -5266,6 +5279,7 @@
       ${this._capExpStarsHtml(rating)}
       <div class="capexp-trust-text">
         <span class="capexp-trust-label">Community confidence</span>
+        <span class="capexp-evidence-tag" title="Evidence level: this is based on what the device itself reported during a scan. Community-observed, function-verified and integration-confirmed evidence aren't tracked yet \u2014 this is the only evidence tier that exists so far.">Reported by device</span>
         <div class="capexp-trust-detail muted">
           ${fwCount} firmware version${fwCount === 1 ? "" : "s"}${fwLabel ? ` (${escapeHtml(fwLabel)})` : ""} \xB7
           ${totalScans} observation${totalScans === 1 ? "" : "s"}${lastSeen ? ` \xB7 last confirmed ${escapeHtml(this._capExpFormatDate(lastSeen))}` : ""}
@@ -5277,12 +5291,20 @@
     // mode word the caveat correctly — Explore mode is about a device the
     // reader owns ("...than yours"), Search results are about devices they
     // may not ("...than this record's firmware").
+    //
+    // Labeled "Reported capabilities" rather than "Good for" (Capability
+    // Evidence Clarity round): "Good for" read as purchasing advice this
+    // card was never in a position to give — these are cluster/command
+    // evidence the device itself reported during a scan, not a confirmed,
+    // functioning, integration-tested recommendation. Internal method name
+    // and CSS classes kept as-is to avoid unnecessary churn; only the
+    // user-visible label changed.
     _capExpGoodForHtml(goodFor, possessive = "yours") {
       if (!goodFor.length) return "";
       return `<div class="capexp-goodfor">
-      <span class="capexp-cap-label">Good for</span>
+      <span class="capexp-cap-label">Reported capabilities</span>
       <div class="capexp-goodfor-tags">${goodFor.map(
-        (t) => `<span class="capexp-tag capexp-goodfor-tag"${t.exactFirmware ? "" : ` title="Confirmed on a different firmware than ${possessive} \u2014 likely still applies, but not verified on that exact version."`}>${escapeHtml(t.label)}${t.exactFirmware ? "" : " *"}</span>`
+        (t) => `<span class="capexp-tag capexp-goodfor-tag"${t.exactFirmware ? "" : ` title="Reported on a different firmware than ${possessive} \u2014 likely still applies, but not confirmed on that exact version."`}>${escapeHtml(t.label)}${t.exactFirmware ? "" : " *"}</span>`
       ).join("")}</div>
     </div>`;
     }

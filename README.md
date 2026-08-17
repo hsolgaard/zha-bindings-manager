@@ -36,6 +36,16 @@ A real example: an outside light kept turning on when the wrong switch was press
 
 ZHA Bindings Manager is a frontend-only Lovelace card. It uses Home Assistant's built-in ZHA websocket API to read devices, endpoints, clusters and groups, and uses `zha-toolkit` to read and modify device binding tables.
 
+## Optional: shared storage across devices
+
+By default, everything the card saves — bindings and health data, floor plan (image and device placements), Map positions, endpoint annotations, filters, and the other settings in the ⚙ panel — lives only in the browser you're using. Open the dashboard on your phone and it starts from scratch.
+
+If you'd rather every browser and device see the same thing, install the companion integration [`zha-bindings-manager-backend`](https://github.com/hsolgaard/zha-bindings-manager-backend). It isn't in the default HACS store yet, so add it as a custom repository: **HACS → ⋮ → Custom repositories**, add `https://github.com/hsolgaard/zha-bindings-manager-backend` with category **Integration**, then install and add it (no configuration needed) and reload this card — it detects the backend automatically.
+
+A small badge in the toolbar always shows which mode is active — 🔒 **This browser only** or ☁ **Shared in Home Assistant**. The first time a browser detects the backend, it asks once whether to switch to shared storage; nothing changes without confirming, and if shared storage already has data from another device, this browser's copy is never overwritten — only whatever's actually missing gets filled in. You can switch either direction at any time from the ⚙ settings panel's Storage section, using the **Use shared storage** / **Use this browser only** buttons.
+
+This is entirely optional. Skip it and the card keeps working exactly as before, saved only in the current browser.
+
 ## Installation
 
 ### HACS — recommended
@@ -127,7 +137,7 @@ Completed scans can also be reviewed and shared with the public [`zigbee-capabil
 
 Nothing is submitted automatically. The card prepares a GitHub issue for the user to review and submit using their own GitHub account.
 
-The physical-load annotation is saved **in the current browser only**. It is not written to Home Assistant and does not automatically follow you to another browser or device.
+The physical-load annotation is saved locally by default, the same as everything else the card stores — see [Optional: shared storage across devices](#optional-shared-storage-across-devices) above if you'd like it, along with the rest of the card's data, to follow you across browsers and devices.
 
 ### Explore device capabilities
 
@@ -312,6 +322,7 @@ Its design principles are:
 - Home Assistant's native **ZHA → Manage Zigbee Device → Bindings** interface can create bindings, but does not provide a network-wide view of existing binding tables.
 - [`zigbee-floorplan-card`](https://github.com/TheLarsinator/zigbee-floorplan-card) visualises Zigbee mesh routing and link quality, primarily for Zigbee2MQTT. It does not read or manage ZHA binding tables.
 - [`zigbee-capabilities`](https://github.com/hsolgaard/zigbee-capabilities) is the openly licensed community device-capability dataset behind the Zigbee Capability Explorer view. ZHA Bindings Manager is one contributor and one consumer of it, not the other way around — the dataset itself is usable independently of this card, and of Home Assistant entirely.
+- [`zha-bindings-manager-backend`](https://github.com/hsolgaard/zha-bindings-manager-backend) is the optional companion integration for shared storage described above.
 
 ## Credits
 

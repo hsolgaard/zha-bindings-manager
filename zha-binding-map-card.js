@@ -21,7 +21,7 @@
  * zha_toolkit MUST be installed (via HACS) and working for bind/unbind/scan
  * to function. See README.md for details.
  *
- * Version: 0.30.1
+ * Version: 0.32.4
  */
 (() => {
   // src/capexplorer-constants.js
@@ -78,7 +78,7 @@
 
   // src/constants.js
   var ZTK_DOMAIN = "zha_toolkit";
-  var CARD_VERSION = "0.30.1";
+  var CARD_VERSION = "0.32.4";
   var DEFAULT_BINDABLE_OUT_CLUSTERS = [5, 6, 8, 258, 768];
   var MEMBERSHIP_EDGE_COLOR = "#8e24aa";
   var HISTORY_LIMIT = 10;
@@ -809,6 +809,7 @@
       <button class="tab" data-view="advanced">Advanced</button>
     </div>
     <input id="search" class="search" placeholder="Search devices\u2026">
+    <span id="storage-mode-badge" class="storage-mode-badge muted"></span>
     <button class="btn" id="btn-refresh-devices" title="Reload device list">\u27F3 Devices</button>
     <button class="btn btn-primary" id="btn-scan" title="Read current bindings from your Zigbee devices">Scan bindings</button>
     <button class="btn btn-small" id="btn-rescan-settings" title="Scan settings">\u2699</button>
@@ -835,6 +836,18 @@
         the full "Scan bindings" network scan is unaffected. Each extra retry costs about 45 seconds if the
         device genuinely doesn't respond, so more isn't free \u2014 it's a real trade-off between a better chance
         of catching a briefly-unreachable device and a longer wait. Default is ${DEFAULT_RETRY_COUNT}.</p>
+    </div>
+    <div class="filter-group">
+      <div class="filter-group-title">Storage</div>
+      <div id="storage-mode-detail" class="hint"></div>
+      <button type="button" class="btn btn-small" id="btn-use-shared-storage" style="display:none">Use shared storage</button>
+      <button type="button" class="btn btn-small" id="btn-use-local-storage" style="display:none">Use this browser only</button>
+      <div id="storage-backend-hint" class="hint" style="display:none">
+        Your data is only saved in this browser. An optional backend integration can save it centrally in
+        Home Assistant instead, so it's available from every browser and device.
+        <a href="https://github.com/hsolgaard/zha-bindings-manager-backend" target="_blank" rel="noopener">Learn more \u2192</a>
+        <button type="button" class="btn btn-small" id="btn-dismiss-storage-hint">Dismiss</button>
+      </div>
     </div>
   </div>
   <div id="status" class="status" style="display:none"></div>
@@ -975,6 +988,246 @@
   </div>
 </div>`;
 
+  // src/storage/storage-provider.js
+  var StorageProvider = class {
+    /**
+     * Generic per-card-instance key/value storage for simple preferences —
+     * filters, node positions, endpoint annotations, floor plan state,
+     * settings (retry count, scan batch size, etc). `key` is an opaque
+     * string the caller chooses; the provider doesn't need to know what it
+     * means, only how to namespace it per card instance.
+     *
+     * @param {string} cardId - this._config.id (or "default")
+     * @param {string} key
+     * @returns {Promise<any>} the stored value, or null if absent/unreadable
+     */
+    async getItem(cardId, key) {
+      throw new Error("StorageProvider.getItem not implemented");
+    }
+    /** @returns {Promise<boolean>} true on success, false on a soft failure
+     *  (quota exceeded, storage disabled) — never throws, matching the
+     *  fail-soft behavior the scattered localStorage try/catch blocks had
+     *  before this boundary existed. */
+    async setItem(cardId, key, value) {
+      throw new Error("StorageProvider.setItem not implemented");
+    }
+    /**
+     * The one piece of state with real persistence semantics beyond plain
+     * key/value — scan results. See the delivery plan's "latest /
+     * last_complete observation split":
+     *
+     *   last_complete — the best known-good data per device, built up over
+     *     time. Never regresses: a device that fails one scan attempt keeps
+     *     whatever binding data its last successful scan produced.
+     *   latest — the outcome of the most recent scan attempt as a whole,
+     *     including which devices failed to respond or only partially
+     *     responded. Fixes the bug where that information lived in memory
+     *     only and silently vanished on a page reload, making a device that
+     *     just failed to respond look identical to one that's fine.
+     *
+     * @returns {Promise<{
+     *   last_complete: {savedAt: string, bindings: object} | null,
+     *   latest: {attemptedAt: string, failures: string[], partial: object} | null
+     * }>}
+     */
+    async getScanState(cardId) {
+      throw new Error("StorageProvider.getScanState not implemented");
+    }
+    async setScanState(cardId, state) {
+      throw new Error("StorageProvider.setScanState not implemented");
+    }
+    /** Learned per-device response-time/outcome history (see
+     *  _recordScanOutcome/_historyFor in card.js) — kept separate from scan
+     *  state since it's additive/rolling rather than latest-vs-complete.
+     *  @returns {Promise<object>} ieee(lower) -> {successMs, outcomes, ...} */
+    async getHistory(cardId) {
+      throw new Error("StorageProvider.getHistory not implemented");
+    }
+    async setHistory(cardId, history) {
+      throw new Error("StorageProvider.setHistory not implemented");
+    }
+  };
+
+  // src/storage/local-storage-provider.js
+  var LocalStorageProvider = class extends StorageProvider {
+    _keyFor(cardId, key) {
+      return `zha-binding-map-card:${cardId || "default"}:${key}`;
+    }
+    async getItem(cardId, key) {
+      try {
+        const raw = localStorage.getItem(this._keyFor(cardId, key));
+        return raw == null ? null : JSON.parse(raw);
+      } catch (e) {
+        return null;
+      }
+    }
+    async setItem(cardId, key, value) {
+      try {
+        localStorage.setItem(this._keyFor(cardId, key), JSON.stringify(value));
+        return true;
+      } catch (e) {
+        return false;
+      }
+    }
+    async getScanState(cardId) {
+      const raw = await this.getItem(cardId, "scan-state");
+      if (raw && (raw.last_complete || raw.latest)) return raw;
+      const legacy = await this.getItem(cardId, "bindings");
+      if (legacy && legacy.bindings) {
+        return { last_complete: legacy, latest: null };
+      }
+      return { last_complete: null, latest: null };
+    }
+    async setScanState(cardId, state) {
+      return this.setItem(cardId, "scan-state", state);
+    }
+    async getHistory(cardId) {
+      const raw = await this.getItem(cardId, "history");
+      return raw && typeof raw === "object" ? raw : {};
+    }
+    async setHistory(cardId, history) {
+      return this.setItem(cardId, "history", history);
+    }
+  };
+
+  // src/storage/ha-storage-provider.js
+  var WS_GET_STATE = "zha_bindings_manager/get_state";
+  var WS_SAVE_STATE = "zha_bindings_manager/save_state";
+  var WS_GET_CAPABILITIES = "zha_bindings_manager/get_capabilities";
+  var SAVE_DEBOUNCE_MS = 1500;
+  var HaStorageProvider = class extends StorageProvider {
+    constructor(hass, cardId) {
+      super();
+      this._hass = hass;
+      this._cardId = cardId || "default";
+      this._state = null;
+      this._updatedAt = null;
+      this._loadPromise = null;
+      this._saveTimer = null;
+      this._savePromise = null;
+      this._resolveSave = null;
+    }
+    /** Feature detection — a static-ish helper rather than an instance
+     *  method, since card.js needs an answer *before* deciding whether to
+     *  construct a HaStorageProvider at all. Returns false (not a thrown
+     *  error) for "not installed", same as for any other failure — the
+     *  caller only needs yes/no, not why. */
+    static async isAvailable(hass) {
+      try {
+        const res = await hass.connection.sendMessagePromise({ type: WS_GET_CAPABILITIES });
+        return !!(res && res.available);
+      } catch (e) {
+        return false;
+      }
+    }
+    async _ensureLoaded() {
+      if (this._state) return this._state;
+      if (!this._loadPromise) {
+        this._loadPromise = this._hass.connection.sendMessagePromise({ type: WS_GET_STATE, card_id: this._cardId }).then((res) => {
+          this._updatedAt = res ? res.updated_at : null;
+          this._state = res && res.state || { items: {}, scanState: null, history: {} };
+          return this._state;
+        }).catch((e) => {
+          console.warn("ZHA Binding Map: could not load shared state, starting empty:", e.message || e);
+          this._state = { items: {}, scanState: null, history: {} };
+          return this._state;
+        });
+      }
+      return this._loadPromise;
+    }
+    _scheduleSave() {
+      if (this._saveTimer) clearTimeout(this._saveTimer);
+      if (!this._savePromise) {
+        this._savePromise = new Promise((resolve) => {
+          this._resolveSave = resolve;
+        });
+      }
+      this._saveTimer = setTimeout(() => this._flushSave(), SAVE_DEBOUNCE_MS);
+      return this._savePromise;
+    }
+    async _flushSave() {
+      this._saveTimer = null;
+      try {
+        const res = await this._hass.connection.sendMessagePromise({
+          type: WS_SAVE_STATE,
+          card_id: this._cardId,
+          state: this._state,
+          base_updated_at: this._updatedAt
+        });
+        this._updatedAt = res.updated_at;
+      } catch (e) {
+        if (e && e.code === "stale_write") {
+          try {
+            const fresh = await this._hass.connection.sendMessagePromise({
+              type: WS_GET_STATE,
+              card_id: this._cardId
+            });
+            this._updatedAt = fresh ? fresh.updated_at : null;
+            const res2 = await this._hass.connection.sendMessagePromise({
+              type: WS_SAVE_STATE,
+              card_id: this._cardId,
+              state: this._state,
+              base_updated_at: this._updatedAt
+            });
+            this._updatedAt = res2.updated_at;
+          } catch (e2) {
+            console.warn("ZHA Binding Map: shared save failed after a conflict retry:", e2.message || e2);
+          }
+        } else {
+          console.warn("ZHA Binding Map: shared save failed:", e.message || e);
+        }
+      } finally {
+        if (this._resolveSave) this._resolveSave();
+        this._savePromise = null;
+        this._resolveSave = null;
+      }
+    }
+    /** Flushes a pending debounced save immediately instead of waiting it
+     *  out — not called anywhere yet in this milestone, kept available for
+     *  call sites that later want to confirm a save actually landed (e.g.
+     *  right before showing a "saved" confirmation) rather than trusting
+     *  the debounce timer alone. */
+    async flush() {
+      if (this._saveTimer) {
+        clearTimeout(this._saveTimer);
+        await this._flushSave();
+      } else if (this._savePromise) {
+        await this._savePromise;
+      }
+    }
+    async getItem(cardId, key) {
+      const state = await this._ensureLoaded();
+      return state.items && key in state.items ? state.items[key] : null;
+    }
+    async setItem(cardId, key, value) {
+      const state = await this._ensureLoaded();
+      if (!state.items) state.items = {};
+      state.items[key] = value;
+      this._scheduleSave();
+      return true;
+    }
+    async getScanState(cardId) {
+      const state = await this._ensureLoaded();
+      return state.scanState || { last_complete: null, latest: null };
+    }
+    async setScanState(cardId, scanState) {
+      const state = await this._ensureLoaded();
+      state.scanState = scanState;
+      this._scheduleSave();
+      return true;
+    }
+    async getHistory(cardId) {
+      const state = await this._ensureLoaded();
+      return state.history || {};
+    }
+    async setHistory(cardId, history) {
+      const state = await this._ensureLoaded();
+      state.history = history;
+      this._scheduleSave();
+      return true;
+    }
+  };
+
   // src/styles.js
   var STYLE = `
 :host { display:block; max-width:100%; }
@@ -1035,6 +1288,7 @@
 .graph-toolbar .row { display:flex; align-items:center; gap:4px; cursor:pointer; user-select:none; }
 .spacer { flex:1; }
 .scan-info { font-size: 0.85em; white-space: nowrap; }
+.storage-mode-badge { font-size: 0.8em; white-space: nowrap; }
 .filter-panel { display:none; border:1px solid var(--divider-color, #e0e0e0); border-radius:10px;
   padding:10px 12px 12px; margin-bottom:10px; background: var(--secondary-background-color, #fafafa); }
 .filter-panel.open { display:block; }
@@ -1785,6 +2039,16 @@
   }
 
   // src/card.js
+  var SYNCED_ITEM_KEYS = [
+    "filters",
+    "positions",
+    "endpoint-annotations",
+    "retry-count",
+    "scan-batch-size",
+    "fp-marker-scale",
+    "floorplan",
+    "show-device-photos"
+  ];
   var ZhaBindingMapCard = class extends HTMLElement {
     constructor() {
       super();
@@ -1836,6 +2100,10 @@
       this._tableSourceFilter = null;
       this._tableSort = { key: null, dir: 1 };
       this._devicesSort = { key: null, dir: 1 };
+      this._localStorage = new LocalStorageProvider();
+      this._storage = this._localStorage;
+      this._backendAvailable = null;
+      this._storageMode = null;
       this._scanFailures = /* @__PURE__ */ new Set();
       this._scanPartial = /* @__PURE__ */ new Map();
       this._responseHistory = /* @__PURE__ */ new Map();
@@ -1859,15 +2127,14 @@
     }
     setConfig(config) {
       this._config = config || {};
-      this._loadFilters();
-      this._render();
+      this._loadFilters().then(() => this._render());
     }
-    _filtersStorageKey() {
-      return `zha-binding-map-card:${this._config.id || "default"}:filters`;
-    }
-    _loadFilters() {
+    /** Loads saved filters through this._storage — see setConfig's comment
+     *  for why this runs twice (once locally at bootstrap, once again
+     *  post-resolution in _loadAll). */
+    async _loadFilters() {
       try {
-        const raw = JSON.parse(localStorage.getItem(this._filtersStorageKey()) || "null");
+        const raw = await this._storage.getItem(this._config.id, "filters");
         if (!raw) return;
         ["coordinator", "routers", "endDevices", "unbound", "groups", "hideCoordinatorBindings", "showReportingBindings"].forEach((k) => {
           if (typeof raw[k] === "boolean") this._filters[k] = raw[k];
@@ -1878,26 +2145,20 @@
       } catch (e) {
       }
     }
-    _saveFilters() {
-      try {
-        const f = this._filters;
-        localStorage.setItem(
-          this._filtersStorageKey(),
-          JSON.stringify({
-            coordinator: f.coordinator,
-            routers: f.routers,
-            endDevices: f.endDevices,
-            unbound: f.unbound,
-            groups: f.groups,
-            hideCoordinatorBindings: f.hideCoordinatorBindings,
-            showReportingBindings: f.showReportingBindings,
-            types: [...f.types],
-            manufacturers: [...f.manufacturers],
-            areas: [...f.areas]
-          })
-        );
-      } catch (e) {
-      }
+    async _saveFilters() {
+      const f = this._filters;
+      await this._storage.setItem(this._config.id, "filters", {
+        coordinator: f.coordinator,
+        routers: f.routers,
+        endDevices: f.endDevices,
+        unbound: f.unbound,
+        groups: f.groups,
+        hideCoordinatorBindings: f.hideCoordinatorBindings,
+        showReportingBindings: f.showReportingBindings,
+        types: [...f.types],
+        manufacturers: [...f.manufacturers],
+        areas: [...f.areas]
+      });
     }
     set hass(hass) {
       const first = !this._hass;
@@ -1929,41 +2190,32 @@
     disconnectedCallback() {
       window.removeEventListener("resize", this._onResize);
     }
-    _storageKey() {
-      return `zha-binding-map-card:${this._config.id || "default"}:positions`;
-    }
-    _loadPositions() {
+    async _loadPositions() {
       try {
-        this._positions = JSON.parse(localStorage.getItem(this._storageKey()) || "{}");
+        const raw = await this._storage.getItem(this._config.id, "positions");
+        this._positions = raw && typeof raw === "object" ? raw : {};
       } catch (e) {
         this._positions = {};
       }
     }
-    _savePositions() {
-      try {
-        localStorage.setItem(this._storageKey(), JSON.stringify(this._positions));
-      } catch (e) {
-      }
+    async _savePositions() {
+      await this._storage.setItem(this._config.id, "positions", this._positions);
     }
     // Per-endpoint "what does this control" annotations, shown in the exploded
     // device view. Pure user-supplied knowledge (what a relay is physically
     // wired to) — no Zigbee data can ever supply this, so it's persisted
-    // locally the same way floor-plan positions are, not derived from a scan.
-    _epAnnotationsStorageKey() {
-      return `zha-binding-map-card:${this._config.id || "default"}:endpoint-annotations`;
-    }
-    _loadEndpointAnnotations() {
+    // through this._storage the same way floor-plan positions are, not
+    // derived from a scan.
+    async _loadEndpointAnnotations() {
       try {
-        this._epAnnotations = JSON.parse(localStorage.getItem(this._epAnnotationsStorageKey()) || "{}");
+        const raw = await this._storage.getItem(this._config.id, "endpoint-annotations");
+        this._epAnnotations = raw && typeof raw === "object" ? raw : {};
       } catch (e) {
         this._epAnnotations = {};
       }
     }
-    _saveEndpointAnnotations() {
-      try {
-        localStorage.setItem(this._epAnnotationsStorageKey(), JSON.stringify(this._epAnnotations));
-      } catch (e) {
-      }
+    async _saveEndpointAnnotations() {
+      await this._storage.setItem(this._config.id, "endpoint-annotations", this._epAnnotations);
     }
     _endpointControlType(ieee, ep) {
       return (this._epAnnotations[ieee] || {})[ep] || "Not set";
@@ -1974,49 +2226,327 @@
       else this._epAnnotations[ieee][ep] = value;
       this._saveEndpointAnnotations();
     }
+    // Which storage provider is active — "local" (this browser only) or
+    // "shared" (the optional zha-bindings-manager-backend integration) —
+    // is itself a per-browser choice, so it's read/written as a plain
+    // localStorage key directly rather than through this._storage: the
+    // whole point of this flag is deciding *which* provider this._storage
+    // should even be, so it can't live inside either of them.
+    _storageModeStorageKey() {
+      return `zha-binding-map-card:${this._config.id || "default"}:storage-mode`;
+    }
+    _loadStorageModePreference() {
+      try {
+        const raw = localStorage.getItem(this._storageModeStorageKey());
+        return raw === "shared" || raw === "local" ? raw : null;
+      } catch (e) {
+        return null;
+      }
+    }
+    _saveStorageModePreference(mode) {
+      try {
+        localStorage.setItem(this._storageModeStorageKey(), mode);
+      } catch (e) {
+      }
+    }
+    /** Whether the given StorageProvider holds anything worth a decision
+     *  about — scan state, history, or any of the generic settings in
+     *  SYNCED_ITEM_KEYS (floor plan, positions, filters, annotations,
+     *  etc.). Shared by _hasExistingLocalData and _hasExistingBackendData
+     *  below so both sides of the "who has data" check stay in sync with
+     *  what actually gets imported. */
+    async _hasStorageData(storage) {
+      try {
+        const [scanState, history, ...items] = await Promise.all([
+          storage.getScanState(this._config.id),
+          storage.getHistory(this._config.id),
+          ...SYNCED_ITEM_KEYS.map((key) => storage.getItem(this._config.id, key))
+        ]);
+        if (scanState && (scanState.last_complete || scanState.latest)) return true;
+        if (history && Object.keys(history).length) return true;
+        return items.some((v) => v !== null && v !== void 0);
+      } catch (e) {
+        return false;
+      }
+    }
+    async _hasExistingLocalData() {
+      return this._hasStorageData(this._localStorage);
+    }
+    /** Copies this browser's local data into shared storage, but only for
+     *  whatever shared storage doesn't already have — scan state, history,
+     *  and each SYNCED_ITEM_KEYS setting are checked and filled in
+     *  individually. Nothing already present in shared storage is ever
+     *  touched, so this is safe to call unconditionally whenever a browser
+     *  chooses shared storage: a fresh backend install gets a full copy
+     *  (every check below finds "missing"); a backend that already has,
+     *  say, scan data from another browser but never got a floor plan
+     *  still picks up the floor plan from this browser without touching
+     *  the scan data. This replaced an earlier version that only imported
+     *  when shared storage was entirely empty, which meant a browser could
+     *  never contribute anything once *any* data existed there — including
+     *  its own later-added settings after an update expanded what's
+     *  synced.
+     *
+     *  Ends with an explicit haStorage.flush() — every setItem/setScanState/
+     *  setHistory call below only updates HaStorageProvider's in-memory
+     *  state and *schedules* a debounced save (see SAVE_DEBOUNCE_MS); it
+     *  does not itself wait for that save to actually reach the backend.
+     *  For routine autosaves (e.g. dragging a device) that debounce is the
+     *  right tradeoff. This call site is different: it's a one-time,
+     *  user-confirmed "sync my data now" action, so it needs to actually
+     *  land before this method returns — without the flush, a page reload
+     *  or the card re-rendering in the ~1.5s debounce window would silently
+     *  drop everything just written, which is exactly what happened when
+     *  this was first shipped without it (positions/floor plan appeared to
+     *  carry over, then reverted to empty after the next real reload). */
+    async _fillMissingBackendDataFromLocal(haStorage) {
+      const [localScanState, localHistory, backendScanState, backendHistory, ...localItems] = await Promise.all([
+        this._localStorage.getScanState(this._config.id),
+        this._localStorage.getHistory(this._config.id),
+        haStorage.getScanState(this._config.id),
+        haStorage.getHistory(this._config.id),
+        ...SYNCED_ITEM_KEYS.map((key) => this._localStorage.getItem(this._config.id, key))
+      ]);
+      const writes = [];
+      const backendHasScanState = !!(backendScanState && (backendScanState.last_complete || backendScanState.latest));
+      const localHasScanState = !!(localScanState && (localScanState.last_complete || localScanState.latest));
+      if (!backendHasScanState && localHasScanState) {
+        writes.push(haStorage.setScanState(this._config.id, localScanState));
+      }
+      const backendHasHistory = backendHistory && Object.keys(backendHistory).length > 0;
+      const localHasHistory = localHistory && Object.keys(localHistory).length > 0;
+      if (!backendHasHistory && localHasHistory) {
+        writes.push(haStorage.setHistory(this._config.id, localHistory));
+      }
+      const backendItems = await Promise.all(SYNCED_ITEM_KEYS.map((key) => haStorage.getItem(this._config.id, key)));
+      SYNCED_ITEM_KEYS.forEach((key, i) => {
+        const backendHasIt = backendItems[i] !== null && backendItems[i] !== void 0;
+        const localHasIt = localItems[i] !== null && localItems[i] !== void 0;
+        if (!backendHasIt && localHasIt) writes.push(haStorage.setItem(this._config.id, key, localItems[i]));
+      });
+      await Promise.all(writes);
+      await haStorage.flush();
+    }
+    /** Decides which StorageProvider this._storage should be, called once
+     *  per card load from _loadAll (before anything reads/writes scan
+     *  state). Cases:
+     *   - no backend detected → stays on local storage, nothing to ask.
+     *   - backend detected, this browser already has a recorded choice →
+     *     honor it silently, no re-prompt.
+     *   - backend detected for the first time on this browser, and this
+     *     browser has no local data worth a decision about → adopt shared
+     *     storage automatically, nothing to lose either way.
+     *   - backend detected for the first time, this browser has local data
+     *     → offer to use shared storage, filling in anything shared
+     *     storage is missing from this browser's local copy
+     *     (_fillMissingBackendDataFromLocal). One prompt covers every
+     *     case — fresh backend, backend with someone else's data, backend
+     *     with some but not all settings already synced — because the
+     *     fill-in is always non-destructive to what's already shared.
+     *  confirm() is a one-time, blocking yes/no — fits this better than
+     *  inventing new dialog UI for something that happens at most once per
+     *  browser. */
+    async _resolveStorageProvider() {
+      this._backendAvailable = await HaStorageProvider.isAvailable(this._hass);
+      if (!this._backendAvailable) {
+        this._storageMode = "local";
+        this._storage = this._localStorage;
+        return;
+      }
+      const savedMode = this._loadStorageModePreference();
+      if (savedMode === "local") {
+        this._storageMode = "local";
+        this._storage = this._localStorage;
+        return;
+      }
+      if (savedMode === "shared") {
+        this._storageMode = "shared";
+        this._storage = new HaStorageProvider(this._hass, this._config.id);
+        return;
+      }
+      const haStorage = new HaStorageProvider(this._hass, this._config.id);
+      const hasLocalData = await this._hasExistingLocalData();
+      if (!hasLocalData) {
+        this._storageMode = "shared";
+        this._saveStorageModePreference("shared");
+        this._storage = haStorage;
+        return;
+      }
+      const useShared = confirm(
+        "ZHA Bindings Manager found a shared storage backend on this Home Assistant instance.\n\nUse shared storage? Anything shared storage is missing (bindings, floor plan, filters, and other settings) will be filled in from this browser's local copy. Anything already saved there \u2014 e.g. from another browser or device \u2014 will NOT be overwritten.\n\nOK \u2014 use shared storage\nCancel \u2014 keep using this browser only"
+      );
+      if (useShared) {
+        await this._fillMissingBackendDataFromLocal(haStorage);
+        this._storageMode = "shared";
+        this._saveStorageModePreference("shared");
+        this._storage = haStorage;
+      } else {
+        this._storageMode = "local";
+        this._saveStorageModePreference("local");
+        this._storage = this._localStorage;
+      }
+    }
+    _clearStorageModePreference() {
+      try {
+        localStorage.removeItem(this._storageModeStorageKey());
+      } catch (e) {
+      }
+    }
+    /** "Use shared storage" button in the settings panel — for a browser
+     *  that previously chose local-only (or never got asked) and now wants
+     *  to switch. Deliberately doesn't duplicate _resolveStorageProvider's
+     *  logic here: it clears this browser's remembered choice and re-runs
+     *  the full load, which re-triggers that same first-time-detection
+     *  flow (fill-in-the-gaps import via _fillMissingBackendDataFromLocal,
+     *  never overwriting whatever's already shared) instead of a second,
+     *  possibly-diverging copy of it. */
+    async _switchToSharedStorage() {
+      this._clearStorageModePreference();
+      await this._loadAll();
+    }
+    /** "Use this browser only" button — the reverse direction needs no
+     *  prompt and no branching: this browser's local copy was never
+     *  touched while it was on shared storage, so switching back can't
+     *  lose or overwrite anything, and switching to shared again later
+     *  (via the button above) is always available. */
+    async _switchToLocalStorage() {
+      this._storageMode = "local";
+      this._saveStorageModePreference("local");
+      this._storage = this._localStorage;
+      this._renderStorageMode();
+      await this._loadScanState();
+      await this._loadHistory();
+      await this._loadFilters();
+      await this._loadPositions();
+      await this._loadRetryCount();
+      await this._loadScanBatchSize();
+      await this._loadFpMarkerScale();
+      await this._loadFloorplan();
+      await this._loadEndpointAnnotations();
+      await this._loadShowDevicePhotos();
+      if (this._fpImageUrl) this._loadFpImage(this._fpImageUrl);
+      this._render();
+      this._renderFilterChips();
+    }
+    // Whether the "install the optional backend" hint has been dismissed —
+    // same reasoning as the storage-mode flag above, a plain per-browser
+    // localStorage read, not routed through this._storage.
+    _storageHintDismissedStorageKey() {
+      return `zha-binding-map-card:${this._config.id || "default"}:storage-hint-dismissed`;
+    }
+    _loadStorageHintDismissed() {
+      try {
+        return localStorage.getItem(this._storageHintDismissedStorageKey()) === "1";
+      } catch (e) {
+        return false;
+      }
+    }
+    _saveStorageHintDismissed(value) {
+      try {
+        localStorage.setItem(this._storageHintDismissedStorageKey(), value ? "1" : "0");
+      } catch (e) {
+      }
+    }
+    /** Updates the toolbar badge and the Storage section of the settings
+     *  panel to reflect this._storageMode/this._backendAvailable — called
+     *  once after _resolveStorageProvider() settles each load, and again
+     *  whenever the dismiss-hint button is clicked. Storage mode itself
+     *  doesn't change mid-session otherwise, so nothing else needs to
+     *  trigger this. */
+    _renderStorageMode() {
+      const badge = this._q("#storage-mode-badge");
+      if (badge) {
+        if (this._storageMode === "shared") {
+          badge.textContent = "\u2601 Shared in Home Assistant";
+          badge.title = "This card's scan data is saved centrally via the ZHA Bindings Manager Backend integration \u2014 available from any browser or device.";
+        } else if (this._storageMode === "local") {
+          badge.textContent = "\u{1F512} This browser only";
+          badge.title = this._backendAvailable ? "This card's scan data is saved only in this browser. A shared backend is installed but you've chosen not to use it \u2014 see the \u2699 settings panel to change that." : "This card's scan data is saved only in this browser. See the \u2699 settings panel for an optional way to share it across devices.";
+        } else {
+          badge.textContent = "";
+          badge.title = "";
+        }
+      }
+      const detail = this._q("#storage-mode-detail");
+      if (detail) {
+        detail.textContent = this._storageMode === "shared" ? "Using shared storage: this browser's scan data is saved via the ZHA Bindings Manager Backend integration, so it's the same data in every browser and device that opens this card." : "Using this browser's local storage: scan data is only available here, not shared with other browsers or devices.";
+      }
+      const hint = this._q("#storage-backend-hint");
+      if (hint) {
+        const show = !this._backendAvailable && !this._loadStorageHintDismissed();
+        hint.style.display = show ? "" : "none";
+      }
+      const useSharedBtn = this._q("#btn-use-shared-storage");
+      if (useSharedBtn) {
+        useSharedBtn.style.display = this._backendAvailable && this._storageMode === "local" ? "" : "none";
+      }
+      const useLocalBtn = this._q("#btn-use-local-storage");
+      if (useLocalBtn) {
+        useLocalBtn.style.display = this._storageMode === "shared" ? "" : "none";
+      }
+    }
     // Bindings are read from your Zigbee network live (binds_get), which is
     // slow and can't run in the background, so we cache the last scan result
     // per-browser and load it back on every card render. "Scan bindings" is
     // then a manual refresh rather than something you have to redo every time
     // the dashboard loads.
-    _bindingsStorageKey() {
-      return `zha-binding-map-card:${this._config.id || "default"}:bindings`;
-    }
-    _loadCachedBindings() {
+    //
+    // As of M5, this goes through StorageProvider.getScanState/setScanState
+    // rather than a direct localStorage call, and covers both halves of the
+    // latest/last_complete split: last_complete is this same per-device
+    // binding cache as before (never regresses — a device that fails a scan
+    // keeps its last successful data), latest is which devices failed or
+    // partially responded on the most recent attempt, which previously lived
+    // in _scanFailures/_scanPartial in-memory only and was lost on reload.
+    async _loadScanState() {
       try {
-        const raw = JSON.parse(localStorage.getItem(this._bindingsStorageKey()) || "null");
-        if (raw && raw.bindings) {
-          this._bindings = new Map(Object.entries(raw.bindings));
-          this._lastScanAt = raw.savedAt || null;
+        const state = await this._storage.getScanState(this._config.id);
+        if (state.last_complete && state.last_complete.bindings) {
+          this._bindings = new Map(Object.entries(state.last_complete.bindings));
+          this._lastScanAt = state.last_complete.savedAt || null;
         }
+        this._scanFailures = new Set(
+          state.latest && state.latest.failures || []
+        );
+        this._scanPartial = new Map(
+          Object.entries(state.latest && state.latest.partial || {})
+        );
       } catch (e) {
       }
     }
-    _saveCachedBindings() {
+    /** Saves last_complete (always) and, when `latestOutcome` is supplied —
+     *  i.e. right after a scan run, not on every incidental call — latest
+     *  too. Kept as one write so the two halves of the split can't drift out
+     *  of sync with each other in storage. */
+    async _saveScanState(latestOutcome) {
       try {
-        const obj = Object.fromEntries(this._bindings);
+        const bindings = Object.fromEntries(this._bindings);
         this._lastScanAt = (/* @__PURE__ */ new Date()).toISOString();
-        localStorage.setItem(this._bindingsStorageKey(), JSON.stringify({ savedAt: this._lastScanAt, bindings: obj }));
+        await this._storage.setScanState(this._config.id, {
+          last_complete: { savedAt: this._lastScanAt, bindings },
+          latest: latestOutcome || {
+            attemptedAt: this._lastScanAt,
+            failures: [...this._scanFailures],
+            partial: Object.fromEntries(this._scanPartial)
+          }
+        });
       } catch (e) {
       }
     }
     // Learned per-device response-time/outcome history — see the constructor
     // comment and _recordScanOutcome/_historyFor below. Persisted the same way
     // the bindings cache is, so it builds up knowledge across sessions.
-    _historyStorageKey() {
-      return `zha-binding-map-card:${this._config.id || "default"}:history`;
-    }
-    _loadHistory() {
+    async _loadHistory() {
       try {
-        const raw = JSON.parse(localStorage.getItem(this._historyStorageKey()) || "null");
-        this._responseHistory = raw && typeof raw === "object" ? new Map(Object.entries(raw)) : /* @__PURE__ */ new Map();
+        const raw = await this._storage.getHistory(this._config.id);
+        this._responseHistory = new Map(Object.entries(raw || {}));
       } catch (e) {
         this._responseHistory = /* @__PURE__ */ new Map();
       }
     }
-    _saveHistory() {
+    async _saveHistory() {
       try {
-        localStorage.setItem(this._historyStorageKey(), JSON.stringify(Object.fromEntries(this._responseHistory)));
+        await this._storage.setHistory(this._config.id, Object.fromEntries(this._responseHistory));
       } catch (e) {
       }
     }
@@ -2079,25 +2609,20 @@
     // DEFAULT_RETRY_COUNT for the reasoning. A small, explicit user setting
     // rather than something baked in, since more retries is a real time cost
     // (~45s each against an unresponsive device), not a free improvement.
-    _retryCountStorageKey() {
-      return `zha-binding-map-card:${this._config.id || "default"}:retry-count`;
-    }
-    _loadRetryCount() {
+    async _loadRetryCount() {
       try {
-        const raw = parseInt(localStorage.getItem(this._retryCountStorageKey()), 10);
-        this._retryCount = Number.isFinite(raw) && raw >= 1 ? raw : DEFAULT_RETRY_COUNT;
+        const raw = await this._storage.getItem(this._config.id, "retry-count");
+        const n = Number(raw);
+        this._retryCount = Number.isFinite(n) && n >= 1 ? n : DEFAULT_RETRY_COUNT;
       } catch (e) {
         this._retryCount = DEFAULT_RETRY_COUNT;
       }
       const el = this._q("#rescan-retry-count");
       if (el) el.value = this._retryCount;
     }
-    _saveRetryCount(value) {
+    async _saveRetryCount(value) {
       this._retryCount = clamp(Number(value) || DEFAULT_RETRY_COUNT, 1, 10);
-      try {
-        localStorage.setItem(this._retryCountStorageKey(), String(this._retryCount));
-      } catch (e) {
-      }
+      await this._storage.setItem(this._config.id, "retry-count", this._retryCount);
     }
     // How many devices _scanBindings reads concurrently — see
     // DEFAULT_SCAN_BATCH_SIZE for the reasoning. User-configurable because a
@@ -2105,69 +2630,53 @@
     // less likely several sleepy/offline devices land in different batches and
     // each drag one out by ~45s, but there's no single number that's provably
     // optimal for every network, so it's a setting rather than a constant.
-    _scanBatchSizeStorageKey() {
-      return `zha-binding-map-card:${this._config.id || "default"}:scan-batch-size`;
-    }
-    _loadScanBatchSize() {
+    async _loadScanBatchSize() {
       try {
-        const raw = parseInt(localStorage.getItem(this._scanBatchSizeStorageKey()), 10);
-        this._scanBatchSize = Number.isFinite(raw) && raw >= 1 ? raw : DEFAULT_SCAN_BATCH_SIZE;
+        const raw = await this._storage.getItem(this._config.id, "scan-batch-size");
+        const n = Number(raw);
+        this._scanBatchSize = Number.isFinite(n) && n >= 1 ? n : DEFAULT_SCAN_BATCH_SIZE;
       } catch (e) {
         this._scanBatchSize = DEFAULT_SCAN_BATCH_SIZE;
       }
       const el = this._q("#scan-batch-size");
       if (el) el.value = this._scanBatchSize;
     }
-    _saveScanBatchSize(value) {
+    async _saveScanBatchSize(value) {
       this._scanBatchSize = clamp(Number(value) || DEFAULT_SCAN_BATCH_SIZE, 1, 30);
-      try {
-        localStorage.setItem(this._scanBatchSizeStorageKey(), String(this._scanBatchSize));
-      } catch (e) {
-      }
+      await this._storage.setItem(this._config.id, "scan-batch-size", this._scanBatchSize);
     }
     // Floor Plan marker size — see DEFAULT_FP_MARKER_SCALE for the reasoning.
-    _fpMarkerScaleStorageKey() {
-      return `zha-binding-map-card:${this._config.id || "default"}:fp-marker-scale`;
-    }
-    _loadFpMarkerScale() {
+    async _loadFpMarkerScale() {
       try {
-        const raw = parseInt(localStorage.getItem(this._fpMarkerScaleStorageKey()), 10);
-        this._fpMarkerScale = Number.isFinite(raw) && raw >= 10 ? raw : DEFAULT_FP_MARKER_SCALE;
+        const raw = await this._storage.getItem(this._config.id, "fp-marker-scale");
+        const n = Number(raw);
+        this._fpMarkerScale = Number.isFinite(n) && n >= 10 ? n : DEFAULT_FP_MARKER_SCALE;
       } catch (e) {
         this._fpMarkerScale = DEFAULT_FP_MARKER_SCALE;
       }
       const el = this._q("#fp-marker-scale");
       if (el) el.value = this._fpMarkerScale;
     }
-    _saveFpMarkerScale(value) {
+    async _saveFpMarkerScale(value) {
       this._fpMarkerScale = clamp(Number(value) || DEFAULT_FP_MARKER_SCALE, 40, 200);
-      try {
-        localStorage.setItem(this._fpMarkerScaleStorageKey(), String(this._fpMarkerScale));
-      } catch (e) {
-      }
+      await this._storage.setItem(this._config.id, "fp-marker-scale", this._fpMarkerScale);
     }
     // Whether the exploded device view fetches a real product photo from
     // zigbee2mqtt.io (see _deviceImageUrl). Defaults on, but this is the one
     // thing in the whole card that calls out to the internet rather than your
     // own HA instance, so it's a plain, easy-to-find toggle right on the
     // dialog itself, not buried in a settings tab.
-    _showDevicePhotosStorageKey() {
-      return `zha-binding-map-card:${this._config.id || "default"}:show-device-photos`;
-    }
-    _loadShowDevicePhotos() {
+    async _loadShowDevicePhotos() {
       try {
-        const raw = localStorage.getItem(this._showDevicePhotosStorageKey());
-        this._showDevicePhotos = raw === null ? true : raw === "1";
+        const raw = await this._storage.getItem(this._config.id, "show-device-photos");
+        this._showDevicePhotos = raw === null ? true : !!raw;
       } catch (e) {
         this._showDevicePhotos = true;
       }
     }
-    _saveShowDevicePhotos(value) {
+    async _saveShowDevicePhotos(value) {
       this._showDevicePhotos = !!value;
-      try {
-        localStorage.setItem(this._showDevicePhotosStorageKey(), this._showDevicePhotos ? "1" : "0");
-      } catch (e) {
-      }
+      await this._storage.setItem(this._config.id, "show-device-photos", this._showDevicePhotos);
     }
     _setStatus(level, text, timeout = 6e3) {
       this._status = { level, text };
@@ -2184,15 +2693,18 @@
     // Data loading
     // -------------------------------------------------------------------
     async _loadAll() {
-      this._loadPositions();
-      this._loadCachedBindings();
-      this._loadHistory();
-      this._loadRetryCount();
-      this._loadScanBatchSize();
-      this._loadFpMarkerScale();
-      this._loadFloorplan();
-      this._loadEndpointAnnotations();
-      this._loadShowDevicePhotos();
+      await this._resolveStorageProvider();
+      this._renderStorageMode();
+      await this._loadScanState();
+      await this._loadHistory();
+      await this._loadFilters();
+      await this._loadPositions();
+      await this._loadRetryCount();
+      await this._loadScanBatchSize();
+      await this._loadFpMarkerScale();
+      await this._loadFloorplan();
+      await this._loadEndpointAnnotations();
+      await this._loadShowDevicePhotos();
       if (this._fpImageUrl) this._loadFpImage(this._fpImageUrl);
       this._setStatus("info", "Loading ZHA devices\u2026", 0);
       try {
@@ -2323,7 +2835,7 @@
         await Promise.all(batch.map(scanOne));
       }
       this._scanState.running = false;
-      this._saveCachedBindings();
+      await this._saveScanState();
       const summary = [`${okCount} device(s) read`];
       if (partialCount) summary.push(`${partialCount} partial (a later page timed out \u2014 rescan for the rest)`);
       if (failCount) summary.push(`${failCount} did not respond (sleepy/offline devices are normal)`);
@@ -2844,6 +3356,21 @@
           this._saveScanBatchSize(batchSizeInput.value);
           batchSizeInput.value = this._scanBatchSize;
         });
+      }
+      const dismissHintBtn = this._q("#btn-dismiss-storage-hint");
+      if (dismissHintBtn) {
+        dismissHintBtn.addEventListener("click", () => {
+          this._saveStorageHintDismissed(true);
+          this._renderStorageMode();
+        });
+      }
+      const useSharedBtn = this._q("#btn-use-shared-storage");
+      if (useSharedBtn) {
+        useSharedBtn.addEventListener("click", () => this._switchToSharedStorage());
+      }
+      const useLocalBtn = this._q("#btn-use-local-storage");
+      if (useLocalBtn) {
+        useLocalBtn.addEventListener("click", () => this._switchToLocalStorage());
       }
       this._q("#btn-zoom-fit").addEventListener("click", () => this._zoomFit());
       this._q("#btn-zoom-in").addEventListener("click", () => this._zoomBy(1.2));
@@ -4768,12 +5295,9 @@
     // image's natural size, so they stay correct if the image is swapped for
     // a different resolution later.
     // -------------------------------------------------------------------
-    _fpStorageKey() {
-      return `zha-binding-map-card:${this._config.id || "default"}:floorplan`;
-    }
-    _loadFloorplan() {
+    async _loadFloorplan() {
       try {
-        const raw = JSON.parse(localStorage.getItem(this._fpStorageKey()) || "null");
+        const raw = await this._storage.getItem(this._config.id, "floorplan");
         if (raw) {
           this._fpImageUrl = raw.imageUrl || "";
           this._fpPositions = raw.positions || {};
@@ -4781,14 +5305,11 @@
       } catch (e) {
       }
     }
-    _saveFloorplan() {
-      try {
-        localStorage.setItem(
-          this._fpStorageKey(),
-          JSON.stringify({ imageUrl: this._fpImageUrl, positions: this._fpPositions })
-        );
-      } catch (e) {
-      }
+    async _saveFloorplan() {
+      await this._storage.setItem(this._config.id, "floorplan", {
+        imageUrl: this._fpImageUrl,
+        positions: this._fpPositions
+      });
     }
     _loadFpImage(url) {
       if (!url) {

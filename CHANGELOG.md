@@ -2,6 +2,126 @@
 
 All notable changes to ZHA Bindings Manager are documented here.
 
+
+## [0.32.4]
+
+### Fixed
+
+- **The "use shared storage" fill-in from 0.32.3 could silently lose what
+  it just copied over.** Copying your data into shared storage doesn't
+  reach Home Assistant immediately — it's normally batched with other
+  saves and sent about a second and a half later. The fill-in wasn't
+  waiting for that to actually complete before finishing, so if the
+  dashboard reloaded (or the card re-rendered for any other reason) in
+  that window, whatever had just been "imported" — most visibly, device
+  positions and floor plan placement — silently reverted to empty the
+  next time the card genuinely loaded from shared storage, even though
+  the switch itself appeared to succeed. The fill-in now waits for the
+  save to actually land before finishing.
+  - If you already went through the "use this browser only" → "use
+    shared storage" steps from 0.32.3 and lost positioning, do it once
+    more now — this time it'll actually stick.
+
+## [0.32.3]
+
+### Fixed
+
+- **Shared storage now covers everything, not just bindings.** When
+  shared storage first shipped, only your binding/health scan results and
+  per-device response history actually followed you between browsers and
+  devices — floor plan (image and device placements), device positions on
+  the Map view, endpoint annotations, saved filters, and the retry
+  count/scan batch size/marker size/show-photos settings were all still
+  stuck on whichever browser last touched them, even with shared storage
+  active. All of these now go through the same shared storage as
+  bindings data. If you already switched a browser to shared storage
+  before updating, open the ⚙ settings panel and use "Use this browser
+  only" then "Use shared storage" again to pick up the newly-synced
+  settings (a one-time step; normal use afterward stays automatic).
+- The "use shared storage" prompt now fills in whichever of these
+  settings shared storage is still missing, rather than only handling
+  scan data — and only fills in what's actually missing, so a browser
+  that finds shared storage already has scan data from another device
+  can still contribute its own floor plan without touching that
+  device's data.
+
+## [0.32.2]
+
+### Added
+
+- **You can now switch storage mode from the settings panel.** Previously,
+  the choice between "this browser only" and shared storage was only ever
+  offered once, the first time a browser saw the backend — after that
+  there was no way back short of clearing browser data. The ⚙ settings
+  panel's Storage section now has a button for switching either
+  direction: "Use shared storage" (safe either way — it won't overwrite
+  existing shared data, following the same logic as the one-time prompt)
+  and "Use this browser only" (always safe and instantly reversible,
+  since your browser's local data is left untouched while shared storage
+  is active).
+
+## [0.32.1]
+
+### Fixed
+
+- **A second browser or device connecting to shared storage for the first
+  time could silently overwrite data already saved there from another
+  browser/device.** If you'd already set up shared storage from, say, your
+  laptop, then opened the card in a new browser (e.g. your phone) that
+  still had its own older local data, choosing "import" there was
+  replacing the laptop's shared data with the phone's, rather than
+  combining them. The card now recognizes when shared storage already has
+  real data and, in that case, offers to switch this browser onto the
+  existing shared data instead — your local copy stays saved in that
+  browser (just unused) and is never copied over the top of what's
+  already shared. The original "import my data" prompt is now only
+  offered when shared storage is still empty, where it's actually safe.
+
+## [0.32.0]
+
+### Added
+
+- **Optional shared storage across browsers/devices.** Your data has always
+  lived only in the browser you're using — open the dashboard on your
+  phone and it starts from scratch. You can now install a small companion
+  Home Assistant integration
+  ([zha-bindings-manager-backend](https://github.com/hsolgaard/zha-bindings-manager-backend))
+  that lets the card save its data centrally instead, so every browser and
+  device sees the same thing.
+  - Nothing changes if you don't install it — the card keeps working
+    exactly as before, saving only to the current browser.
+  - If you do install it, the card detects it automatically and shows a
+    small status badge in the toolbar indicating whether it's using
+    browser-only or shared storage.
+  - The first time it detects the backend, if you already have data saved
+    in this browser, it asks whether to move that data over before
+    switching — nothing is switched or discarded without confirmation.
+  - A dismissible hint in the settings panel points you to the companion
+    integration if you haven't installed it yet.
+
+## [0.31.0]
+
+### Fixed
+
+- **A device that failed or only partially responded during the last "Scan
+  bindings" run no longer silently looks fine again after reloading the
+  dashboard.** That status previously lived only in memory for the current
+  browser session — reloading the page reset it and fell back to whatever
+  binding data was last successfully cached, which looked identical to a
+  device that's actually fine. That outcome is now saved and restored when
+  the dashboard loads, so a device that didn't respond keeps showing as
+  failed/partial until you actually rescan it. Your existing cached
+  bindings carry over automatically — nothing to redo after updating.
+
+### Internal
+
+- Reworked how scan results are stored, as groundwork for a possible
+  future option to save your data somewhere it can be shared across
+  browsers/devices, instead of being stuck in just one browser's local
+  storage. Nothing changes about where your data lives today, and there's
+  nothing to configure.
+
+
 ## [0.30.1]
 
 Fixes a misleading message from a real forum bug report: a user's Hue

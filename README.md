@@ -317,6 +317,22 @@ Its design principles are:
 - **Guide rather than expose** — make common operations safe and approachable.
 - **Keep expert controls available** — endpoints, clusters and raw binding operations remain accessible when needed.
 
+## Development
+
+`zha-binding-map-card.js` — the single file Home Assistant/Lovelace actually loads — is a generated build output, not something to hand-edit. The real source lives in `src/`, split into modules; `build.js` (esbuild) bundles `src/index.js` and everything it imports into that one file.
+
+```sh
+npm ci
+npm run build   # rebuilds zha-binding-map-card.js from src/
+npm test        # vitest — storage providers
+node smoke-test.js   # broader logic coverage: parsing, capability records, endpoint classification, etc.
+npm run watch    # rebuild on every src/ change, for local iteration
+```
+
+A GitHub Action (`.github/workflows/build.yml`) runs the build (plus tests) automatically on every push to `src/**`/`build.js`/`package.json` and commits the resulting `zha-binding-map-card.js` back to `main` — so in normal use, editing `src/` is the only step; you never need to run the build or commit the compiled file by hand.
+
+`src/capexplorer.js` and `src/capexplorer-constants.js` are the pure data layer behind the Capability Explorer tab, deliberately kept dependency-free from the rest of `src/` — they're meant to be reusable outside this card, and in fact are: [`zigbee-capabilities`](https://github.com/hsolgaard/zigbee-capabilities), the standalone community device-capability website, imports byte-identical copies of both files directly as plain ES modules. Keeping them in sync across the two repos is still a manual step today, not automated.
+
 ## Related projects
 
 - Home Assistant's native **ZHA → Manage Zigbee Device → Bindings** interface can create bindings, but does not provide a network-wide view of existing binding tables.

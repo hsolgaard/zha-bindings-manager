@@ -14,7 +14,7 @@ export const ZTK_DOMAIN = "zha_toolkit";
 // provenance, so a community-database record can be judged against what the
 // scanning card actually knew how to verify at the time. Keep in sync with
 // package.json's "version" when cutting a release.
-export const CARD_VERSION = "0.33.0";
+export const CARD_VERSION = "0.34.0";
 
 // Clusters zha-toolkit binds by default when no explicit cluster is given.
 export const DEFAULT_BINDABLE_OUT_CLUSTERS = [0x0005, 0x0006, 0x0008, 0x0102, 0x0300];

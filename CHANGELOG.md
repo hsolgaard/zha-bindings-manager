@@ -3,6 +3,19 @@
 All notable changes to ZHA Bindings Manager are documented here.
 
 
+## [0.34.0]
+
+### Added
+
+- **Capability Explorer device cards now show a product photo**, the
+  same zigbee2mqtt.io-derived image (and Tuya-model exclusion list) the
+  Exploded view has always used — reusing the existing "Show device
+  photo" setting rather than adding a second, separate toggle just for
+  this tab. Falls back to a generic placeholder when no photo is
+  available or the model is on the ambiguous-Tuya exclusion list,
+  matching the same behavior already shipped on the zigbee-capabilities
+  website.
+
 ## [0.33.0]
 
 ### Added

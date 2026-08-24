@@ -4628,6 +4628,24 @@ export class ZhaBindingMapCard extends HTMLElement {
     return `https://hsolgaard.github.io/zigbee-capabilities/?${params.toString()}`;
   }
 
+  // Device photo for a Capability Explorer card — same zigbee2mqtt.io URL
+  // derivation and AMBIGUOUS_TUYA_MODELS exclusion as the Exploded view's
+  // own _deviceImageUrl (this just calls it), and the same "show device
+  // photo" preference (this._showDevicePhotos) rather than a second,
+  // separate toggle just for this tab: it's one card-level setting, not a
+  // per-view one. Falls back to a generic placeholder box, not the
+  // Exploded view's gang-count shape — there's no endpoint/gang context
+  // for a bare search-result/index entry the way there is for a real
+  // device you've scanned.
+  _capExpDevicePhotoHtml(model) {
+    if (!this._showDevicePhotos) return "";
+    const imgUrl = this._deviceImageUrl({ model });
+    if (!imgUrl) return `<div class="capexp-device-photo-fallback" aria-hidden="true"></div>`;
+    return `<img src="${escapeHtml(imgUrl)}" alt="" loading="lazy" class="capexp-device-photo"
+         onerror="this.style.display='none'; this.nextElementSibling.style.display='block';">
+       <div class="capexp-device-photo-fallback" style="display:none" aria-hidden="true"></div>`;
+  }
+
   // Shared by Explore My Devices and Find a Device — the "Capabilities"
   // section (cluster/command groups) rendered inside each mode's
   // "Technical evidence" / "View capabilities" disclosure.
@@ -4786,23 +4804,28 @@ export class ZhaBindingMapCard extends HTMLElement {
 
             return `
               <div class="capexp-device-card">
-                <div class="capexp-device-header">
-                  <span class="capexp-device-name">${escapeHtml(manufacturerDisplayLabel(m.device.manufacturer))} ${escapeHtml(
+                <div class="capexp-device-top">
+                  ${this._capExpDevicePhotoHtml(m.device.model)}
+                  <div class="capexp-device-main">
+                    <div class="capexp-device-header">
+                      <span class="capexp-device-name">${escapeHtml(manufacturerDisplayLabel(m.device.manufacturer))} ${escapeHtml(
               m.device.model || "—"
             )}</span>
-                  ${
-                    // Only show the entity's own name as a secondary line
-                    // when there actually is one — this database is about
-                    // products, not entity names, so a manufacturer/model
-                    // repeated twice (the _deviceLabel() fallback when no
-                    // custom name exists) would just be noise.
-                    m.device.user_given_name || m.device.name
-                      ? `<span class="muted">${escapeHtml(m.device.user_given_name || m.device.name)}</span>`
-                      : ""
-                  }
-                  <a class="capexp-website-link" href="${escapeHtml(this._capExpWebsiteUrl(m.device.manufacturer, m.device.model))}" target="_blank" rel="noopener noreferrer">View on website ↗</a>
+                      ${
+                        // Only show the entity's own name as a secondary line
+                        // when there actually is one — this database is about
+                        // products, not entity names, so a manufacturer/model
+                        // repeated twice (the _deviceLabel() fallback when no
+                        // custom name exists) would just be noise.
+                        m.device.user_given_name || m.device.name
+                          ? `<span class="muted">${escapeHtml(m.device.user_given_name || m.device.name)}</span>`
+                          : ""
+                      }
+                      <a class="capexp-website-link" href="${escapeHtml(this._capExpWebsiteUrl(m.device.manufacturer, m.device.model))}" target="_blank" rel="noopener noreferrer">View on website ↗</a>
+                    </div>
+                    ${this._capExpTrustPanelHtml(rating, fw.length, fwLabel, totalScans, lastSeen)}
+                  </div>
                 </div>
-                ${this._capExpTrustPanelHtml(rating, fw.length, fwLabel, totalScans, lastSeen)}
                 ${this._capExpExternalReferencesHtml(references, m.device.manufacturer)}
                 ${
                   discoveryNote
@@ -5169,13 +5192,18 @@ export class ZhaBindingMapCard extends HTMLElement {
         const capGroups = groupCapabilitiesByOutcome(r.entries);
         return `
           <div class="capexp-device-card">
-            <div class="capexp-device-header">
-              <span class="capexp-device-name">${escapeHtml(manufacturerDisplayLabel(r.manufacturer))} ${escapeHtml(
+            <div class="capexp-device-top">
+              ${this._capExpDevicePhotoHtml(r.model)}
+              <div class="capexp-device-main">
+                <div class="capexp-device-header">
+                  <span class="capexp-device-name">${escapeHtml(manufacturerDisplayLabel(r.manufacturer))} ${escapeHtml(
           r.model || "—"
         )}</span>
-              <a class="capexp-website-link" href="${escapeHtml(this._capExpWebsiteUrl(r.manufacturer, r.model))}" target="_blank" rel="noopener noreferrer">View on website ↗</a>
+                  <a class="capexp-website-link" href="${escapeHtml(this._capExpWebsiteUrl(r.manufacturer, r.model))}" target="_blank" rel="noopener noreferrer">View on website ↗</a>
+                </div>
+                ${this._capExpTrustPanelHtml(r.rating, r.firmwareCount, null, r.totalScans, r.lastSeen)}
+              </div>
             </div>
-            ${this._capExpTrustPanelHtml(r.rating, r.firmwareCount, null, r.totalScans, r.lastSeen)}
             ${this._capExpExternalReferencesHtml(r.references, r.manufacturer)}
             ${this._capExpGoodForHtml(r.goodFor, "this record's")}
             <div class="capexp-techtoggle" data-capexp-toggle="${escapeHtml(key)}">

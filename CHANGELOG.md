@@ -3,6 +3,33 @@
 All notable changes to ZHA Bindings Manager are documented here.
 
 
+## [0.33.0]
+
+### Added
+
+- **Capability Explorer device cards now show external references and a
+  link to the full website record.** The [zigbee-capabilities
+  database](https://github.com/hsolgaard/zigbee-capabilities) this tab is
+  built on also tracks, for many devices, a link to that device's
+  [Blakadder](https://zigbee.blakadder.com/) page and/or its official
+  manufacturer/product page — supplementary context, never used to
+  influence any capability or confidence data shown. Every device card (in
+  both "Explore my devices" and "Find a device") now shows those links
+  when they exist, plus a "View on website ↗" link that jumps straight to
+  that device's full record on the public
+  [zigbee-capabilities](https://hsolgaard.github.io/zigbee-capabilities/)
+  site — every firmware version, per-endpoint technical detail, and the
+  same external references, all in one place.
+- **Tuya's internal manufacturer codes are now grouped as "Generic
+  Tuya."** Devices reporting a raw `_TZxxxx`/`_TYxxxx`-style manufacturer
+  string (meaningless to look at — nobody knows their device is
+  manufactured by, say, `_TZ3000_46t1rvdu`) are now shown and filterable
+  as "Generic Tuya" in the Capability Explorer, both in device card
+  headers and the manufacturer filter dropdown on Find a Device. The raw
+  string is still shown alongside the label, and nothing about the
+  underlying data changes — this is purely a display/filter grouping, the
+  same one already shipped on the zigbee-capabilities website.
+
 ## [0.32.4]
 
 ### Fixed

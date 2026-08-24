@@ -2053,28 +2053,6 @@
     return result;
   }
 
-  // Card-only Capability Explorer additions — mirror docs/app.js in the
-  // hsolgaard/zigbee-capabilities repo (the public website built on the
-  // same community index), which independently added the same "Generic
-  // Tuya" grouping and external-reference rendering. Deliberately kept
-  // out of the shared src/capexplorer.js / src/capexplorer-constants.js
-  // section above: those two files are meant to stay a verbatim data-only
-  // layer usable outside this card, and neither manufacturer-label
-  // presentation nor HTML rendering belongs there. See docs/app.js for
-  // the byte-for-byte equivalent logic.
-  var GENERIC_TUYA_LABEL = "Generic Tuya";
-  var TUYA_MANUFACTURER_PATTERN = /^_T[A-Z0-9]+_/i;
-  function isGenericTuyaManufacturer(m) {
-    return TUYA_MANUFACTURER_PATTERN.test(String(m || ""));
-  }
-  // Prefer a device's own recognizable manufacturer name over an internal
-  // Tuya production code nobody would recognize (e.g. "_TZ3000_46t1rvdu")
-  // — "Generic Tuya" is the recognizable stand-in for that whole family.
-  function manufacturerDisplayLabel(m) {
-    if (!m) return "—";
-    return isGenericTuyaManufacturer(m) ? `${GENERIC_TUYA_LABEL} (${m})` : m;
-  }
-
   // src/card.js
   var SYNCED_ITEM_KEYS = [
     "filters",
@@ -2086,6 +2064,15 @@
     "floorplan",
     "show-device-photos"
   ];
+  var GENERIC_TUYA_LABEL = "Generic Tuya";
+  var TUYA_MANUFACTURER_PATTERN = /^_T[A-Z0-9]+_/i;
+  function isGenericTuyaManufacturer(m) {
+    return TUYA_MANUFACTURER_PATTERN.test(String(m || ""));
+  }
+  function manufacturerDisplayLabel(m) {
+    if (!m) return "\u2014";
+    return isGenericTuyaManufacturer(m) ? `${GENERIC_TUYA_LABEL} (${m})` : m;
+  }
   var ZhaBindingMapCard = class extends HTMLElement {
     constructor() {
       super();
@@ -5880,14 +5867,12 @@
         links.push({ label: "Blakadder", url: references.blakadder.url });
       }
       if (references.manufacturer && references.manufacturer.url && references.manufacturer.confidence === "high") {
-        const mfrLabel = manufacturer
-          ? isGenericTuyaManufacturer(manufacturer) ? GENERIC_TUYA_LABEL : manufacturer
-          : "Manufacturer";
+        const mfrLabel = manufacturer ? isGenericTuyaManufacturer(manufacturer) ? GENERIC_TUYA_LABEL : manufacturer : "Manufacturer";
         links.push({ label: mfrLabel, url: references.manufacturer.url });
       }
       if (!links.length) return "";
       const linksHtml = links.map(
-        (l) => `<a href="${escapeHtml(l.url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(l.label)} ↗</a>`
+        (l) => `<a href="${escapeHtml(l.url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(l.label)} \u2197</a>`
       ).join(" \xB7 ");
       return `<div class="capexp-external-refs muted">External references: ${linksHtml}</div>`;
     }
@@ -5977,7 +5962,7 @@
         );
         const goodFor = useCaseTags(m.entries, localFirmware);
         const capabilitiesHtml = this._capExpCapabilitiesHtml(capGroups);
-        const references = (m.entries[0] && m.entries[0].references) || null;
+        const references = m.entries[0] && m.entries[0].references || null;
         return `
               <div class="capexp-device-card">
                 <div class="capexp-device-header">
@@ -6087,10 +6072,6 @@
           if (isGenericTuyaManufacturer(e.manufacturer)) hasGenericTuya = true;
           else set.add(e.manufacturer);
         });
-        // One "Generic Tuya" entry stands in for every _TZ.../_TY... code so
-        // the dropdown isn't dominated by strings nobody recognizes — see
-        // _capExpRunSearch() for how selecting it expands back to all of
-        // them. Mirrors docs/app.js's facetValues() in zigbee-capabilities.
         if (hasGenericTuya) set.add(GENERIC_TUYA_LABEL);
       } else if (field === "model") idx.forEach((e) => e.model && set.add(e.model));
       else if (field === "firmware") idx.forEach((e) => set.add(e.firmware || "unknown"));
@@ -6258,11 +6239,6 @@
       const resultsEl = this._q("#capexp-search-results");
       const countEl = this._q("#capexp-search-count");
       if (!resultsEl || !this._capExpIndex) return;
-      // "Generic Tuya" isn't a real manufacturer string any entry actually
-      // has, so it can't go through searchIndex()'s own (shared, untouched)
-      // substring match — ask it for everything else, then expand the
-      // sentinel back out to every _TZ/_TY entry here instead. Mirrors
-      // docs/app.js's runSearch() in zigbee-capabilities.
       const isGenericTuyaFilter = this._capExpSearch.manufacturer === GENERIC_TUYA_LABEL;
       const matched = searchIndex(
         this._capExpIndex,

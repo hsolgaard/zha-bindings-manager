@@ -1,0 +1,71 @@
+name: Build
+
+# Rebuilds zha-binding-map-card.js from src/ (see build.js) whenever the
+# source changes, and commits the result straight back to main — so
+# editing src/ is the only step from here on; the compiled file Home
+# Assistant actually loads stays in sync automatically instead of needing
+# a manual `npm run build` + hand-paste into GitHub, which is how this
+# file used to get updated.
+#
+# Path-filtered to src/**, build.js, and package*.json, so this workflow's
+# own commit (which only ever touches zha-binding-map-card.js) can't
+# re-trigger itself — no recursive-push guard needed here, unlike the
+# zigbee-capabilities repo's enrich-external-references.yml /
+# rebuild-capability-index.yml pair, which chain two separate workflows.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "src/**"
+      - "build.js"
+      - "package.json"
+      - "package-lock.json"
+  pull_request:
+    paths:
+      - "src/**"
+      - "build.js"
+      - "package.json"
+      - "package-lock.json"
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - run: npm ci
+
+      - name: Run tests
+        run: npm test
+
+      - name: Run smoke test
+        run: node smoke-test.js
+
+      - name: Build
+        run: npm run build
+
+      # PRs and manual dispatch runs stop here — this only commits on a
+      # direct push to main, where GITHUB_TOKEN is guaranteed write access.
+      # (For pull_request specifically, GitHub also downgrades the token to
+      # read-only regardless of the permissions block above, so a commit
+      # step wouldn't succeed there anyway.)
+      - name: Commit rebuilt zha-binding-map-card.js
+        if: github.event_name == 'push'
+        run: |
+          if git diff --quiet -- zha-binding-map-card.js; then
+            echo "Build output unchanged, nothing to commit."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add zha-binding-map-card.js
+          git commit -m "Rebuild zha-binding-map-card.js from src/"
+          git push

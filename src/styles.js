@@ -275,6 +275,17 @@ export const STYLE = `
 .capexp-device-list { display:flex; flex-direction:column; gap:8px; }
 .capexp-device-card { border:1px solid var(--divider-color, #e0e0e0); border-radius:10px; padding:10px 12px;
   background: var(--secondary-background-color, #fafafa); }
+.capexp-device-top { display:flex; gap:12px; align-items:flex-start; }
+.capexp-device-main { flex:1 1 auto; min-width:0; }
+.capexp-device-photo, .capexp-device-photo-fallback { width:56px; height:56px; border-radius:8px; flex:0 0 auto;
+  background: var(--card-background-color, #fff); border:1px solid var(--divider-color, #e0e0e0); object-fit:contain; }
+.capexp-device-photo-fallback { position:relative; background: var(--secondary-background-color, #fafafa); }
+.capexp-device-photo-fallback::after { content:""; position:absolute; inset:15px;
+  background-color: var(--secondary-text-color, #727272); opacity:0.45;
+  mask-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'><rect x='3' y='3' width='18' height='18' rx='3' fill='none' stroke='black' stroke-width='2'/><circle cx='12' cy='12' r='3' fill='black'/></svg>");
+  -webkit-mask-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'><rect x='3' y='3' width='18' height='18' rx='3' fill='none' stroke='black' stroke-width='2'/><circle cx='12' cy='12' r='3' fill='black'/></svg>");
+  mask-size:contain; -webkit-mask-size:contain; mask-repeat:no-repeat; -webkit-mask-repeat:no-repeat;
+  mask-position:center; -webkit-mask-position:center; }
 .capexp-device-header { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
 .capexp-device-name { font-weight:600; }
 .capexp-website-link { margin-left:auto; font-size:0.78em; font-weight:500; color: var(--primary-color);

@@ -78,7 +78,7 @@
 
   // src/constants.js
   var ZTK_DOMAIN = "zha_toolkit";
-  var CARD_VERSION = "0.32.4";
+  var CARD_VERSION = "0.33.0";
   var DEFAULT_BINDABLE_OUT_CLUSTERS = [5, 6, 8, 258, 768];
   var MEMBERSHIP_EDGE_COLOR = "#8e24aa";
   var HISTORY_LIMIT = 10;
@@ -1508,6 +1508,12 @@
   background: var(--secondary-background-color, #fafafa); }
 .capexp-device-header { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
 .capexp-device-name { font-weight:600; }
+.capexp-website-link { margin-left:auto; font-size:0.78em; font-weight:500; color: var(--primary-color);
+  text-decoration:none; white-space:nowrap; }
+.capexp-website-link:hover { text-decoration:underline; }
+.capexp-external-refs { font-size:0.78em; margin-top:6px; }
+.capexp-external-refs a { color: var(--primary-color); text-decoration:none; }
+.capexp-external-refs a:hover { text-decoration:underline; }
 .capexp-chevron { margin-left:auto; opacity:0.6; }
 .capexp-techtoggle { display:flex; align-items:center; gap:4px; cursor:pointer; user-select:none;
   margin-top:10px; padding-top:8px; border-top:1px solid var(--divider-color, #e0e0e0);
@@ -1745,7 +1751,16 @@
         goodFor: useCaseTags(entries),
         firmwareCount: fw.length,
         totalScans,
-        lastSeen: lastSeenTimes.length ? lastSeenTimes[lastSeenTimes.length - 1] : null
+        lastSeen: lastSeenTimes.length ? lastSeenTimes[lastSeenTimes.length - 1] : null,
+        // External references (Blakadder / manufacturer product page — see
+        // PRD: "External Device References"). Same value on every firmware
+        // entry for this device (it's per manufacturer+model, stored once in
+        // the source file), so `first`'s copy is as good as any. Purely a
+        // passthrough for the UI to render as supplementary context — nothing
+        // above this (rating, goodFor, groupCapabilitiesByOutcome, etc.) ever
+        // reads it, and it must stay that way: external references describe
+        // what other sites document, never what a scan actually confirmed.
+        references: first.references || null
       });
     });
     const starRank = (r) => r.conflicting ? -1 : r.stars || 0;
@@ -2036,6 +2051,28 @@
       }
     });
     return result;
+  }
+
+  // Card-only Capability Explorer additions — mirror docs/app.js in the
+  // hsolgaard/zigbee-capabilities repo (the public website built on the
+  // same community index), which independently added the same "Generic
+  // Tuya" grouping and external-reference rendering. Deliberately kept
+  // out of the shared src/capexplorer.js / src/capexplorer-constants.js
+  // section above: those two files are meant to stay a verbatim data-only
+  // layer usable outside this card, and neither manufacturer-label
+  // presentation nor HTML rendering belongs there. See docs/app.js for
+  // the byte-for-byte equivalent logic.
+  var GENERIC_TUYA_LABEL = "Generic Tuya";
+  var TUYA_MANUFACTURER_PATTERN = /^_T[A-Z0-9]+_/i;
+  function isGenericTuyaManufacturer(m) {
+    return TUYA_MANUFACTURER_PATTERN.test(String(m || ""));
+  }
+  // Prefer a device's own recognizable manufacturer name over an internal
+  // Tuya production code nobody would recognize (e.g. "_TZ3000_46t1rvdu")
+  // — "Generic Tuya" is the recognizable stand-in for that whole family.
+  function manufacturerDisplayLabel(m) {
+    if (!m) return "—";
+    return isGenericTuyaManufacturer(m) ? `${GENERIC_TUYA_LABEL} (${m})` : m;
   }
 
   // src/card.js
@@ -5829,6 +5866,42 @@
       ).join("")}</div>
     </div>`;
     }
+    // "External references" (PRD: "External Device References", ported
+    // from docs/app.js in the zigbee-capabilities repo) — a Blakadder page
+    // and/or an official manufacturer/product page for this device, shown
+    // as supplementary context only. Deliberately reads nothing but
+    // `references.blakadder.url`/`references.manufacturer.url`: this must
+    // never gain access to, or influence, capability or confidence data.
+    // Renders nothing at all when neither link is present.
+    _capExpExternalReferencesHtml(references, manufacturer) {
+      if (!references) return "";
+      const links = [];
+      if (references.blakadder && references.blakadder.url && references.blakadder.confidence === "high") {
+        links.push({ label: "Blakadder", url: references.blakadder.url });
+      }
+      if (references.manufacturer && references.manufacturer.url && references.manufacturer.confidence === "high") {
+        const mfrLabel = manufacturer
+          ? isGenericTuyaManufacturer(manufacturer) ? GENERIC_TUYA_LABEL : manufacturer
+          : "Manufacturer";
+        links.push({ label: mfrLabel, url: references.manufacturer.url });
+      }
+      if (!links.length) return "";
+      const linksHtml = links.map(
+        (l) => `<a href="${escapeHtml(l.url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(l.label)} ↗</a>`
+      ).join(" \xB7 ");
+      return `<div class="capexp-external-refs muted">External references: ${linksHtml}</div>`;
+    }
+    // Deep-links to this device's entry on the public zigbee-capabilities
+    // website (docs/app.js there reads ?manufacturer=&model= on load and
+    // pre-runs the search) — lets someone jump from "what does my device
+    // support" in this card straight to the full community record:
+    // external references, every firmware version, per-endpoint detail.
+    _capExpWebsiteUrl(manufacturer, model) {
+      const params = new URLSearchParams();
+      if (manufacturer) params.set("manufacturer", manufacturer);
+      if (model) params.set("model", model);
+      return `https://hsolgaard.github.io/zigbee-capabilities/?${params.toString()}`;
+    }
     // Shared by Explore My Devices and Find a Device — the "Capabilities"
     // section (cluster/command groups) rendered inside each mode's
     // "Technical evidence" / "View capabilities" disclosure.
@@ -5904,10 +5977,11 @@
         );
         const goodFor = useCaseTags(m.entries, localFirmware);
         const capabilitiesHtml = this._capExpCapabilitiesHtml(capGroups);
+        const references = (m.entries[0] && m.entries[0].references) || null;
         return `
               <div class="capexp-device-card">
                 <div class="capexp-device-header">
-                  <span class="capexp-device-name">${escapeHtml(m.device.manufacturer || "\u2014")} ${escapeHtml(
+                  <span class="capexp-device-name">${escapeHtml(manufacturerDisplayLabel(m.device.manufacturer))} ${escapeHtml(
           m.device.model || "\u2014"
         )}</span>
                   ${// Only show the entity's own name as a secondary line
@@ -5916,8 +5990,10 @@
         // repeated twice (the _deviceLabel() fallback when no
         // custom name exists) would just be noise.
         m.device.user_given_name || m.device.name ? `<span class="muted">${escapeHtml(m.device.user_given_name || m.device.name)}</span>` : ""}
+                  <a class="capexp-website-link" href="${escapeHtml(this._capExpWebsiteUrl(m.device.manufacturer, m.device.model))}" target="_blank" rel="noopener noreferrer">View on website \u2197</a>
                 </div>
                 ${this._capExpTrustPanelHtml(rating, fw.length, fwLabel, totalScans, lastSeen)}
+                ${this._capExpExternalReferencesHtml(references, m.device.manufacturer)}
                 ${discoveryNote ? `<div class="capexp-discovery-note">${escapeHtml(discoveryNote.cardNote)}</div>` : ""}
                 ${this._capExpGoodForHtml(goodFor, "yours")}
                 <div class="capexp-report-line muted">${reports ? "Reports its state back automatically \u2014 no need to poll it to see changes." : "Doesn't automatically report state changes \u2014 Home Assistant may need to poll it."}</div>
@@ -6004,8 +6080,19 @@
     _capExpFacetValues(field) {
       const idx = this._capExpIndex || [];
       const set = /* @__PURE__ */ new Set();
-      if (field === "manufacturer") idx.forEach((e) => e.manufacturer && set.add(e.manufacturer));
-      else if (field === "model") idx.forEach((e) => e.model && set.add(e.model));
+      if (field === "manufacturer") {
+        let hasGenericTuya = false;
+        idx.forEach((e) => {
+          if (!e.manufacturer) return;
+          if (isGenericTuyaManufacturer(e.manufacturer)) hasGenericTuya = true;
+          else set.add(e.manufacturer);
+        });
+        // One "Generic Tuya" entry stands in for every _TZ.../_TY... code so
+        // the dropdown isn't dominated by strings nobody recognizes — see
+        // _capExpRunSearch() for how selecting it expands back to all of
+        // them. Mirrors docs/app.js's facetValues() in zigbee-capabilities.
+        if (hasGenericTuya) set.add(GENERIC_TUYA_LABEL);
+      } else if (field === "model") idx.forEach((e) => e.model && set.add(e.model));
       else if (field === "firmware") idx.forEach((e) => set.add(e.firmware || "unknown"));
       else if (field === "cluster") {
         idx.forEach((e) => Object.values(e.clusters || {}).forEach((c) => c.name && set.add(c.name)));
@@ -6171,7 +6258,16 @@
       const resultsEl = this._q("#capexp-search-results");
       const countEl = this._q("#capexp-search-count");
       if (!resultsEl || !this._capExpIndex) return;
-      const matched = searchIndex(this._capExpIndex, this._capExpSearch);
+      // "Generic Tuya" isn't a real manufacturer string any entry actually
+      // has, so it can't go through searchIndex()'s own (shared, untouched)
+      // substring match — ask it for everything else, then expand the
+      // sentinel back out to every _TZ/_TY entry here instead. Mirrors
+      // docs/app.js's runSearch() in zigbee-capabilities.
+      const isGenericTuyaFilter = this._capExpSearch.manufacturer === GENERIC_TUYA_LABEL;
+      const matched = searchIndex(
+        this._capExpIndex,
+        isGenericTuyaFilter ? { ...this._capExpSearch, manufacturer: "" } : this._capExpSearch
+      ).filter((e) => !isGenericTuyaFilter || isGenericTuyaManufacturer(e.manufacturer));
       const devices = groupSearchResultsByDevice(matched, this._capExpIndex);
       const shown = devices.slice(0, 100);
       if (!devices.length) {
@@ -6201,11 +6297,13 @@
         return `
           <div class="capexp-device-card">
             <div class="capexp-device-header">
-              <span class="capexp-device-name">${escapeHtml(r.manufacturer || "\u2014")} ${escapeHtml(
+              <span class="capexp-device-name">${escapeHtml(manufacturerDisplayLabel(r.manufacturer))} ${escapeHtml(
           r.model || "\u2014"
         )}</span>
+              <a class="capexp-website-link" href="${escapeHtml(this._capExpWebsiteUrl(r.manufacturer, r.model))}" target="_blank" rel="noopener noreferrer">View on website \u2197</a>
             </div>
             ${this._capExpTrustPanelHtml(r.rating, r.firmwareCount, null, r.totalScans, r.lastSeen)}
+            ${this._capExpExternalReferencesHtml(r.references, r.manufacturer)}
             ${this._capExpGoodForHtml(r.goodFor, "this record's")}
             <div class="capexp-techtoggle" data-capexp-toggle="${escapeHtml(key)}">
               ${expanded ? "Hide capabilities" : "View capabilities"}

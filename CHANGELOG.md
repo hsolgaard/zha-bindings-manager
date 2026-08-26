@@ -3,6 +3,111 @@
 All notable changes to ZHA Bindings Manager are documented here.
 
 
+## [0.35.0]
+
+### Added
+
+- **Plain-English device overview and Input/Output role badges in the
+  Capability Explorer tab**, ported from the public zigbee-capabilities
+  website. Each matched device (Explore My Devices) and search result
+  (Find a Device) now shows a short overview answering, in everyday
+  language, what the device can be commanded to do, what it senses or
+  reports, and — the question a real support case spent over an hour on —
+  whether it can directly control another Zigbee device over a bind
+  without Home Assistant in the loop. A device that's commandable on a
+  switch/dimmer/color/scene-type cluster but has no declared way to
+  control another device gets an explicit "Cannot ___ directly" statement
+  instead of silence, since an omitted sentence reads as "unknown," not
+  "confirmed no." Each capability group in the expanded "Technical
+  evidence" / "View capabilities" panel also now carries an Input/Output/
+  Both badge (with a visible legend above the list), making explicit that
+  a device's own existing bindings using a cluster do not by themselves
+  prove it can control another device with that cluster — only a declared
+  output (client-role) capability does.
+- The deeper "what does Input/Output mean for this specific cluster"
+  reference stays on the public website rather than being duplicated here
+  — the overview's definition callout and the capability panel link out
+  to https://hsolgaard.github.io/zigbee-capabilities/clusters.html.
+
+## [0.34.4]
+
+### Changed
+
+- **Reverted the Advanced tab's Cluster dropdown to declared "out" clusters
+  only** (0.34.2 and 0.34.3 are superseded). Both of those releases were
+  chasing a misdiagnosis: a Repenic RD-250ZG's On/Off and Level Control
+  never showed up here, and its own binding table did show entries using
+  those clusters, which looked like proof the device could bind on them
+  despite not declaring them as "out." It couldn't — every one of those
+  existing bindings points at the coordinator, not at another device.
+  That's the device reporting its own state outward (an attribute report),
+  a mechanism that rides a binding-table entry without requiring a
+  client-role declaration at all, and is completely separate from issuing
+  a cluster command to control something else. A cluster only declared
+  "in" (server) has no client-side implementation and cannot generate
+  that cluster's commands toward anything, regardless of what binding
+  table entries exist for it — so surfacing it here was never actually
+  useful, just misleading. "Custom cluster ID…" remains available for
+  attempting a non-standard bind anyway.
+
+## [0.34.3]
+
+### Fixed
+
+- **The Advanced tab's Cluster dropdown could hide a cluster the source
+  device genuinely has, or make it vanish mid-workflow.** 0.34.2 widened
+  the list to include clusters already used by an existing binding, but
+  still keyed availability off live binding-table state — so a cluster
+  disappeared the moment its one binding was removed (e.g. while testing
+  whether a device's binding table was full), even though the device
+  obviously still has that cluster. The dropdown now lists every cluster
+  the selected endpoint declares — both "in" and "out" — unconditionally,
+  plus anything already bound that isn't declared at all. Declared-"in"-
+  only clusters get a note ("may not support commands") since they're
+  less likely to actually generate outbound traffic, but they're never
+  hidden — the goal is to show what the device has, not to guess in
+  advance what will work.
+
+## [0.34.2]
+
+### Fixed
+
+- **The Advanced tab's Cluster dropdown could still hide clusters a device
+  genuinely binds on, even after 0.34.1's cache fix.** Confirmed against a
+  real device (Repenic RD-250ZG) whose "Existing bindings on this source
+  endpoint" panel showed working bindings on On/Off and Level Control, yet
+  the dropdown still only offered the zha-toolkit default and OTA — because
+  the device's own reported simple descriptor doesn't declare those
+  clusters as "out", even though it plainly works as a bind source for
+  them (zha_toolkit's bind_ieee, like most ZDO Bind_req implementations,
+  doesn't require that declaration to write a binding table entry). The
+  dropdown now also includes any cluster already used by an existing
+  binding sourced from the selected endpoint, even when it's missing from
+  the declared-"out" list, labeled "— already bound here" so it's clear
+  why it's showing up.
+
+## [0.34.1]
+
+### Fixed
+
+- **A device's cluster list could go stale for the rest of the session and
+  never recover.** `_ensureClusters()` fetched a device's clusters from ZHA
+  once and cached them forever per card instance — if that first read
+  happened before ZHA had fully finished interviewing the device (or
+  otherwise came back incomplete), every later scan kept serving that same
+  incomplete snapshot, no matter how many times you rescanned. This showed
+  up two ways: the Advanced tab's Cluster dropdown could be missing
+  clusters the device demonstrably has (e.g. On/Off, Level Control), and
+  the Exploded view could come up with "No endpoint data came back for
+  this device" for a device that had already been scanned successfully
+  before. Every single-device scan entry point — the Advanced tab's "Scan
+  this device", the Devices table's per-row scan button, Binding Health's
+  "Rescan now", and opening the Exploded view — now forces a fresh cluster
+  fetch alongside the binding rescan, instead of trusting whatever was
+  cached first. The network-wide "Scan all" button is unchanged and still
+  only refreshes bindings, to avoid multiplying API calls across every
+  device on every full scan.
+
 ## [0.34.0]
 
 ### Added

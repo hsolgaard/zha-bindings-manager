@@ -58,6 +58,9 @@ import {
   discoveryForDevice,
   useCaseTags,
   confidenceStars,
+  deviceOverview,
+  CAPABILITY_ROLE_LABEL,
+  CAPABILITY_ROLE_EXPLANATION,
 } from "./capexplorer.js";
 
 // The generic-item keys stored through StorageProvider.getItem/setItem —
@@ -88,6 +91,11 @@ const SYNCED_ITEM_KEYS = [
 // there. See docs/app.js for the byte-for-byte equivalent logic.
 const GENERIC_TUYA_LABEL = "Generic Tuya";
 const TUYA_MANUFACTURER_PATTERN = /^_T[A-Z0-9]+_/i;
+// Per Hans's instruction, the per-cluster glossary explaining what each
+// Zigbee cluster does (and what Input/Output specifically means for it)
+// lives only on the public website, not duplicated inside this card — this
+// links out to it rather than rebuilding the same reference here.
+const CAPEXP_CLUSTERS_URL = "https://hsolgaard.github.io/zigbee-capabilities/clusters.html";
 function isGenericTuyaManufacturer(m) {
   return TUYA_MANUFACTURER_PATTERN.test(String(m || ""));
 }
@@ -916,11 +924,30 @@ export class ZhaBindingMapCard extends HTMLElement {
     }
   }
 
-  async _ensureClusters(ieee) {
-    if (this._clusterCache.has(ieee)) return this._clusterCache.get(ieee);
+  /** `force: true` bypasses the cache and refetches from ZHA even if this
+   *  ieee was already fetched earlier in the card's lifetime — see
+   *  _rescanDeviceFull() for why that matters: without it, a device whose
+   *  cluster list was first read incompletely (e.g. before ZHA finished
+   *  interviewing it) would keep serving that same stale snapshot for the
+   *  rest of the session, no matter how many times bindings got rescanned. */
+  async _ensureClusters(ieee, { force = false } = {}) {
+    if (!force && this._clusterCache.has(ieee)) return this._clusterCache.get(ieee);
     const clusters = await this._api.fetchClusters(ieee);
     this._clusterCache.set(ieee, clusters);
     return clusters;
+  }
+
+  /** The one "scan/rescan this device" action used by every single-device
+   *  entry point in the UI (Exploded view, Advanced tab's "Scan this
+   *  device", the Devices table's per-row scan button, Binding Health's
+   *  "Rescan now"): refreshes BOTH the binding table and the cluster list,
+   *  forcing the cluster refetch since _ensureClusters() alone would keep
+   *  serving a cached — possibly stale or incomplete — snapshot otherwise.
+   *  Deliberately not used by the network-wide "Scan all" button, which
+   *  only needs fresh bindings and would multiply API calls considerably
+   *  if it force-refreshed clusters for every device on every run. */
+  async _rescanDeviceFull(ieee, opts = {}) {
+    await Promise.all([this._ensureClusters(ieee, { force: true }), this._scanBindings([ieee], opts)]);
   }
 
   /** Devices worth rescanning after a bind/unbind attempt — source always,
@@ -2557,7 +2584,7 @@ export class ZhaBindingMapCard extends HTMLElement {
     )}…</p>`;
     this._q("#dialog").classList.add("open");
     try {
-      await Promise.all([this._ensureClusters(d.ieee), this._scanBindings([d.ieee], { tries: this._retryCount })]);
+      await this._rescanDeviceFull(d.ieee, { tries: this._retryCount });
     } catch (err) {
       console.warn("[ZHA Bindings Manager] exploded view scan failed", err);
     }
@@ -3724,7 +3751,7 @@ export class ZhaBindingMapCard extends HTMLElement {
       rescanBtn.addEventListener("click", async () => {
         rescanBtn.disabled = true;
         rescanBtn.textContent = "Scanning…";
-        await this._scanBindings([rescanBtn.dataset.ieee], { tries: this._retryCount });
+        await this._rescanDeviceFull(rescanBtn.dataset.ieee, { tries: this._retryCount });
         this._closeDialog();
       });
     }
@@ -3948,7 +3975,7 @@ export class ZhaBindingMapCard extends HTMLElement {
         btn.disabled = true;
         const original = btn.textContent;
         btn.textContent = "Scanning…";
-        this._scanBindings([btn.dataset.ieee], { tries: this._retryCount }).finally(() => {
+        this._rescanDeviceFull(btn.dataset.ieee, { tries: this._retryCount }).finally(() => {
           // _renderDevicesTab() (called at the end of _scanBindings) will
           // have already replaced this button — nothing to reset if so.
           if (btn.isConnected) {
@@ -4628,6 +4655,75 @@ export class ZhaBindingMapCard extends HTMLElement {
     return `https://hsolgaard.github.io/zigbee-capabilities/?${params.toString()}`;
   }
 
+  // Plain-language pill for the device-overview paragraph — mirrors
+  // docs/app.js's overviewControlBadgeHtml in the zigbee-capabilities
+  // website byte-for-byte (same wording, same badge-output/badge-input
+  // color idiom, just the capexp- prefixed classes this card already uses
+  // for everything else in this tab). Leads with everyday wording rather
+  // than assuming a reader already knows the ZCL terms "Input"/"Output",
+  // but doesn't hide those terms either — the plain phrase is paired with
+  // the matching term in parentheses, and the hover tooltip spells out
+  // what the term actually means, so a reader picks up the vocabulary
+  // through repetition rather than needing it front-loaded.
+  _capExpOverviewControlBadgeHtml(canControl) {
+    return canControl
+      ? `<span class="capexp-badge capexp-badge-output" title="This card calls this an Output capability: based on this device's declared Zigbee capabilities, it can send this command directly to another device.">Can control other devices (Output)</span>`
+      : `<span class="capexp-badge capexp-badge-input" title="This card calls this Input only: this device can only receive this command — it has no declared way to send it to another device.">Can't control other devices (Input only)</span>`;
+  }
+
+  // Visible (non-hover) definition of Output/Input, shown directly under
+  // the overview paragraph whenever it actually used one of those terms —
+  // a hover tooltip alone is invisible until you happen to hover, and
+  // doesn't exist on a touchscreen at all. Per Hans's instruction, the
+  // deeper per-cluster explainer stays on the public website rather than
+  // being duplicated in the card, so this links out to it instead of
+  // building a local glossary page.
+  _capExpOverviewRoleHintHtml(sentences) {
+    if (!sentences.some((s) => s.kind === "control" || s.kind === "not-control")) return "";
+    return `<div class="hint">
+      <strong>Output</strong> means this device can send that command directly to another device over a Zigbee
+      bind — a genuine controller for it, working without Home Assistant. <strong>Input only</strong> means this
+      device can only receive the command itself; it has no way to send it onward to control something else.
+      <a href="${CAPEXP_CLUSTERS_URL}" target="_blank" rel="noopener noreferrer">What does this mean for each specific cluster? ↗</a>
+    </div>`;
+  }
+
+  // The "quick overview" a reader wants at a glance — 2-3 plain sentences
+  // covering what the device can be commanded to do, what it senses/
+  // reports, and (the most decision-relevant fact) whether it can directly
+  // control another device over a bind. See deviceOverview's own doc
+  // comment in capexplorer.js for why this is template-composed from
+  // confirmed evidence rather than generated live by an LLM. Mirrors
+  // docs/app.js's deviceOverviewHtml in the zigbee-capabilities website.
+  _capExpDeviceOverviewHtml(entries) {
+    const sentences = deviceOverview(entries);
+    if (!sentences.length) return "";
+    const text = sentences
+      .map((s) => {
+        if (s.kind === "control") return `${this._capExpOverviewControlBadgeHtml(true)} ${escapeHtml(s.text)}`;
+        if (s.kind === "not-control") return `${this._capExpOverviewControlBadgeHtml(false)} ${escapeHtml(s.text)}`;
+        return escapeHtml(s.text);
+      })
+      .join(" ");
+    return `<div class="capexp-device-overview">${text}</div>${this._capExpOverviewRoleHintHtml(sentences)}`;
+  }
+
+  // Per-cluster Input/Output/Both badge for the capability groups panel —
+  // mirrors docs/app.js's roleBadgeHtml in the zigbee-capabilities website.
+  // This is the exact distinction a real support case spent over an hour
+  // chasing before landing here: a device having existing bindings that
+  // use a cluster does NOT mean it can control another device with that
+  // cluster — an Input-only device can be commanded and can report its
+  // own state over a binding, but has no way to issue that cluster's
+  // commands outward.
+  _capExpRoleBadgeHtml(role) {
+    const label = CAPABILITY_ROLE_LABEL[role] || CAPABILITY_ROLE_LABEL.unknown;
+    const explanation = CAPABILITY_ROLE_EXPLANATION[role] || CAPABILITY_ROLE_EXPLANATION.unknown;
+    return `<span class="capexp-badge capexp-badge-${escapeHtml(role)}" title="${escapeHtml(explanation)}">${escapeHtml(
+      label
+    )}</span>`;
+  }
+
   // Device photo for a Capability Explorer card — same zigbee2mqtt.io URL
   // derivation and AMBIGUOUS_TUYA_MODELS exclusion as the Exploded view's
   // own _deviceImageUrl (this just calls it), and the same "show device
@@ -4646,6 +4742,24 @@ export class ZhaBindingMapCard extends HTMLElement {
        <div class="capexp-device-photo-fallback" style="display:none" aria-hidden="true"></div>`;
   }
 
+  // Shared once above the first capability group, not repeated per group —
+  // the badges themselves are self-explanatory once you know the rule
+  // once. Mirrors docs/app.js's CAPABILITY_ROLE_LEGEND in the
+  // zigbee-capabilities website. This is the exact distinction a real
+  // support case spent over an hour chasing before landing here: a device
+  // having existing bindings that use a cluster does NOT mean it can
+  // control another device with that cluster — an Input-only device can
+  // be commanded and can report its own state over a binding, but has no
+  // way to issue that cluster's commands outward.
+  _capExpRoleLegendHtml() {
+    return `<div class="hint">
+      <strong>Input</strong> = this device can be commanded with that cluster (by Home Assistant, or by another
+      device bound to it). <strong>Output</strong> = this device can itself control another device using that
+      cluster, via a direct Zigbee bind. Most switches and dimmers — even ones with a physical button — are
+      Input only: the button operates the device's own load, it doesn't send Zigbee commands to anything else.
+    </div>`;
+  }
+
   // Shared by Explore My Devices and Find a Device — the "Capabilities"
   // section (cluster/command groups) rendered inside each mode's
   // "Technical evidence" / "View capabilities" disclosure.
@@ -4657,14 +4771,20 @@ export class ZhaBindingMapCard extends HTMLElement {
     // (raw "Cluster 0xNNNN" fallback) — giving each of those its own bold
     // heading with nothing under it reads as broken, not informative.
     // They're combined into one honest summary line instead, rather than
-    // hidden outright (see groupCapabilitiesByOutcome).
-    const shown = capGroups.filter((g) => g.identified || !g.reportsOnly);
-    const unidentifiedEmpty = capGroups.filter((g) => !g.identified && g.reportsOnly);
+    // hidden outright (see groupCapabilitiesByOutcome). An unscanned
+    // output-only cluster is exempt from that merge even when
+    // unidentified — "this device might control something over an
+    // undocumented cluster" is worth its own line, not folded into a
+    // "reports on N clusters" summary that would be describing the wrong
+    // thing entirely.
+    const shown = capGroups.filter((g) => g.identified || !g.reportsOnly || g.unscanned);
+    const unidentifiedEmpty = capGroups.filter((g) => !g.identified && g.reportsOnly && !g.unscanned);
     const groupsHtml = shown
       .map(
         (g) => `
         <div class="capexp-cap-group">
           <span class="capexp-cap-group-label">${escapeHtml(g.label)}</span>
+          ${this._capExpRoleBadgeHtml(g.role)}
           ${
             g.items.length
               ? `<div class="capexp-cap-tags">${g.items
@@ -4677,6 +4797,8 @@ export class ZhaBindingMapCard extends HTMLElement {
                       }</span>`
                   )
                   .join("")}</div>`
+              : g.unscanned
+              ? `<div class="capexp-cap-reportsonly hint">Declared as an output cluster — this device can potentially control another device with it, but this project's scans don't discover specific output-side commands.</div>`
               : `<div class="capexp-cap-reportsonly hint">Reports data on this cluster — no commands to send.</div>`
           }
         </div>`
@@ -4694,7 +4816,7 @@ export class ZhaBindingMapCard extends HTMLElement {
          </div>`
       : "";
     return `<div class="capexp-cap-label">Capabilities</div>
-      <div class="capexp-cap-groups">${groupsHtml}${unidentifiedHtml}</div>`;
+      <div class="capexp-cap-groups">${this._capExpRoleLegendHtml()}${groupsHtml}${unidentifiedHtml}</div>`;
   }
 
   _capExpFwGapSummary(diff) {
@@ -4826,6 +4948,7 @@ export class ZhaBindingMapCard extends HTMLElement {
                     ${this._capExpTrustPanelHtml(rating, fw.length, fwLabel, totalScans, lastSeen)}
                   </div>
                 </div>
+                ${this._capExpDeviceOverviewHtml(m.entries)}
                 ${this._capExpExternalReferencesHtml(references, m.device.manufacturer)}
                 ${
                   discoveryNote
@@ -5204,6 +5327,7 @@ export class ZhaBindingMapCard extends HTMLElement {
                 ${this._capExpTrustPanelHtml(r.rating, r.firmwareCount, null, r.totalScans, r.lastSeen)}
               </div>
             </div>
+            ${this._capExpDeviceOverviewHtml(r.entries)}
             ${this._capExpExternalReferencesHtml(r.references, r.manufacturer)}
             ${this._capExpGoodForHtml(r.goodFor, "this record's")}
             <div class="capexp-techtoggle" data-capexp-toggle="${escapeHtml(key)}">
@@ -5666,12 +5790,32 @@ export class ZhaBindingMapCard extends HTMLElement {
     this._advRenderTargetBindings();
   }
 
-  /** Cluster dropdown = the selected source endpoint's OUTPUT clusters (the
-   *  only clusters a bind can normally reference), plus a "Custom cluster
-   *  ID…" escape hatch for edge cases like an IKEA controller's
-   *  genBasic/0x0000 group-binding trick, which zha_toolkit's bind_group
-   *  will happily attempt even though it's not a normal output cluster —
-   *  see _advUpdateCustomClusterState(). */
+  /** Cluster dropdown = the selected source endpoint's declared OUTPUT
+   *  (client) clusters — the ones this endpoint can actually generate a
+   *  cluster command on, per the Zigbee Cluster Library's client/server
+   *  split — plus a "Custom cluster ID…" escape hatch for genuine edge
+   *  cases (e.g. an IKEA controller's genBasic/0x0000 group-binding trick,
+   *  which zha_toolkit's bind_group will happily attempt anyway).
+   *
+   *  v0.34.1 through v0.34.3 chased this in the wrong direction. The
+   *  trigger was a Repenic RD-250ZG whose On/Off and Level Control never
+   *  showed up here, and whose own binding table *did* show entries using
+   *  both clusters — which looked like proof the "out"-only filter was
+   *  wrong. It wasn't: every one of those existing bindings points at the
+   *  coordinator, not at any other device. That's this device reporting
+   *  its own state outward (an attribute report), a mechanism completely
+   *  separate from issuing a cluster command, and one that a binding-table
+   *  entry supports without requiring a client-role declaration at all.
+   *  Having *a* binding on a cluster is therefore not evidence a device
+   *  can control another device with it, and the 0.34.2/0.34.3 attempts to
+   *  surface such clusters anyway just relabeled the same wrong conclusion
+   *  as a feature. If a cluster genuinely isn't declared "out" here, the
+   *  honest reading is that this device's firmware has no client-side
+   *  implementation for it and cannot issue that cluster's commands to
+   *  anything, no matter what binding table entry exists — Custom cluster
+   *  ID remains for attempting one anyway on a hunch, not as a hidden
+   *  "real" list this dropdown was previously failing to show.
+   *  See _advUpdateCustomClusterState(). */
   _advPopulateClusterOptions() {
     const clusterSel = this._q("#adv-cluster");
     const ieee = this._q("#adv-source").value;
@@ -5720,7 +5864,8 @@ export class ZhaBindingMapCard extends HTMLElement {
         btn.addEventListener("click", async () => {
           btn.disabled = true;
           btn.textContent = "Scanning…";
-          await this._scanBindings([ieee], { tries: this._retryCount });
+          await this._rescanDeviceFull(ieee, { tries: this._retryCount });
+          this._advPopulateClusterOptions();
           this._advRenderSourceBindings();
         });
       }

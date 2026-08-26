@@ -21,7 +21,7 @@
  * zha_toolkit MUST be installed (via HACS) and working for bind/unbind/scan
  * to function. See README.md for details.
  *
- * Version: 0.34.2
+ * Version: 0.34.3
  */
 (() => {
   // src/capexplorer-constants.js
@@ -78,7 +78,7 @@
 
   // src/constants.js
   var ZTK_DOMAIN = "zha_toolkit";
-  var CARD_VERSION = "0.34.2";
+  var CARD_VERSION = "0.34.3";
   var DEFAULT_BINDABLE_OUT_CLUSTERS = [5, 6, 8, 258, 768];
   var MEMBERSHIP_EDGE_COLOR = "#8e24aa";
   var HISTORY_LIMIT = 10;
@@ -492,17 +492,6 @@
     } catch (e) {
     }
     return String(err);
-  }
-  function uniqueClusters(clusters) {
-    const seen = /* @__PURE__ */ new Set();
-    const out = [];
-    clusters.forEach((c) => {
-      if (!seen.has(c.id)) {
-        seen.add(c.id);
-        out.push(c);
-      }
-    });
-    return out;
   }
   function escapeHtml(str) {
     return String(str).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
@@ -6691,40 +6680,50 @@
       sel.innerHTML = failed ? `<option value="">(failed to load)</option>` : endpoints.length ? endpoints.map((ep) => `<option value="${ep}">${ep}</option>`).join("") : `<option value="">(none found)</option>`;
       this._advRenderTargetBindings();
     }
-    /** Cluster dropdown = the selected source endpoint's declared OUTPUT
-     *  clusters, PLUS any cluster already used by a real, working binding
-     *  sourced from this exact endpoint even if it isn't declared as "out" —
-     *  plus a "Custom cluster ID…" escape hatch for edge cases like an IKEA
-     *  controller's genBasic/0x0000 group-binding trick.
+    /** Cluster dropdown = EVERY cluster the selected source endpoint declares
+     *  (both "in" and "out"), plus any cluster already used by a real binding
+     *  sourced from this endpoint even if it isn't declared at all, plus a
+     *  "Custom cluster ID…" escape hatch for the rare case where neither
+     *  applies (e.g. an IKEA controller's genBasic/0x0000 group-binding trick).
      *
-     *  The second part exists because zha_toolkit's bind_ieee, like most ZDO
-     *  Bind_req implementations, doesn't require the source to have declared
-     *  a cluster as "out" before writing a binding table entry for it — it
-     *  only needs the coordinator to reach the device. Some real devices
-     *  (confirmed against a Repenic RD-250ZG: v0.34.1 still hid On/Off and
-     *  Level Control here even after forcing a fresh cluster fetch) simply
-     *  don't declare certain clusters as "out" in their reported simple
-     *  descriptor even though they demonstrably work as a bind source for
-     *  them — the "Existing bindings on this source endpoint" panel already
-     *  proves that with real, scanned binding-table data. A cluster proven
-     *  bindable that way belongs in the list even when the declared-clusters
-     *  filter alone would hide it. See _advUpdateCustomClusterState(). */
+     *  Used to filter to "out" only, on the theory that only a declared
+     *  client cluster can be a bind source. That's the spec-book answer, but
+     *  it doesn't hold on real hardware: zha_toolkit's bind_ieee, like most
+     *  ZDO Bind_req implementations, doesn't require the source to have
+     *  declared a cluster as "out" before writing a binding table entry for
+     *  it — it only needs the coordinator to reach the device. Confirmed
+     *  against a Repenic RD-250ZG, which has working bindings on On/Off and
+     *  Level Control despite never declaring either as "out" — the "out"-only
+     *  filter hid both, and a later attempt to key the list off "is there
+     *  currently a binding for this cluster" instead was worse: the option
+     *  disappeared the instant that exact binding was removed to test
+     *  something, even though the device obviously still has the cluster.
+     *  The only thing users actually need is "what clusters does this
+     *  endpoint have" — so that's what this lists now, unconditionally;
+     *  declared-"in"-only clusters get a note since they're less likely to
+     *  actually generate outbound commands, but they're never hidden.
+     *  See _advUpdateCustomClusterState(). */
     _advPopulateClusterOptions() {
       const clusterSel = this._q("#adv-cluster");
       const ieee = this._q("#adv-source").value;
       const ep = Number(this._q("#adv-src-ep").value);
       if (!clusterSel) return;
       const clusters = this._clusterCache.get(ieee) || [];
-      const outClusters = uniqueClusters(clusters.filter((c) => c.type === "out" && c.endpoint_id === ep));
-      const outIds = new Set(outClusters.map((c) => c.id));
-      const provenIds = [
-        ...new Set(
-          (this._bindings.get(normIeee(ieee)) || []).filter((b) => Number(b.sourceEndpoint) === ep && !outIds.has(b.clusterId)).map((b) => b.clusterId)
-        )
-      ];
-      const opts = [`<option value="">\u2014 zha-toolkit default \u2014</option>`].concat(outClusters.map((c) => `<option value="${c.id}">${escapeHtml(clusterName(c.id))} (${hex4(c.id)})</option>`)).concat(
-        provenIds.map(
-          (id) => `<option value="${id}">${escapeHtml(clusterName(id))} (${hex4(id)}) \u2014 already bound here</option>`
+      const epClusters = clusters.filter((c) => c.endpoint_id === ep);
+      const outIds = new Set(epClusters.filter((c) => c.type === "out").map((c) => c.id));
+      const inIds = new Set(epClusters.filter((c) => c.type === "in").map((c) => c.id));
+      const boundIds = new Set(
+        (this._bindings.get(normIeee(ieee)) || []).filter((b) => Number(b.sourceEndpoint) === ep).map((b) => b.clusterId)
+      );
+      const allIds = [.../* @__PURE__ */ new Set([...outIds, ...inIds, ...boundIds])].sort((a, b) => a - b);
+      const noteFor = (id) => {
+        if (outIds.has(id)) return "";
+        if (inIds.has(id)) return " \u2014 input/reporting cluster, may not support commands";
+        return " \u2014 already bound here";
+      };
+      const opts = [`<option value="">\u2014 zha-toolkit default \u2014</option>`].concat(
+        allIds.map(
+          (id) => `<option value="${id}">${escapeHtml(clusterName(id))} (${hex4(id)})${noteFor(id)}</option>`
         )
       ).concat([`<option value="__custom__">Custom cluster ID\u2026</option>`]);
       clusterSel.innerHTML = opts.join("");

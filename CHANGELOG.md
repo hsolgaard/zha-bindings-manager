@@ -3,6 +3,24 @@
 All notable changes to ZHA Bindings Manager are documented here.
 
 
+## [0.34.3]
+
+### Fixed
+
+- **The Advanced tab's Cluster dropdown could hide a cluster the source
+  device genuinely has, or make it vanish mid-workflow.** 0.34.2 widened
+  the list to include clusters already used by an existing binding, but
+  still keyed availability off live binding-table state — so a cluster
+  disappeared the moment its one binding was removed (e.g. while testing
+  whether a device's binding table was full), even though the device
+  obviously still has that cluster. The dropdown now lists every cluster
+  the selected endpoint declares — both "in" and "out" — unconditionally,
+  plus anything already bound that isn't declared at all. Declared-"in"-
+  only clusters get a note ("may not support commands") since they're
+  less likely to actually generate outbound traffic, but they're never
+  hidden — the goal is to show what the device has, not to guess in
+  advance what will work.
+
 ## [0.34.2]
 
 ### Fixed

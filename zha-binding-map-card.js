@@ -21,7 +21,7 @@
  * zha_toolkit MUST be installed (via HACS) and working for bind/unbind/scan
  * to function. See README.md for details.
  *
- * Version: 0.34.4
+ * Version: 0.35.0
  */
 (() => {
   // src/capexplorer-constants.js
@@ -78,7 +78,7 @@
 
   // src/constants.js
   var ZTK_DOMAIN = "zha_toolkit";
-  var CARD_VERSION = "0.34.4";
+  var CARD_VERSION = "0.35.0";
   var DEFAULT_BINDABLE_OUT_CLUSTERS = [5, 6, 8, 258, 768];
   var MEMBERSHIP_EDGE_COLOR = "#8e24aa";
   var HISTORY_LIMIT = 10;
@@ -1547,6 +1547,12 @@
 .capexp-cap-tags { display:flex; flex-wrap:wrap; gap:5px; margin-top:3px; }
 .capexp-cap-reportsonly { margin-top:2px; }
 .capexp-cap-group-unidentified .capexp-cap-group-label { font-weight:500; font-style:italic; }
+.capexp-device-overview { margin:6px 0 4px; font-size:0.88em; line-height:1.5; }
+.capexp-badge { display:inline-block; font-size:0.72em; padding:2px 8px; border-radius:10px; cursor:help; }
+.capexp-badge-input { background: rgba(158,158,158,0.18); color: var(--secondary-text-color); }
+.capexp-badge-output { background: rgba(76,175,80,0.16); color: #2e7d32; }
+.capexp-badge-both { background: rgba(142,36,170,0.13); color: #6a1b78; }
+.capexp-badge-unknown { background: rgba(158,158,158,0.18); color: var(--secondary-text-color); font-style: italic; }
 .capexp-tag { display:inline-block; font-size:0.78em; padding:3px 9px; border-radius:10px;
   background: rgba(76,154,255,0.15); color: #2f6fce; }
 .capexp-tag-conflict { background: rgba(219,68,55,0.15); color: var(--error-color, #db4437); }
@@ -1826,13 +1832,21 @@
     const manufacturer = (entries[0] || {}).manufacturer;
     const groups = /* @__PURE__ */ new Map();
     entries.forEach((entry) => {
+      const inSet = new Set(entry.in_clusters || []);
+      const outSet = new Set(entry.out_clusters || []);
       Object.entries(entry.clusters || {}).forEach(([clusterId, cluster]) => {
         if (!groups.has(clusterId)) {
-          groups.set(clusterId, { clusterName: cluster.name || clusterId, items: /* @__PURE__ */ new Set() });
+          groups.set(clusterId, { clusterName: cluster.name || clusterId, items: /* @__PURE__ */ new Set(), isInput: false, isOutput: false });
         }
         const g = groups.get(clusterId);
         if (cluster.name) g.clusterName = cluster.name;
+        if (inSet.has(clusterId)) g.isInput = true;
+        if (outSet.has(clusterId)) g.isOutput = true;
         (cluster.commands_received || []).filter((r) => r.present === true).forEach((r) => g.items.add(r.name));
+      });
+      outSet.forEach((clusterId) => {
+        if (groups.has(clusterId)) return;
+        groups.set(clusterId, { clusterName: null, items: /* @__PURE__ */ new Set(), isInput: false, isOutput: true, unscanned: true });
       });
     });
     return [...groups.entries()].map(([clusterId, g]) => {
@@ -1842,6 +1856,12 @@
         clusterId,
         label,
         reportsOnly: items.length === 0,
+        // Whether this device declares this cluster as Input (commandable/
+        // reporting), Output (can control another device with it), both,
+        // or — for older community entries that predate this tracking —
+        // unknown. See CAPABILITY_ROLE_EXPLANATION for what each means.
+        role: g.isInput && g.isOutput ? "both" : g.isOutput ? "output" : g.isInput ? "input" : "unknown",
+        unscanned: !!g.unscanned,
         // Whether this label actually tells a user anything, or is just
         // the generic "Cluster 0xNNNN" fallback (no plain-English phrase
         // mapped, and no real cluster name was ever resolved either).
@@ -1856,25 +1876,56 @@
       };
     }).sort((a, b) => a.label.localeCompare(b.label));
   }
+  var CAPABILITY_ROLE_LABEL = {
+    input: "Input",
+    output: "Output",
+    both: "Input & Output",
+    unknown: "Role unknown"
+  };
+  var CAPABILITY_ROLE_EXPLANATION = {
+    input: "This device can be commanded with this cluster \u2014 by Home Assistant, or by another device bound to it. It cannot use this cluster to control anything else.",
+    output: "This device can control another device using this cluster, via a direct Zigbee bind \u2014 this is what lets one device operate another without Home Assistant in between.",
+    both: "This device can both be commanded with this cluster and use it to control another device \u2014 a controller role on top of being controllable.",
+    unknown: "This submission predates input/output tracking, so this cluster's role isn't recorded."
+  };
   var USE_CASE_RULES = [
-    { id: "switch-onoff", clusterId: "0x0006", kind: "command", label: "Switch things on/off" },
-    { id: "dimmer", clusterId: "0x0008", kind: "command", label: "Dim brightness / adjust level" },
-    { id: "color", clusterId: "0x0300", kind: "command", label: "Color control" },
-    { id: "lock", clusterId: "0x0101", kind: "command", label: "Lock / unlock" },
-    { id: "cover", clusterId: "0x0102", kind: "command", label: "Open / close covers" },
-    { id: "thermostat", clusterId: "0x0201", kind: "command", label: "Control heating / cooling" },
-    { id: "scenes", clusterId: "0x0005", kind: "command", label: "Scene control" },
-    { id: "temperature", clusterId: "0x0402", kind: "presence", label: "Temperature sensing" },
-    { id: "humidity", clusterId: "0x0405", kind: "presence", label: "Monitor humidity" },
-    { id: "occupancy", clusterId: "0x0406", kind: "presence", label: "Detect motion / occupancy" },
-    { id: "illuminance", clusterId: "0x0400", kind: "presence", label: "Monitor light level" },
-    { id: "pressure", clusterId: "0x0403", kind: "presence", label: "Monitor air pressure" },
-    { id: "flow", clusterId: "0x0404", kind: "presence", label: "Monitor water / air flow" },
-    { id: "metering", clusterId: "0x0702", kind: "presence", label: "Energy monitoring" },
-    { id: "electrical", clusterId: "0x0b04", kind: "presence", label: "Track power draw" },
-    { id: "ias-zone", clusterId: "0x0500", kind: "presence", label: "Raise security / contact alerts" }
+    { id: "switch-onoff", clusterId: "0x0006", kind: "command", label: "Switch things on/off", attribute: "on/off state" },
+    { id: "dimmer", clusterId: "0x0008", kind: "command", label: "Dim brightness / adjust level", attribute: "brightness" },
+    { id: "color", clusterId: "0x0300", kind: "command", label: "Color control", attribute: "color" },
+    { id: "lock", clusterId: "0x0101", kind: "command", label: "Lock / unlock", attribute: "lock state" },
+    { id: "cover", clusterId: "0x0102", kind: "command", label: "Open / close covers", attribute: "open/close position" },
+    { id: "thermostat", clusterId: "0x0201", kind: "command", label: "Control heating / cooling", attribute: "heating/cooling setpoint" },
+    { id: "scenes", clusterId: "0x0005", kind: "command", label: "Scene control", attribute: "scene recall" },
+    { id: "temperature", clusterId: "0x0402", kind: "presence", label: "Temperature sensing", fragment: "sense temperature" },
+    { id: "humidity", clusterId: "0x0405", kind: "presence", label: "Monitor humidity", fragment: "sense humidity" },
+    { id: "occupancy", clusterId: "0x0406", kind: "presence", label: "Detect motion / occupancy", fragment: "detect motion or occupancy" },
+    { id: "illuminance", clusterId: "0x0400", kind: "presence", label: "Monitor light level", fragment: "sense ambient light level" },
+    { id: "pressure", clusterId: "0x0403", kind: "presence", label: "Monitor air pressure", fragment: "sense air pressure" },
+    { id: "flow", clusterId: "0x0404", kind: "presence", label: "Monitor water / air flow", fragment: "sense water or air flow" },
+    { id: "metering", clusterId: "0x0702", kind: "presence", label: "Energy monitoring", fragment: "monitor energy use" },
+    { id: "electrical", clusterId: "0x0b04", kind: "presence", label: "Track power draw", fragment: "track power draw" },
+    { id: "ias-zone", clusterId: "0x0500", kind: "presence", label: "Raise security / contact alerts", fragment: "raise security or contact alerts" }
   ];
+  var USE_CASE_RULE_BY_ID = Object.fromEntries(USE_CASE_RULES.map((r) => [r.id, r]));
   var CONTROLLER_CLUSTER_IDS = ["0x0006", "0x0008", "0x0300", "0x0005"];
+  var CONTROL_PHRASES_BY_CLUSTER = {
+    "0x0006": "switch another device on or off",
+    "0x0008": "dim another device",
+    "0x0300": "change another device's color",
+    "0x0005": "trigger scenes on another device"
+  };
+  function controlUseCases(entries) {
+    if (!entries || !entries.length) return [];
+    return groupCapabilitiesByOutcome(entries).filter((g) => (g.role === "output" || g.role === "both") && CONTROL_PHRASES_BY_CLUSTER[g.clusterId]).map((g) => ({ clusterId: g.clusterId, label: g.label, phrase: CONTROL_PHRASES_BY_CLUSTER[g.clusterId] }));
+  }
+  function notControllableUseCases(entries) {
+    if (!entries || !entries.length) return [];
+    const controllableIds = new Set(controlUseCases(entries).map((c) => c.clusterId));
+    const commandableIds = new Set(
+      useCaseTags(entries).filter((t) => USE_CASE_RULE_BY_ID[t.id] && CONTROLLER_CLUSTER_IDS.includes(USE_CASE_RULE_BY_ID[t.id].clusterId)).map((t) => USE_CASE_RULE_BY_ID[t.id].clusterId)
+    );
+    return [...commandableIds].filter((clusterId) => !controllableIds.has(clusterId)).map((clusterId) => ({ clusterId, phrase: CONTROL_PHRASES_BY_CLUSTER[clusterId] }));
+  }
   function useCaseTags(entries, localFirmware = null) {
     if (!entries || !entries.length) return [];
     const tags = [];
@@ -1893,23 +1944,63 @@
         });
       }
     });
-    let controllerFirmwares = /* @__PURE__ */ new Set();
-    let everConfirmedAsInput = false;
-    entries.forEach((entry) => {
-      CONTROLLER_CLUSTER_IDS.forEach((clusterId) => {
-        if ((entry.out_clusters || []).includes(clusterId)) controllerFirmwares.add(entry.firmware || null);
-        const cluster = (entry.clusters || {})[clusterId];
-        if (cluster && (cluster.commands_received || []).some((r) => r.present === true)) everConfirmedAsInput = true;
+    controlUseCases(entries).forEach((c) => {
+      const confirmingFirmwares = /* @__PURE__ */ new Set();
+      entries.forEach((entry) => {
+        if ((entry.out_clusters || []).includes(c.clusterId)) confirmingFirmwares.add(entry.firmware || null);
+      });
+      tags.push({
+        id: `control-${c.clusterId}`,
+        label: `Directly ${c.phrase} (bind)`,
+        exactFirmware: !localFirmware || confirmingFirmwares.has(localFirmware)
       });
     });
-    if (controllerFirmwares.size && !everConfirmedAsInput) {
-      tags.push({
-        id: "controller",
-        label: "Act as a remote / controller",
-        exactFirmware: !localFirmware || controllerFirmwares.has(localFirmware)
+    return tags;
+  }
+  function joinPhrases(list, conj = "and") {
+    if (!list.length) return "";
+    if (list.length === 1) return list[0];
+    if (list.length === 2) return `${list[0]} ${conj} ${list[1]}`;
+    return `${list.slice(0, -1).join(", ")}, ${conj} ${list[list.length - 1]}`;
+  }
+  function directControlSummary(entries) {
+    const control = controlUseCases(entries);
+    if (!control.length) return "";
+    const phrases = joinPhrases(control.map((c) => c.phrase));
+    return `Can likely ${phrases} directly over a Zigbee bind, without Home Assistant in the loop \u2014 based on what this device's Zigbee signature declares it capable of sending, though not a guarantee any specific bind will succeed on every network.`;
+  }
+  function notDirectControlSummary(entries) {
+    const notControl = notControllableUseCases(entries);
+    if (!notControl.length) return "";
+    const phrases = joinPhrases(
+      notControl.map((c) => c.phrase),
+      "or"
+    );
+    return `Cannot ${phrases} directly over a Zigbee bind \u2014 its Zigbee signature only lets it receive ${notControl.length > 1 ? "those commands" : "that command"}, not send ${notControl.length > 1 ? "them" : "it"} to another device.`;
+  }
+  function deviceOverview(entries) {
+    if (!entries || !entries.length) return [];
+    const tags = useCaseTags(entries).filter((t) => USE_CASE_RULE_BY_ID[t.id]);
+    const commandAttrs = tags.filter((t) => USE_CASE_RULE_BY_ID[t.id].kind === "command").map((t) => USE_CASE_RULE_BY_ID[t.id].attribute);
+    const presenceFrags = tags.filter((t) => USE_CASE_RULE_BY_ID[t.id].kind === "presence").map((t) => USE_CASE_RULE_BY_ID[t.id].fragment);
+    const sentences = [];
+    if (commandAttrs.length) {
+      sentences.push({
+        kind: "command",
+        text: `This device's ${joinPhrases(commandAttrs)} can be controlled by Home Assistant, or by another Zigbee device bound directly to it.`
       });
     }
-    return tags;
+    if (presenceFrags.length) {
+      sentences.push({
+        kind: "presence",
+        text: `${commandAttrs.length ? "It can also" : "This device can"} ${joinPhrases(presenceFrags)}.`
+      });
+    }
+    const control = directControlSummary(entries);
+    if (control) sentences.push({ kind: "control", text: control });
+    const notControl = notDirectControlSummary(entries);
+    if (notControl) sentences.push({ kind: "not-control", text: notControl });
+    return sentences;
   }
   function interestingDiscoveries(index, opts = {}) {
     const {
@@ -2077,6 +2168,7 @@
   ];
   var GENERIC_TUYA_LABEL = "Generic Tuya";
   var TUYA_MANUFACTURER_PATTERN = /^_T[A-Z0-9]+_/i;
+  var CAPEXP_CLUSTERS_URL = "https://hsolgaard.github.io/zigbee-capabilities/clusters.html";
   function isGenericTuyaManufacturer(m) {
     return TUYA_MANUFACTURER_PATTERN.test(String(m || ""));
   }
@@ -5916,6 +6008,67 @@
       if (model) params.set("model", model);
       return `https://hsolgaard.github.io/zigbee-capabilities/?${params.toString()}`;
     }
+    // Plain-language pill for the device-overview paragraph — mirrors
+    // docs/app.js's overviewControlBadgeHtml in the zigbee-capabilities
+    // website byte-for-byte (same wording, same badge-output/badge-input
+    // color idiom, just the capexp- prefixed classes this card already uses
+    // for everything else in this tab). Leads with everyday wording rather
+    // than assuming a reader already knows the ZCL terms "Input"/"Output",
+    // but doesn't hide those terms either — the plain phrase is paired with
+    // the matching term in parentheses, and the hover tooltip spells out
+    // what the term actually means, so a reader picks up the vocabulary
+    // through repetition rather than needing it front-loaded.
+    _capExpOverviewControlBadgeHtml(canControl) {
+      return canControl ? `<span class="capexp-badge capexp-badge-output" title="This card calls this an Output capability: based on this device's declared Zigbee capabilities, it can send this command directly to another device.">Can control other devices (Output)</span>` : `<span class="capexp-badge capexp-badge-input" title="This card calls this Input only: this device can only receive this command \u2014 it has no declared way to send it to another device.">Can't control other devices (Input only)</span>`;
+    }
+    // Visible (non-hover) definition of Output/Input, shown directly under
+    // the overview paragraph whenever it actually used one of those terms —
+    // a hover tooltip alone is invisible until you happen to hover, and
+    // doesn't exist on a touchscreen at all. Per Hans's instruction, the
+    // deeper per-cluster explainer stays on the public website rather than
+    // being duplicated in the card, so this links out to it instead of
+    // building a local glossary page.
+    _capExpOverviewRoleHintHtml(sentences) {
+      if (!sentences.some((s) => s.kind === "control" || s.kind === "not-control")) return "";
+      return `<div class="hint">
+      <strong>Output</strong> means this device can send that command directly to another device over a Zigbee
+      bind \u2014 a genuine controller for it, working without Home Assistant. <strong>Input only</strong> means this
+      device can only receive the command itself; it has no way to send it onward to control something else.
+      <a href="${CAPEXP_CLUSTERS_URL}" target="_blank" rel="noopener noreferrer">What does this mean for each specific cluster? \u2197</a>
+    </div>`;
+    }
+    // The "quick overview" a reader wants at a glance — 2-3 plain sentences
+    // covering what the device can be commanded to do, what it senses/
+    // reports, and (the most decision-relevant fact) whether it can directly
+    // control another device over a bind. See deviceOverview's own doc
+    // comment in capexplorer.js for why this is template-composed from
+    // confirmed evidence rather than generated live by an LLM. Mirrors
+    // docs/app.js's deviceOverviewHtml in the zigbee-capabilities website.
+    _capExpDeviceOverviewHtml(entries) {
+      const sentences = deviceOverview(entries);
+      if (!sentences.length) return "";
+      const text = sentences.map((s) => {
+        if (s.kind === "control") return `${this._capExpOverviewControlBadgeHtml(true)} ${escapeHtml(s.text)}`;
+        if (s.kind === "not-control") return `${this._capExpOverviewControlBadgeHtml(false)} ${escapeHtml(s.text)}`;
+        return escapeHtml(s.text);
+      }).join(" ");
+      return `<div class="capexp-device-overview">${text}</div>${this._capExpOverviewRoleHintHtml(sentences)}`;
+    }
+    // Per-cluster Input/Output/Both badge for the capability groups panel —
+    // mirrors docs/app.js's roleBadgeHtml in the zigbee-capabilities website.
+    // This is the exact distinction a real support case spent over an hour
+    // chasing before landing here: a device having existing bindings that
+    // use a cluster does NOT mean it can control another device with that
+    // cluster — an Input-only device can be commanded and can report its
+    // own state over a binding, but has no way to issue that cluster's
+    // commands outward.
+    _capExpRoleBadgeHtml(role) {
+      const label = CAPABILITY_ROLE_LABEL[role] || CAPABILITY_ROLE_LABEL.unknown;
+      const explanation = CAPABILITY_ROLE_EXPLANATION[role] || CAPABILITY_ROLE_EXPLANATION.unknown;
+      return `<span class="capexp-badge capexp-badge-${escapeHtml(role)}" title="${escapeHtml(explanation)}">${escapeHtml(
+        label
+      )}</span>`;
+    }
     // Device photo for a Capability Explorer card — same zigbee2mqtt.io URL
     // derivation and AMBIGUOUS_TUYA_MODELS exclusion as the Exploded view's
     // own _deviceImageUrl (this just calls it), and the same "show device
@@ -5933,6 +6086,23 @@
          onerror="this.style.display='none'; this.nextElementSibling.style.display='block';">
        <div class="capexp-device-photo-fallback" style="display:none" aria-hidden="true"></div>`;
     }
+    // Shared once above the first capability group, not repeated per group —
+    // the badges themselves are self-explanatory once you know the rule
+    // once. Mirrors docs/app.js's CAPABILITY_ROLE_LEGEND in the
+    // zigbee-capabilities website. This is the exact distinction a real
+    // support case spent over an hour chasing before landing here: a device
+    // having existing bindings that use a cluster does NOT mean it can
+    // control another device with that cluster — an Input-only device can
+    // be commanded and can report its own state over a binding, but has no
+    // way to issue that cluster's commands outward.
+    _capExpRoleLegendHtml() {
+      return `<div class="hint">
+      <strong>Input</strong> = this device can be commanded with that cluster (by Home Assistant, or by another
+      device bound to it). <strong>Output</strong> = this device can itself control another device using that
+      cluster, via a direct Zigbee bind. Most switches and dimmers \u2014 even ones with a physical button \u2014 are
+      Input only: the button operates the device's own load, it doesn't send Zigbee commands to anything else.
+    </div>`;
+    }
     // Shared by Explore My Devices and Find a Device — the "Capabilities"
     // section (cluster/command groups) rendered inside each mode's
     // "Technical evidence" / "View capabilities" disclosure.
@@ -5940,15 +6110,16 @@
       if (!capGroups.length) {
         return `<p class="muted">No confirmed commands or reporting clusters recorded yet.</p>`;
       }
-      const shown = capGroups.filter((g) => g.identified || !g.reportsOnly);
-      const unidentifiedEmpty = capGroups.filter((g) => !g.identified && g.reportsOnly);
+      const shown = capGroups.filter((g) => g.identified || !g.reportsOnly || g.unscanned);
+      const unidentifiedEmpty = capGroups.filter((g) => !g.identified && g.reportsOnly && !g.unscanned);
       const groupsHtml = shown.map(
         (g) => `
         <div class="capexp-cap-group">
           <span class="capexp-cap-group-label">${escapeHtml(g.label)}</span>
+          ${this._capExpRoleBadgeHtml(g.role)}
           ${g.items.length ? `<div class="capexp-cap-tags">${g.items.map(
           (i) => `<span class="capexp-tag${i.firmwareDependent ? " capexp-tag-fwdep" : ""}">${escapeHtml(i.name)}${i.firmwareDependent ? " \xB7 firmware-dependent" : ""}</span>`
-        ).join("")}</div>` : `<div class="capexp-cap-reportsonly hint">Reports data on this cluster \u2014 no commands to send.</div>`}
+        ).join("")}</div>` : g.unscanned ? `<div class="capexp-cap-reportsonly hint">Declared as an output cluster \u2014 this device can potentially control another device with it, but this project's scans don't discover specific output-side commands.</div>` : `<div class="capexp-cap-reportsonly hint">Reports data on this cluster \u2014 no commands to send.</div>`}
         </div>`
       ).join("");
       const unidentifiedHtml = unidentifiedEmpty.length ? `<div class="capexp-cap-group capexp-cap-group-unidentified">
@@ -5957,7 +6128,7 @@
              can't yet put a name to (${unidentifiedEmpty.map((g) => escapeHtml(g.clusterId)).join(", ")}) \u2014 no commands confirmed on any of them.</div>
          </div>` : "";
       return `<div class="capexp-cap-label">Capabilities</div>
-      <div class="capexp-cap-groups">${groupsHtml}${unidentifiedHtml}</div>`;
+      <div class="capexp-cap-groups">${this._capExpRoleLegendHtml()}${groupsHtml}${unidentifiedHtml}</div>`;
     }
     _capExpFwGapSummary(diff) {
       const added = [];
@@ -6029,6 +6200,7 @@
                     ${this._capExpTrustPanelHtml(rating, fw.length, fwLabel, totalScans, lastSeen)}
                   </div>
                 </div>
+                ${this._capExpDeviceOverviewHtml(m.entries)}
                 ${this._capExpExternalReferencesHtml(references, m.device.manufacturer)}
                 ${discoveryNote ? `<div class="capexp-discovery-note">${escapeHtml(discoveryNote.cardNote)}</div>` : ""}
                 ${this._capExpGoodForHtml(goodFor, "yours")}
@@ -6335,6 +6507,7 @@
                 ${this._capExpTrustPanelHtml(r.rating, r.firmwareCount, null, r.totalScans, r.lastSeen)}
               </div>
             </div>
+            ${this._capExpDeviceOverviewHtml(r.entries)}
             ${this._capExpExternalReferencesHtml(r.references, r.manufacturer)}
             ${this._capExpGoodForHtml(r.goodFor, "this record's")}
             <div class="capexp-techtoggle" data-capexp-toggle="${escapeHtml(key)}">

@@ -3,6 +3,32 @@
 All notable changes to ZHA Bindings Manager are documented here.
 
 
+## [0.35.0]
+
+### Added
+
+- **Plain-English device overview and Input/Output role badges in the
+  Capability Explorer tab**, ported from the public zigbee-capabilities
+  website. Each matched device (Explore My Devices) and search result
+  (Find a Device) now shows a short overview answering, in everyday
+  language, what the device can be commanded to do, what it senses or
+  reports, and — the question a real support case spent over an hour on —
+  whether it can directly control another Zigbee device over a bind
+  without Home Assistant in the loop. A device that's commandable on a
+  switch/dimmer/color/scene-type cluster but has no declared way to
+  control another device gets an explicit "Cannot ___ directly" statement
+  instead of silence, since an omitted sentence reads as "unknown," not
+  "confirmed no." Each capability group in the expanded "Technical
+  evidence" / "View capabilities" panel also now carries an Input/Output/
+  Both badge (with a visible legend above the list), making explicit that
+  a device's own existing bindings using a cluster do not by themselves
+  prove it can control another device with that cluster — only a declared
+  output (client-role) capability does.
+- The deeper "what does Input/Output mean for this specific cluster"
+  reference stays on the public website rather than being duplicated here
+  — the overview's definition callout and the capability panel link out
+  to https://hsolgaard.github.io/zigbee-capabilities/clusters.html.
+
 ## [0.34.4]
 
 ### Changed

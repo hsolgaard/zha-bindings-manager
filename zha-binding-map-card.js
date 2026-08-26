@@ -21,7 +21,7 @@
  * zha_toolkit MUST be installed (via HACS) and working for bind/unbind/scan
  * to function. See README.md for details.
  *
- * Version: 0.34.0
+ * Version: 0.34.1
  */
 (() => {
   // src/capexplorer-constants.js
@@ -78,7 +78,7 @@
 
   // src/constants.js
   var ZTK_DOMAIN = "zha_toolkit";
-  var CARD_VERSION = "0.34.0";
+  var CARD_VERSION = "0.34.1";
   var DEFAULT_BINDABLE_OUT_CLUSTERS = [5, 6, 8, 258, 768];
   var MEMBERSHIP_EDGE_COLOR = "#8e24aa";
   var HISTORY_LIMIT = 10;
@@ -2755,11 +2755,29 @@
         this._setStatus("error", `Failed to load ZHA devices: ${err.message || err}`, 0);
       }
     }
-    async _ensureClusters(ieee) {
-      if (this._clusterCache.has(ieee)) return this._clusterCache.get(ieee);
+    /** `force: true` bypasses the cache and refetches from ZHA even if this
+     *  ieee was already fetched earlier in the card's lifetime — see
+     *  _rescanDeviceFull() for why that matters: without it, a device whose
+     *  cluster list was first read incompletely (e.g. before ZHA finished
+     *  interviewing it) would keep serving that same stale snapshot for the
+     *  rest of the session, no matter how many times bindings got rescanned. */
+    async _ensureClusters(ieee, { force = false } = {}) {
+      if (!force && this._clusterCache.has(ieee)) return this._clusterCache.get(ieee);
       const clusters = await this._api.fetchClusters(ieee);
       this._clusterCache.set(ieee, clusters);
       return clusters;
+    }
+    /** The one "scan/rescan this device" action used by every single-device
+     *  entry point in the UI (Exploded view, Advanced tab's "Scan this
+     *  device", the Devices table's per-row scan button, Binding Health's
+     *  "Rescan now"): refreshes BOTH the binding table and the cluster list,
+     *  forcing the cluster refetch since _ensureClusters() alone would keep
+     *  serving a cached — possibly stale or incomplete — snapshot otherwise.
+     *  Deliberately not used by the network-wide "Scan all" button, which
+     *  only needs fresh bindings and would multiply API calls considerably
+     *  if it force-refreshed clusters for every device on every run. */
+    async _rescanDeviceFull(ieee, opts = {}) {
+      await Promise.all([this._ensureClusters(ieee, { force: true }), this._scanBindings([ieee], opts)]);
     }
     /** Devices worth rescanning after a bind/unbind attempt — source always,
      *  plus the target if it's a device (not a group, and not the same IEEE
@@ -4192,7 +4210,7 @@
       )}\u2026</p>`;
       this._q("#dialog").classList.add("open");
       try {
-        await Promise.all([this._ensureClusters(d.ieee), this._scanBindings([d.ieee], { tries: this._retryCount })]);
+        await this._rescanDeviceFull(d.ieee, { tries: this._retryCount });
       } catch (err) {
         console.warn("[ZHA Bindings Manager] exploded view scan failed", err);
       }
@@ -5112,7 +5130,7 @@
         rescanBtn.addEventListener("click", async () => {
           rescanBtn.disabled = true;
           rescanBtn.textContent = "Scanning\u2026";
-          await this._scanBindings([rescanBtn.dataset.ieee], { tries: this._retryCount });
+          await this._rescanDeviceFull(rescanBtn.dataset.ieee, { tries: this._retryCount });
           this._closeDialog();
         });
       }
@@ -5315,7 +5333,7 @@
           btn.disabled = true;
           const original = btn.textContent;
           btn.textContent = "Scanning\u2026";
-          this._scanBindings([btn.dataset.ieee], { tries: this._retryCount }).finally(() => {
+          this._rescanDeviceFull(btn.dataset.ieee, { tries: this._retryCount }).finally(() => {
             if (btn.isConnected) {
               btn.disabled = false;
               btn.textContent = original;
@@ -6721,7 +6739,8 @@
           btn.addEventListener("click", async () => {
             btn.disabled = true;
             btn.textContent = "Scanning\u2026";
-            await this._scanBindings([ieee], { tries: this._retryCount });
+            await this._rescanDeviceFull(ieee, { tries: this._retryCount });
+            this._advPopulateClusterOptions();
             this._advRenderSourceBindings();
           });
         }

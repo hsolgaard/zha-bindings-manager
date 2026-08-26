@@ -30,6 +30,7 @@ import {
   relTime,
   medianMs,
   formatDurationMs,
+  uniqueClusters,
   escapeHtml,
   toCsv,
   downloadFile,
@@ -5684,28 +5685,31 @@ export class ZhaBindingMapCard extends HTMLElement {
     this._advRenderTargetBindings();
   }
 
-  /** Cluster dropdown = EVERY cluster the selected source endpoint declares
-   *  (both "in" and "out"), plus any cluster already used by a real binding
-   *  sourced from this endpoint even if it isn't declared at all, plus a
-   *  "Custom cluster ID…" escape hatch for the rare case where neither
-   *  applies (e.g. an IKEA controller's genBasic/0x0000 group-binding trick).
+  /** Cluster dropdown = the selected source endpoint's declared OUTPUT
+   *  (client) clusters — the ones this endpoint can actually generate a
+   *  cluster command on, per the Zigbee Cluster Library's client/server
+   *  split — plus a "Custom cluster ID…" escape hatch for genuine edge
+   *  cases (e.g. an IKEA controller's genBasic/0x0000 group-binding trick,
+   *  which zha_toolkit's bind_group will happily attempt anyway).
    *
-   *  Used to filter to "out" only, on the theory that only a declared
-   *  client cluster can be a bind source. That's the spec-book answer, but
-   *  it doesn't hold on real hardware: zha_toolkit's bind_ieee, like most
-   *  ZDO Bind_req implementations, doesn't require the source to have
-   *  declared a cluster as "out" before writing a binding table entry for
-   *  it — it only needs the coordinator to reach the device. Confirmed
-   *  against a Repenic RD-250ZG, which has working bindings on On/Off and
-   *  Level Control despite never declaring either as "out" — the "out"-only
-   *  filter hid both, and a later attempt to key the list off "is there
-   *  currently a binding for this cluster" instead was worse: the option
-   *  disappeared the instant that exact binding was removed to test
-   *  something, even though the device obviously still has the cluster.
-   *  The only thing users actually need is "what clusters does this
-   *  endpoint have" — so that's what this lists now, unconditionally;
-   *  declared-"in"-only clusters get a note since they're less likely to
-   *  actually generate outbound commands, but they're never hidden.
+   *  v0.34.1 through v0.34.3 chased this in the wrong direction. The
+   *  trigger was a Repenic RD-250ZG whose On/Off and Level Control never
+   *  showed up here, and whose own binding table *did* show entries using
+   *  both clusters — which looked like proof the "out"-only filter was
+   *  wrong. It wasn't: every one of those existing bindings points at the
+   *  coordinator, not at any other device. That's this device reporting
+   *  its own state outward (an attribute report), a mechanism completely
+   *  separate from issuing a cluster command, and one that a binding-table
+   *  entry supports without requiring a client-role declaration at all.
+   *  Having *a* binding on a cluster is therefore not evidence a device
+   *  can control another device with it, and the 0.34.2/0.34.3 attempts to
+   *  surface such clusters anyway just relabeled the same wrong conclusion
+   *  as a feature. If a cluster genuinely isn't declared "out" here, the
+   *  honest reading is that this device's firmware has no client-side
+   *  implementation for it and cannot issue that cluster's commands to
+   *  anything, no matter what binding table entry exists — Custom cluster
+   *  ID remains for attempting one anyway on a hunch, not as a hidden
+   *  "real" list this dropdown was previously failing to show.
    *  See _advUpdateCustomClusterState(). */
   _advPopulateClusterOptions() {
     const clusterSel = this._q("#adv-cluster");
@@ -5713,26 +5717,9 @@ export class ZhaBindingMapCard extends HTMLElement {
     const ep = Number(this._q("#adv-src-ep").value);
     if (!clusterSel) return;
     const clusters = this._clusterCache.get(ieee) || [];
-    const epClusters = clusters.filter((c) => c.endpoint_id === ep);
-    const outIds = new Set(epClusters.filter((c) => c.type === "out").map((c) => c.id));
-    const inIds = new Set(epClusters.filter((c) => c.type === "in").map((c) => c.id));
-    const boundIds = new Set(
-      (this._bindings.get(normIeee(ieee)) || [])
-        .filter((b) => Number(b.sourceEndpoint) === ep)
-        .map((b) => b.clusterId)
-    );
-    const allIds = [...new Set([...outIds, ...inIds, ...boundIds])].sort((a, b) => a - b);
-    const noteFor = (id) => {
-      if (outIds.has(id)) return "";
-      if (inIds.has(id)) return " — input/reporting cluster, may not support commands";
-      return " — already bound here";
-    };
+    const outClusters = uniqueClusters(clusters.filter((c) => c.type === "out" && c.endpoint_id === ep));
     const opts = [`<option value="">— zha-toolkit default —</option>`]
-      .concat(
-        allIds.map(
-          (id) => `<option value="${id}">${escapeHtml(clusterName(id))} (${hex4(id)})${noteFor(id)}</option>`
-        )
-      )
+      .concat(outClusters.map((c) => `<option value="${c.id}">${escapeHtml(clusterName(c.id))} (${hex4(c.id)})</option>`))
       .concat([`<option value="__custom__">Custom cluster ID…</option>`]);
     clusterSel.innerHTML = opts.join("");
     // A custom cluster picked for a different endpoint/device likely doesn't

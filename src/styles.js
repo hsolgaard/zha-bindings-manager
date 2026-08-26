@@ -316,6 +316,12 @@ export const STYLE = `
 .capexp-cap-tags { display:flex; flex-wrap:wrap; gap:5px; margin-top:3px; }
 .capexp-cap-reportsonly { margin-top:2px; }
 .capexp-cap-group-unidentified .capexp-cap-group-label { font-weight:500; font-style:italic; }
+.capexp-device-overview { margin:6px 0 4px; font-size:0.88em; line-height:1.5; }
+.capexp-badge { display:inline-block; font-size:0.72em; padding:2px 8px; border-radius:10px; cursor:help; }
+.capexp-badge-input { background: rgba(158,158,158,0.18); color: var(--secondary-text-color); }
+.capexp-badge-output { background: rgba(76,175,80,0.16); color: #2e7d32; }
+.capexp-badge-both { background: rgba(142,36,170,0.13); color: #6a1b78; }
+.capexp-badge-unknown { background: rgba(158,158,158,0.18); color: var(--secondary-text-color); font-style: italic; }
 .capexp-tag { display:inline-block; font-size:0.78em; padding:3px 9px; border-radius:10px;
   background: rgba(76,154,255,0.15); color: #2f6fce; }
 .capexp-tag-conflict { background: rgba(219,68,55,0.15); color: var(--error-color, #db4437); }

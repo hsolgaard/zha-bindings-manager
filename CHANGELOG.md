@@ -3,6 +3,27 @@
 All notable changes to ZHA Bindings Manager are documented here.
 
 
+## [0.34.4]
+
+### Changed
+
+- **Reverted the Advanced tab's Cluster dropdown to declared "out" clusters
+  only** (0.34.2 and 0.34.3 are superseded). Both of those releases were
+  chasing a misdiagnosis: a Repenic RD-250ZG's On/Off and Level Control
+  never showed up here, and its own binding table did show entries using
+  those clusters, which looked like proof the device could bind on them
+  despite not declaring them as "out." It couldn't — every one of those
+  existing bindings points at the coordinator, not at another device.
+  That's the device reporting its own state outward (an attribute report),
+  a mechanism that rides a binding-table entry without requiring a
+  client-role declaration at all, and is completely separate from issuing
+  a cluster command to control something else. A cluster only declared
+  "in" (server) has no client-side implementation and cannot generate
+  that cluster's commands toward anything, regardless of what binding
+  table entries exist for it — so surfacing it here was never actually
+  useful, just misleading. "Custom cluster ID…" remains available for
+  attempting a non-standard bind anyway.
+
 ## [0.34.3]
 
 ### Fixed

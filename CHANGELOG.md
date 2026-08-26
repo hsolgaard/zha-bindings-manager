@@ -3,6 +3,28 @@
 All notable changes to ZHA Bindings Manager are documented here.
 
 
+## [0.34.1]
+
+### Fixed
+
+- **A device's cluster list could go stale for the rest of the session and
+  never recover.** `_ensureClusters()` fetched a device's clusters from ZHA
+  once and cached them forever per card instance — if that first read
+  happened before ZHA had fully finished interviewing the device (or
+  otherwise came back incomplete), every later scan kept serving that same
+  incomplete snapshot, no matter how many times you rescanned. This showed
+  up two ways: the Advanced tab's Cluster dropdown could be missing
+  clusters the device demonstrably has (e.g. On/Off, Level Control), and
+  the Exploded view could come up with "No endpoint data came back for
+  this device" for a device that had already been scanned successfully
+  before. Every single-device scan entry point — the Advanced tab's "Scan
+  this device", the Devices table's per-row scan button, Binding Health's
+  "Rescan now", and opening the Exploded view — now forces a fresh cluster
+  fetch alongside the binding rescan, instead of trusting whatever was
+  cached first. The network-wide "Scan all" button is unchanged and still
+  only refreshes bindings, to avoid multiplying API calls across every
+  device on every full scan.
+
 ## [0.34.0]
 
 ### Added

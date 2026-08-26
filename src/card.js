@@ -916,11 +916,30 @@ export class ZhaBindingMapCard extends HTMLElement {
     }
   }
 
-  async _ensureClusters(ieee) {
-    if (this._clusterCache.has(ieee)) return this._clusterCache.get(ieee);
+  /** `force: true` bypasses the cache and refetches from ZHA even if this
+   *  ieee was already fetched earlier in the card's lifetime — see
+   *  _rescanDeviceFull() for why that matters: without it, a device whose
+   *  cluster list was first read incompletely (e.g. before ZHA finished
+   *  interviewing it) would keep serving that same stale snapshot for the
+   *  rest of the session, no matter how many times bindings got rescanned. */
+  async _ensureClusters(ieee, { force = false } = {}) {
+    if (!force && this._clusterCache.has(ieee)) return this._clusterCache.get(ieee);
     const clusters = await this._api.fetchClusters(ieee);
     this._clusterCache.set(ieee, clusters);
     return clusters;
+  }
+
+  /** The one "scan/rescan this device" action used by every single-device
+   *  entry point in the UI (Exploded view, Advanced tab's "Scan this
+   *  device", the Devices table's per-row scan button, Binding Health's
+   *  "Rescan now"): refreshes BOTH the binding table and the cluster list,
+   *  forcing the cluster refetch since _ensureClusters() alone would keep
+   *  serving a cached — possibly stale or incomplete — snapshot otherwise.
+   *  Deliberately not used by the network-wide "Scan all" button, which
+   *  only needs fresh bindings and would multiply API calls considerably
+   *  if it force-refreshed clusters for every device on every run. */
+  async _rescanDeviceFull(ieee, opts = {}) {
+    await Promise.all([this._ensureClusters(ieee, { force: true }), this._scanBindings([ieee], opts)]);
   }
 
   /** Devices worth rescanning after a bind/unbind attempt — source always,
@@ -2557,7 +2576,7 @@ export class ZhaBindingMapCard extends HTMLElement {
     )}…</p>`;
     this._q("#dialog").classList.add("open");
     try {
-      await Promise.all([this._ensureClusters(d.ieee), this._scanBindings([d.ieee], { tries: this._retryCount })]);
+      await this._rescanDeviceFull(d.ieee, { tries: this._retryCount });
     } catch (err) {
       console.warn("[ZHA Bindings Manager] exploded view scan failed", err);
     }
@@ -3724,7 +3743,7 @@ export class ZhaBindingMapCard extends HTMLElement {
       rescanBtn.addEventListener("click", async () => {
         rescanBtn.disabled = true;
         rescanBtn.textContent = "Scanning…";
-        await this._scanBindings([rescanBtn.dataset.ieee], { tries: this._retryCount });
+        await this._rescanDeviceFull(rescanBtn.dataset.ieee, { tries: this._retryCount });
         this._closeDialog();
       });
     }
@@ -3948,7 +3967,7 @@ export class ZhaBindingMapCard extends HTMLElement {
         btn.disabled = true;
         const original = btn.textContent;
         btn.textContent = "Scanning…";
-        this._scanBindings([btn.dataset.ieee], { tries: this._retryCount }).finally(() => {
+        this._rescanDeviceFull(btn.dataset.ieee, { tries: this._retryCount }).finally(() => {
           // _renderDevicesTab() (called at the end of _scanBindings) will
           // have already replaced this button — nothing to reset if so.
           if (btn.isConnected) {
@@ -5720,7 +5739,8 @@ export class ZhaBindingMapCard extends HTMLElement {
         btn.addEventListener("click", async () => {
           btn.disabled = true;
           btn.textContent = "Scanning…";
-          await this._scanBindings([ieee], { tries: this._retryCount });
+          await this._rescanDeviceFull(ieee, { tries: this._retryCount });
+          this._advPopulateClusterOptions();
           this._advRenderSourceBindings();
         });
       }

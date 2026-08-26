@@ -3,6 +3,24 @@
 All notable changes to ZHA Bindings Manager are documented here.
 
 
+## [0.34.2]
+
+### Fixed
+
+- **The Advanced tab's Cluster dropdown could still hide clusters a device
+  genuinely binds on, even after 0.34.1's cache fix.** Confirmed against a
+  real device (Repenic RD-250ZG) whose "Existing bindings on this source
+  endpoint" panel showed working bindings on On/Off and Level Control, yet
+  the dropdown still only offered the zha-toolkit default and OTA — because
+  the device's own reported simple descriptor doesn't declare those
+  clusters as "out", even though it plainly works as a bind source for
+  them (zha_toolkit's bind_ieee, like most ZDO Bind_req implementations,
+  doesn't require that declaration to write a binding table entry). The
+  dropdown now also includes any cluster already used by an existing
+  binding sourced from the selected endpoint, even when it's missing from
+  the declared-"out" list, labeled "— already bound here" so it's clear
+  why it's showing up.
+
 ## [0.34.1]
 
 ### Fixed

@@ -4667,7 +4667,7 @@ export class ZhaBindingMapCard extends HTMLElement {
   // through repetition rather than needing it front-loaded.
   _capExpOverviewControlBadgeHtml(canControl) {
     return canControl
-      ? `<span class="capexp-badge capexp-badge-output" title="This card calls this an Output capability: based on this device's declared Zigbee capabilities, it can send this command directly to another device.">Can control other devices (Output)</span>`
+      ? `<span class="capexp-badge capexp-badge-output" title="This card calls this an Output capability: the device's own Zigbee signature declares that it can send this command directly to another device. That's a declaration, not an independently tested behavior — accurate for the large majority of devices, but occasionally a device declares more than its hardware actually uses.">Can control other devices (Output)</span>`
       : `<span class="capexp-badge capexp-badge-input" title="This card calls this Input only: this device can only receive this command — it has no declared way to send it to another device.">Can't control other devices (Input only)</span>`;
   }
 
@@ -4681,9 +4681,12 @@ export class ZhaBindingMapCard extends HTMLElement {
   _capExpOverviewRoleHintHtml(sentences) {
     if (!sentences.some((s) => s.kind === "control" || s.kind === "not-control")) return "";
     return `<div class="hint">
-      <strong>Output</strong> means this device can send that command directly to another device over a Zigbee
-      bind — a genuine controller for it, working without Home Assistant. <strong>Input only</strong> means this
-      device can only receive the command itself; it has no way to send it onward to control something else.
+      <strong>Output</strong> means this device declares, in its own Zigbee signature, that it can send that command
+      directly to another device over a Zigbee bind — without Home Assistant involved. That's the device's own
+      declaration rather than an independently tested behavior: accurate for the large majority of devices, but
+      occasionally a device declares a capability its hardware doesn't actually use. <strong>Input only</strong>
+      means this device can only receive the command itself; it has no declared way to send it onward to control
+      something else.
       <a href="${CAPEXP_CLUSTERS_URL}" target="_blank" rel="noopener noreferrer">What does this mean for each specific cluster? ↗</a>
     </div>`;
   }
@@ -4754,9 +4757,11 @@ export class ZhaBindingMapCard extends HTMLElement {
   _capExpRoleLegendHtml() {
     return `<div class="hint">
       <strong>Input</strong> = this device can be commanded with that cluster (by Home Assistant, or by another
-      device bound to it). <strong>Output</strong> = this device can itself control another device using that
-      cluster, via a direct Zigbee bind. Most switches and dimmers — even ones with a physical button — are
-      Input only: the button operates the device's own load, it doesn't send Zigbee commands to anything else.
+      device bound to it). <strong>Output</strong> = this device declares, in its own Zigbee signature, that it can
+      itself control another device using that cluster, via a direct Zigbee bind. That declaration isn't
+      independently tested — it holds for the large majority of devices, but occasionally a device declares a
+      capability its hardware doesn't actually use. Most switches and dimmers — even ones with a physical button —
+      are Input only: the button operates the device's own load, it doesn't send Zigbee commands to anything else.
     </div>`;
   }
 

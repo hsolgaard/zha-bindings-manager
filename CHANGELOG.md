@@ -3,6 +3,20 @@
 All notable changes to ZHA Bindings Manager are documented here.
 
 
+## [0.35.1]
+
+### Changed
+
+- **Output capability wording now says what the evidence actually is: a declaration, not a tested behavior.**
+  Found while building the public zigbee-capabilities website's new "Find the Right Device" search: a Xiaomi/Aqara
+  contact sensor declares On/Off, Level Control, and Scenes as output clusters despite having no physical way to
+  trigger any of them — a real, observed case of older Xiaomi/Aqara firmware reusing a boilerplate Zigbee descriptor
+  across unrelated products (a known quirk in the ZHA/zigbee2mqtt community). Every place the Capability Explorer
+  states an Output capability — the role badge tooltip, the per-cluster legend, and the device overview's "Can
+  likely control..." sentence — now says this is the device's own declared Zigbee capability, accurate for the
+  large majority of devices but not independently tested, rather than stating it as flat fact. No manufacturer-
+  specific carve-out: this is a calm, one-time caveat shown everywhere Output appears, not a targeted warning.
+
 ## [0.35.0]
 
 ### Added

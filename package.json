@@ -1,7 +1,7 @@
 {
   "name": "zha-bindings-manager",
   "private": true,
-  "version": "0.35.0",
+  "version": "0.35.1",
   "description": "Build tooling for the ZHA Bindings Manager Lovelace card — bundles src/index.js into the single zha-binding-map-card.js Home Assistant loads.",
   "scripts": {
     "build": "node build.js",

@@ -480,12 +480,28 @@ export const CAPABILITY_ROLE_LABEL = {
   both: "Input & Output",
   unknown: "Role unknown",
 };
+// The output/both wording deliberately says "declares" rather than
+// asserting the capability as flat fact — see the zigbee-capabilities
+// website's Feature Log project doc ("A data-fidelity note on declared
+// Output") for the real case that prompted this: a Xiaomi/Aqara contact
+// sensor whose community record declares On/Off, Level Control, and
+// Scenes as output clusters despite having no physical way to trigger any
+// of them (older Xiaomi/Aqara firmware is well known in the ZHA/
+// zigbee2mqtt community for reusing a boilerplate cluster descriptor
+// across unrelated products). Input isn't given the same hedge: a
+// cluster's Input role reflects what the community's own scan actually
+// exercised (see commands_received), so it carries real behavioral
+// evidence in a way a bare Output declaration currently doesn't — see
+// directControlSummary's doc comment for the full reasoning and why this
+// isn't (yet) solved by excluding any manufacturer. This wording change
+// mirrors the equivalent fix in the zigbee-capabilities website's
+// docs/capexplorer.js — keep the two in sync if either changes again.
 export const CAPABILITY_ROLE_EXPLANATION = {
   input:
     "This device can be commanded with this cluster — by Home Assistant, or by another device bound to it. It cannot use this cluster to control anything else.",
   output:
-    "This device can control another device using this cluster, via a direct Zigbee bind — this is what lets one device operate another without Home Assistant in between.",
-  both: "This device can both be commanded with this cluster and use it to control another device — a controller role on top of being controllable.",
+    "This device declares, in its own Zigbee signature, that it can control another device using this cluster via a direct Zigbee bind — this is what lets one device operate another without Home Assistant in between. That's the device's own declaration, not an independently tested behavior: accurate for the large majority of devices, but occasionally a device declares a capability its hardware doesn't actually use.",
+  both: "This device can be commanded with this cluster, and also declares — in its own Zigbee signature — that it can use it to control another device: a controller role on top of being controllable. As with any declared Output capability, that isn't independently tested behavior, though it holds for the large majority of devices.",
   unknown: "This submission predates input/output tracking, so this cluster's role isn't recorded.",
 };
 
@@ -688,14 +704,24 @@ function joinPhrases(list, conj = "and") {
 // cluster, so the caller can render nothing rather than a hedge-filled "no"
 // on every ordinary light bulb and sensor.
 //
-// The trailing disclaimer is deliberate and specific: it is NOT about how
-// much community evidence backs this observation (the trust-panel/star
-// rating shown right above already covers that) — it's that a device
-// *declaring* an output cluster in its Zigbee signature is real, confirmed
-// evidence it CAN issue that cluster's commands, but doesn't by itself
-// guarantee a specific bind to a specific target device will succeed
-// (binding table capacity, coordinator/router behavior, and the target
-// device's own support all still matter).
+// The trailing disclaimer is deliberate and covers two distinct kinds of
+// uncertainty, not one — neither is about how much community evidence
+// backs the observation itself (the trust-panel/star rating shown right
+// above already covers that):
+//   1. A device *declaring* an output cluster in its Zigbee signature is
+//      the device's own claim, not an independently tested behavior. True
+//      for the large majority of devices — but a real, observed exception
+//      exists: a Xiaomi/Aqara contact sensor in the community database
+//      declares On/Off, Level Control, and Scenes as output despite
+//      having no physical way to trigger any of them (see the
+//      zigbee-capabilities website's Feature Log project doc for the full
+//      finding). Older Xiaomi/Aqara firmware is well known in the ZHA/
+//      zigbee2mqtt community for reusing a boilerplate cluster descriptor
+//      across unrelated products.
+//   2. Even a genuine declaration doesn't by itself guarantee a specific
+//      bind to a specific target device will succeed (binding table
+//      capacity, coordinator/router behavior, and the target device's own
+//      support all still matter).
 // Deliberately says nothing about "Input"/"Output" (the ZCL terms the
 // capability panel below uses) — this sentence is the first thing a
 // visitor reads, with no legend or hover tooltip nearby to teach the
@@ -706,7 +732,7 @@ export function directControlSummary(entries) {
   const control = controlUseCases(entries);
   if (!control.length) return "";
   const phrases = joinPhrases(control.map((c) => c.phrase));
-  return `Can likely ${phrases} directly over a Zigbee bind, without Home Assistant in the loop — based on what this device's Zigbee signature declares it capable of sending, though not a guarantee any specific bind will succeed on every network.`;
+  return `Can likely ${phrases} directly over a Zigbee bind, without Home Assistant in the loop. This is based on what the device's own Zigbee signature declares — accurate for the large majority of devices, but declared rather than independently tested, so treat it as strong evidence rather than a guarantee; a successful bind on your own network still depends on binding-table capacity and the target device's own support.`;
 }
 
 // The explicit "no" counterpart to directControlSummary — for exactly the

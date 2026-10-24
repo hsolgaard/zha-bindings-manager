@@ -8,6 +8,8 @@ import {
   directionRank,
   directionLabel,
   emptyTableState,
+  deviceNameText,
+  findSingleDeviceBySearch,
 } from "../src/table-filter.js";
 
 const A = "aa:aa";
@@ -137,5 +139,48 @@ describe("emptyTableState", () => {
   it("says filters match nothing when health chips or search empty an unfiltered table", () => {
     const s = emptyTableState({ total: 12, deviceFilterActive: false, deviceMatches: 12, direction: DIRECTION_ALL });
     expect(s.kind).toBe("other-filters");
+  });
+});
+
+describe("deviceNameText", () => {
+  it("includes both the user-given name and the original ZHA name, lowercased", () => {
+    expect(deviceNameText({ user_given_name: "ZB-TestBed-Switch-Dim1", name: "Repenic RD-250ZG" })).toBe(
+      "zb-testbed-switch-dim1 repenic rd-250zg"
+    );
+  });
+  it("copes with a missing user-given name or a missing device", () => {
+    expect(deviceNameText({ name: "Lamp" })).toBe("lamp");
+    expect(deviceNameText(null)).toBe("");
+  });
+});
+
+describe("findSingleDeviceBySearch", () => {
+  const devices = [
+    { ieee: "1", user_given_name: "ZB-TestBed-Switch-Dim1", name: "Repenic RD-250ZG" },
+    { ieee: "2", user_given_name: "Test dimmer", name: "IKEA of Sweden RODRET wireless dimmer" },
+    { ieee: "3", user_given_name: "ZB-MainBR-Switch-ORB1", name: "SONOFF SNZB-01M" },
+  ];
+  it("finds the device by its original name", () => {
+    expect(findSingleDeviceBySearch(devices, "repenic").ieee).toBe("1");
+  });
+  it("finds the same device by the name the user gave it", () => {
+    expect(findSingleDeviceBySearch(devices, "Dim1").ieee).toBe("1");
+  });
+  it("returns null when several devices match, so search stays an ordinary text filter", () => {
+    expect(findSingleDeviceBySearch(devices, "switch")).toBeNull();
+    expect(findSingleDeviceBySearch(devices, "zb-")).toBeNull();
+  });
+  it("returns null when nothing matches", () => {
+    expect(findSingleDeviceBySearch(devices, "zzz")).toBeNull();
+  });
+  it("ignores terms shorter than three characters so the layout does not jump while typing", () => {
+    expect(findSingleDeviceBySearch(devices, "re")).toBeNull();
+    expect(findSingleDeviceBySearch(devices, "rep").ieee).toBe("1");
+  });
+  it("ignores surrounding spaces and empty or missing input", () => {
+    expect(findSingleDeviceBySearch(devices, "  repenic ").ieee).toBe("1");
+    expect(findSingleDeviceBySearch(devices, "")).toBeNull();
+    expect(findSingleDeviceBySearch(devices, undefined)).toBeNull();
+    expect(findSingleDeviceBySearch(null, "repenic")).toBeNull();
   });
 });

@@ -21,7 +21,7 @@
  * zha_toolkit MUST be installed (via HACS) and working for bind/unbind/scan
  * to function. See README.md for details.
  *
- * Version: 0.36.0
+ * Version: 0.36.1
  */
 (() => {
   // src/capexplorer-constants.js
@@ -78,7 +78,7 @@
 
   // src/constants.js
   var ZTK_DOMAIN = "zha_toolkit";
-  var CARD_VERSION = "0.36.0";
+  var CARD_VERSION = "0.36.1";
   var DEFAULT_BINDABLE_OUT_CLUSTERS = [5, 6, 8, 258, 768];
   var MEMBERSHIP_EDGE_COLOR = "#8e24aa";
   var HISTORY_LIMIT = 10;
@@ -1671,6 +1671,17 @@
     }
     return { kind: "other-filters", message: "No bindings match the current filters." };
   }
+  function deviceNameText(d) {
+    if (!d) return "";
+    return [d.user_given_name, d.name].filter(Boolean).join(" ").toLowerCase();
+  }
+  var MIN_AUTO_FILTER_SEARCH_LENGTH = 3;
+  function findSingleDeviceBySearch(devices, search) {
+    const s = (search || "").trim().toLowerCase();
+    if (s.length < MIN_AUTO_FILTER_SEARCH_LENGTH) return null;
+    const matches = (devices || []).filter((d) => deviceNameText(d).includes(s));
+    return matches.length === 1 ? matches[0] : null;
+  }
 
   // src/capexplorer.js
   function slugify(s) {
@@ -2270,6 +2281,7 @@
       this._lastScanAt = null;
       this._tableSourceFilter = null;
       this._tableDirection = DIRECTION_ALL;
+      this._lastTableDevice = null;
       this._tableSort = { key: null, dir: 1 };
       this._devicesSort = { key: null, dir: 1 };
       this._localStorage = new LocalStorageProvider();
@@ -5086,14 +5098,24 @@
         if (th.dataset.sort === sortState.key) th.classList.add(sortState.dir === 1 ? "sort-asc" : "sort-desc");
       });
     }
+    /** The device the Bindings table is currently scoped to. A device clicked in
+     *  the Devices tab, or a Source or Target name in the table, wins. Otherwise,
+     *  a search term that names exactly one device scopes the table to it
+     *  (`bySearch` is true then). */
+    _effectiveTableDevice() {
+      if (this._tableSourceFilter) return { ieee: this._tableSourceFilter, bySearch: false };
+      const d = findSingleDeviceBySearch(this._devices, this._filters.search);
+      return d ? { ieee: d.ieee, bySearch: true } : { ieee: null, bySearch: false };
+    }
     /** `healthMap` is optional — pass the one _renderTable() already computed
      *  to avoid a redundant pass; callers like _exportRowsData() that don't
      *  have one handy get a freshly-computed one for free. */
     _filteredBindingRows(healthMap) {
       const map = healthMap || this._computeHealthMap();
-      const s = this._filters.search;
+      const { ieee: deviceIeee, bySearch } = this._effectiveTableDevice();
+      const s = bySearch ? "" : this._filters.search;
       return this._allBindings().filter((b) => {
-        if (!matchesDeviceFilter(b, this._tableSourceFilter, this._tableDirection)) return false;
+        if (!matchesDeviceFilter(b, deviceIeee, this._tableDirection)) return false;
         if (this._tableHealthFilter !== "all") {
           const level = (map.get(b.id) || {}).level;
           if (this._tableHealthFilter === "problems") {
@@ -5105,7 +5127,7 @@
         if (!s) return true;
         const source = this._devices.find((d) => d.ieee === b.sourceIeee);
         const target = b.isGroup ? this._groups.find((g) => g.group_id === b.groupId) : this._devices.find((d) => d.ieee === b.targetIeee);
-        const hay = `${source ? this._deviceLabel(source) : ""} ${target ? target.name || this._deviceLabel(target) : ""} ${clusterName(b.clusterId)} ${source ? this._areaName(source.area_id) : ""} ${source ? source.manufacturer || "" : ""} ${source ? source.model || "" : ""}`.toLowerCase();
+        const hay = `${source ? `${this._deviceLabel(source)} ${deviceNameText(source)}` : ""} ${target ? b.isGroup ? target.name || "" : `${this._deviceLabel(target)} ${deviceNameText(target)}` : ""} ${clusterName(b.clusterId)} ${source ? this._areaName(source.area_id) : ""} ${source ? source.manufacturer || "" : ""} ${source ? source.model || "" : ""}`.toLowerCase();
         return hay.includes(s);
       });
     }
@@ -5113,23 +5135,34 @@
       const wrap = this._q("#table-body");
       if (!wrap) return;
       this._ensureHealthData();
+      const { ieee: deviceIeee, bySearch } = this._effectiveTableDevice();
+      if (deviceIeee !== this._lastTableDevice) {
+        this._lastTableDevice = deviceIeee;
+        this._tableDirection = DIRECTION_ALL;
+      }
       const filterInfo = this._q("#table-filter-info");
       if (filterInfo) {
-        if (this._tableSourceFilter) {
-          const dev = this._devices.find((d) => d.ieee === this._tableSourceFilter);
-          const name = dev ? this._deviceLabel(dev) : this._tableSourceFilter;
+        if (deviceIeee) {
+          const dev = this._devices.find((d) => d.ieee === deviceIeee);
+          const name = dev ? this._deviceLabel(dev) : deviceIeee;
           const dirChip = (value, label) => `<button class="chip${this._tableDirection === value ? " active" : ""}" data-direction="${value}">${label}</button>`;
-          filterInfo.innerHTML = `Showing bindings involving <strong>${escapeHtml(name)}</strong>
+          filterInfo.innerHTML = `Showing bindings involving <strong>${escapeHtml(name)}</strong>${bySearch ? ' <span class="muted">(matched by your search)</span>' : ""}
           <span class="health-filters">${dirChip(DIRECTION_ALL, "All")}${dirChip(DIRECTION_OUTBOUND, "Outbound")}${dirChip(
             DIRECTION_INBOUND,
             "Inbound"
           )}</span>
-          <button class="btn btn-small" id="btn-clear-source-filter">Clear filter</button>
+          <button class="btn btn-small" id="btn-clear-source-filter">${bySearch ? "Clear search" : "Clear filter"}</button>
           <button class="btn btn-small btn-primary" id="btn-add-binding-from-filter">Add binding from ${escapeHtml(name)}</button>`;
           filterInfo.style.display = "flex";
           this._q("#btn-clear-source-filter").addEventListener("click", () => {
-            this._setTableDeviceFilter(null);
-            this._renderTable();
+            if (bySearch) {
+              const box = this._q("#search");
+              box.value = "";
+              box.dispatchEvent(new Event("input"));
+            } else {
+              this._setTableDeviceFilter(null);
+              this._renderTable();
+            }
           });
           this._q("#btn-add-binding-from-filter").addEventListener("click", () => this._openAddBindingFromFilter());
           this._qa("#table-filter-info [data-direction]").forEach((btn) => {
@@ -5142,7 +5175,7 @@
           filterInfo.style.display = "none";
         }
       }
-      const filtered = !!this._tableSourceFilter;
+      const filtered = !!deviceIeee;
       const dirTh = this._q("#th-direction");
       if (dirTh) dirTh.style.display = filtered ? "" : "none";
       const healthMap = this._computeHealthMap();
@@ -5164,7 +5197,7 @@
           why: "",
           recommendation: null
         };
-        const dir = filtered ? bindingDirection(b, this._tableSourceFilter) : null;
+        const dir = filtered ? bindingDirection(b, deviceIeee) : null;
         return {
           binding: b,
           direction: dir,
@@ -5185,13 +5218,13 @@
       const colCount = filtered ? 9 : 8;
       if (!rows.length) {
         const all = this._allBindings();
-        const dev = filtered ? this._devices.find((d) => d.ieee === this._tableSourceFilter) : null;
+        const dev = filtered ? this._devices.find((d) => d.ieee === deviceIeee) : null;
         const state = emptyTableState({
           total: all.length,
           deviceFilterActive: filtered,
-          deviceMatches: filtered ? all.filter((b) => matchesDeviceFilter(b, this._tableSourceFilter, this._tableDirection)).length : all.length,
+          deviceMatches: filtered ? all.filter((b) => matchesDeviceFilter(b, deviceIeee, this._tableDirection)).length : all.length,
           direction: this._tableDirection,
-          deviceName: dev ? this._deviceLabel(dev) : this._tableSourceFilter,
+          deviceName: dev ? this._deviceLabel(dev) : deviceIeee,
           coordinatorHidden: !!(dev && (dev.device_type === "Coordinator" || dev.active_coordinator) && this._filters.hideCoordinatorBindings)
         });
         wrap.innerHTML = `<tr><td colspan="${colCount}" class="muted">${escapeHtml(state.message)}</td></tr>`;
@@ -5212,7 +5245,9 @@
           <td><span class="dot" style="background:${clusterColor(b.clusterId)}"></span> ${escapeHtml(
           r.clusterLabel
         )}</td>
-          <td>${escapeHtml(r.targetLabel)} ${b.isGroup ? "(group)" : `<span class="muted">(ep ${b.targetEndpoint})</span>`}</td>
+          <td>${b.isGroup ? `${escapeHtml(r.targetLabel)} (group)` : `<a href="#" class="src-link tgt-link" data-ieee="${escapeHtml(b.targetIeee)}" title="Show bindings involving this device">${escapeHtml(
+          r.targetLabel
+        )}</a> <span class="muted">(ep ${b.targetEndpoint})</span>`}</td>
           <td><button class="health-badge health-${h.level}" data-health="${b.id}" title="${escapeHtml(
           h.message
         )}">${HEALTH_ICON[h.level]} ${escapeHtml(HEALTH_LABEL[h.level])}</button></td>
@@ -5313,7 +5348,7 @@
      *  Advanced tab with that device pre-selected as Source, instead of showing a separate
      *  target-picker popup first — see _jumpToAdvancedBind for why the popup was retired. */
     _openAddBindingFromFilter() {
-      const sourceIeee = this._tableSourceFilter;
+      const sourceIeee = this._effectiveTableDevice().ieee;
       const sourceDevice = this._devices.find((d) => d.ieee === sourceIeee);
       if (!sourceDevice) return;
       this._jumpToAdvancedBind(sourceDevice, null);

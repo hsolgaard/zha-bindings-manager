@@ -107,7 +107,8 @@ Supported-command discovery is a separate, on-demand live-device scan. It is int
 ### Diagnose bindings
 
 - Search and sort every discovered binding in a flat table.
-- Click a device name (in the Devices tab or the Source column) to see every binding that device is involved in: the ones it controls (Outbound) and the ones where another device controls it (Inbound). A Direction column and an All / Outbound / Inbound toggle appear while a device is selected.
+- Click a device name (in the Devices tab, or the Source or Target column) to see every binding that device is involved in: the ones it controls (Outbound) and the ones where another device controls it (Inbound). A Direction column and an All / Outbound / Inbound toggle appear while a device is selected.
+- Typing a name into the search box that matches exactly one device (at least three characters) does the same thing, and a "Clear search" button in the banner empties the box. A term that matches several devices stays an ordinary text search.
 - Detect missing devices, targets, endpoints or clusters.
 - Flag duplicates and bindings to groups that no longer exist.
 - Explain each health finding in plain English.

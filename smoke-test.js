@@ -434,6 +434,45 @@ checks.push(
   ["device filter: Outbound toggle on a target-only device is empty", () => ids(OTHER, "outbound") === ""],
   ["device filter: self-bound row is listed once under All", () => ids(SELF, "all").split(",").filter((x) => x === "a").length === 1],
   ["device filter: Inbound on the source device excludes its own self-bound row", () => !ids(SELF, "inbound").includes("a")],
+  ["search: a name that matches exactly one device scopes the table to it (outbound and inbound)", () => {
+    const saved = card._filters.search;
+    card._filters.search = "2-gang";
+    const eff = card._effectiveTableDevice();
+    const rows = card._filteredBindingRows().map((b) => b.id).join(",");
+    card._filters.search = saved;
+    return eff.bySearch === true && eff.ieee === OTHER && rows === "b";
+  }],
+  ["search: a term matching several devices stays an ordinary text filter", () => {
+    const saved = card._filters.search;
+    card._filters.search = "gang";
+    const eff = card._effectiveTableDevice();
+    card._filters.search = saved;
+    return eff.ieee === null && eff.bySearch === false;
+  }],
+  ["search: a clicked device wins over a search match", () => {
+    const savedS = card._filters.search;
+    card._filters.search = "2-gang";
+    card._tableSourceFilter = SELF;
+    const eff = card._effectiveTableDevice();
+    card._tableSourceFilter = null;
+    card._filters.search = savedS;
+    return eff.ieee === SELF && eff.bySearch === false;
+  }],
+  ["search: text search matches a target by the name the user gave it (two devices share the term, so no auto-scope)", () => {
+    const saved = card._filters.search;
+    const other = card._devices.find((d) => d.ieee === OTHER);
+    const light = card._devices.find((d) => d.ieee === LIGHT);
+    other.user_given_name = "Hallway dim";
+    light.user_given_name = "Hallway dim two";
+    card._filters.search = "hallway dim";
+    const eff = card._effectiveTableDevice();
+    const ids = card._filteredBindingRows().map((b) => b.id).sort().join(",");
+    delete other.user_given_name;
+    delete light.user_given_name;
+    card._filters.search = saved;
+    // b targets OTHER (matched via its user-given name), d is sourced by LIGHT.
+    return eff.ieee === null && ids === "b,d";
+  }],
   ["device filter: setting a new device resets the direction toggle", () => {
     card._tableDirection = "inbound";
     card._setTableDeviceFilter(OTHER);

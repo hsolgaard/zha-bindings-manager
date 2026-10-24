@@ -3,6 +3,26 @@
 All notable changes to ZHA Bindings Manager are documented here.
 
 
+## [0.36.1]
+
+### Changed
+
+- **Target names in the Bindings table are now clickable.** Clicking one scopes the table to that device, with the
+  Direction column and the All / Outbound / Inbound toggle, exactly as clicking a Source name does. Before this, a
+  device that only ever receives control, such as a dimmer, never appeared in the Source column, so it could not be
+  found without searching. Group targets stay plain text because there is no device to select.
+- **A search term that names exactly one device now scopes the Bindings table to that device.** Typing "Repenic" or
+  the name you gave the device shows every binding involving it, with the Direction column and toggle, and the banner
+  says it was matched by your search. A "Clear search" button in the banner empties the box. A term shorter than three
+  characters, or one that matches several devices, stays an ordinary text search so the layout does not jump while
+  you type. A device you click always wins over a search match.
+
+### Fixed
+
+- **Search now finds a binding's target by the name you gave the device, not only its original ZHA name.** The target
+  column was matched against the original name (for example "Repenic RD-250ZG"), so searching for the name shown in
+  the Target column (for example "Dim1") found nothing. Both names are now searched for sources and targets alike.
+
 ## [0.36.0]
 
 ### Changed

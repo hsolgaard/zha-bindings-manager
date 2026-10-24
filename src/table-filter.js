@@ -82,3 +82,28 @@ export function emptyTableState({ total, deviceFilterActive, deviceMatches, dire
   }
   return { kind: "other-filters", message: "No bindings match the current filters." };
 }
+
+/** Lowercased text a search should match for a device by name: the name the
+ *  user gave it in Home Assistant and the original ZHA name (usually
+ *  manufacturer plus model). Matching both means a device is found whichever
+ *  name the person types. */
+export function deviceNameText(d) {
+  if (!d) return "";
+  return [d.user_given_name, d.name].filter(Boolean).join(" ").toLowerCase();
+}
+
+export const MIN_AUTO_FILTER_SEARCH_LENGTH = 3;
+
+/**
+ * The one device a search term points at, or null. Used so that typing a
+ * device name into the search box behaves like clicking that device. Returns
+ * null for short terms (so the layout does not jump while typing) and when
+ * zero or several devices match by name, in which case search stays an
+ * ordinary text filter.
+ */
+export function findSingleDeviceBySearch(devices, search) {
+  const s = (search || "").trim().toLowerCase();
+  if (s.length < MIN_AUTO_FILTER_SEARCH_LENGTH) return null;
+  const matches = (devices || []).filter((d) => deviceNameText(d).includes(s));
+  return matches.length === 1 ? matches[0] : null;
+}

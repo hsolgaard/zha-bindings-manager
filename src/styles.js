@@ -140,6 +140,9 @@ export const STYLE = `
 .edge-unknown:hover { stroke-width: 2.2; opacity: 1; }
 .table-filter-info { display:flex; align-items:center; gap:10px; margin-bottom:8px; padding:6px 10px;
   border-radius:8px; background: rgba(76,154,255,0.12); font-size:0.85em; }
+.dir-cell { white-space:nowrap; font-weight:600; }
+.dir-cell.dir-outbound { color: var(--primary-color); }
+.dir-cell.dir-inbound { color: var(--secondary-text-color); }
 .table-toolbar { display:flex; align-items:center; gap:8px; margin-bottom:8px; font-size:0.85em; flex-wrap:wrap; }
 .health-filters { display:flex; gap:6px; flex-wrap:wrap; }
 .bindings-table { width:100%; border-collapse: collapse; font-size: 0.9em; }

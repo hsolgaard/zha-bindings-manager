@@ -418,6 +418,31 @@ const capabilityChecks = [
 ];
 checks.push(...capabilityChecks);
 
+// Bindings-tab device filter: matches bindings the device sources OR is the
+// direct target of (through the real bundled card, not just src/table-filter.js).
+const ids = (ieee, dir) => {
+  card._tableSourceFilter = ieee;
+  card._tableDirection = dir || "all";
+  const out = card._filteredBindingRows().map((b) => b.id).sort().join(",");
+  card._tableSourceFilter = null;
+  card._tableDirection = "all";
+  return out;
+};
+checks.push(
+  ["device filter: target-only device now shows its inbound binding", () => ids(OTHER) === "b"],
+  ["device filter: Inbound toggle on the target device keeps the binding", () => ids(OTHER, "inbound") === "b"],
+  ["device filter: Outbound toggle on a target-only device is empty", () => ids(OTHER, "outbound") === ""],
+  ["device filter: self-bound row is listed once under All", () => ids(SELF, "all").split(",").filter((x) => x === "a").length === 1],
+  ["device filter: Inbound on the source device excludes its own self-bound row", () => !ids(SELF, "inbound").includes("a")],
+  ["device filter: setting a new device resets the direction toggle", () => {
+    card._tableDirection = "inbound";
+    card._setTableDeviceFilter(OTHER);
+    const ok = card._tableDirection === "all" && card._tableSourceFilter === OTHER;
+    card._setTableDeviceFilter(null);
+    return ok && card._tableSourceFilter === null;
+  }]
+);
+
 // M5 addition: exercises _loadScanState/_saveScanState through the actual
 // bundled class (not just the source-level LocalStorageProvider unit
 // tests in test/) — catches anything specific to how esbuild bundled the

@@ -3,6 +3,38 @@
 All notable changes to ZHA Bindings Manager are documented here.
 
 
+## [0.36.0]
+
+### Changed
+
+- **The Bindings tab device filter now shows inbound bindings as well as outbound ones.**
+  Previously, clicking a device name (in the Devices tab or the Source column) filtered the table to bindings that
+  device is the source of. A device that only receives control, such as a dimmer controlled by a remote, therefore
+  showed an empty table even though the Map showed the binding. The filter now matches bindings where the device is
+  the source or the direct target of another device. This is the same rule the device drawer uses for its incoming
+  list. A binding from a device to itself appears once.
+- **A Direction column appears while a device filter is active**, showing "Outbound" or "Inbound" relative to the
+  filtered device, with outbound rows listed first unless you sort by another column. The unfiltered table has no
+  Direction column and is unchanged.
+- **The filter banner has an All / Outbound / Inbound toggle** (default All) and now reads "Showing bindings
+  involving X". The "+ Add binding" button is now "Add binding from X", since it always uses the filtered device as
+  the source. Selecting a different device resets the toggle to All.
+- **Export and Print follow the filter**, so with a device selected they include its inbound rows too. Each exported
+  row still carries its own source and target, so no direction field was added.
+
+### Fixed
+
+- **The empty Bindings table no longer always says "No bindings loaded yet".** That message was shown whenever any
+  filter hid every row, which sent people to rescan when nothing was wrong. It now says one of three things: nothing
+  has been scanned yet; the selected device has no bindings in the chosen direction (with how many bindings the
+  filter is hiding); or the health chips or search box match nothing. Selecting the coordinator while "Hide
+  coordinator bindings" is on says that setting is the reason.
+
+### Not changed
+
+- Bindings that reach a device through group membership are not listed as Inbound for that device. The device
+  drawer still shows them as "Member of".
+
 ## [0.35.1]
 
 ### Changed

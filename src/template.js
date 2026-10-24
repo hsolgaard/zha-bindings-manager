@@ -114,6 +114,7 @@ export const SHELL_HTML = `
     <div class="table-scroll">
     <table class="bindings-table">
       <thead><tr>
+        <th id="th-direction" data-sort="directionRank" style="display:none">Direction</th>
         <th data-sort="sourceLabel">Source</th>
         <th data-sort="typeLabel">Type</th>
         <th data-sort="areaLabel">Area</th>

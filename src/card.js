@@ -42,6 +42,16 @@ import { LocalStorageProvider } from "./storage/local-storage-provider.js";
 import { HaStorageProvider } from "./storage/ha-storage-provider.js";
 import { STYLE } from "./styles.js";
 import {
+  DIRECTION_ALL,
+  DIRECTION_OUTBOUND,
+  DIRECTION_INBOUND,
+  bindingDirection,
+  matchesDeviceFilter,
+  directionRank,
+  directionLabel,
+  emptyTableState,
+} from "./table-filter.js";
+import {
   slugify,
   fetchCapabilityIndex,
   matchLocalDevices,
@@ -169,7 +179,8 @@ export class ZhaBindingMapCard extends HTMLElement {
     this._dragCtx = null;
     this._fullscreen = false;
     this._lastScanAt = null; // ISO timestamp of the last time bindings were (re)scanned
-    this._tableSourceFilter = null; // ieee — set by clicking a source device in the Bindings table
+    this._tableSourceFilter = null; // ieee — set by clicking a device name in the Devices tab or a Source in the Bindings table; matches bindings it sources OR is the direct target of
+    this._tableDirection = DIRECTION_ALL; // "all" | "outbound" | "inbound" — only applies while _tableSourceFilter is set
     this._tableSort = { key: null, dir: 1 };
     this._devicesSort = { key: null, dir: 1 };
 
@@ -3517,7 +3528,7 @@ export class ZhaBindingMapCard extends HTMLElement {
     const map = healthMap || this._computeHealthMap();
     const s = this._filters.search;
     return this._allBindings().filter((b) => {
-      if (this._tableSourceFilter && b.sourceIeee !== this._tableSourceFilter) return false;
+      if (!matchesDeviceFilter(b, this._tableSourceFilter, this._tableDirection)) return false;
       if (this._tableHealthFilter !== "all") {
         const level = (map.get(b.id) || {}).level;
         if (this._tableHealthFilter === "problems") {
@@ -3554,19 +3565,37 @@ export class ZhaBindingMapCard extends HTMLElement {
       if (this._tableSourceFilter) {
         const dev = this._devices.find((d) => d.ieee === this._tableSourceFilter);
         const name = dev ? this._deviceLabel(dev) : this._tableSourceFilter;
-        filterInfo.innerHTML = `Filtering to bindings sourced from <strong>${escapeHtml(name)}</strong>
+        const dirChip = (value, label) =>
+          `<button class="chip${this._tableDirection === value ? " active" : ""}" data-direction="${value}">${label}</button>`;
+        filterInfo.innerHTML = `Showing bindings involving <strong>${escapeHtml(name)}</strong>
+          <span class="health-filters">${dirChip(DIRECTION_ALL, "All")}${dirChip(DIRECTION_OUTBOUND, "Outbound")}${dirChip(
+          DIRECTION_INBOUND,
+          "Inbound"
+        )}</span>
           <button class="btn btn-small" id="btn-clear-source-filter">Clear filter</button>
-          <button class="btn btn-small btn-primary" id="btn-add-binding-from-filter">+ Add binding</button>`;
+          <button class="btn btn-small btn-primary" id="btn-add-binding-from-filter">Add binding from ${escapeHtml(name)}</button>`;
         filterInfo.style.display = "flex";
         this._q("#btn-clear-source-filter").addEventListener("click", () => {
-          this._tableSourceFilter = null;
+          this._setTableDeviceFilter(null);
           this._renderTable();
         });
         this._q("#btn-add-binding-from-filter").addEventListener("click", () => this._openAddBindingFromFilter());
+        this._qa("#table-filter-info [data-direction]").forEach((btn) => {
+          btn.addEventListener("click", () => {
+            this._tableDirection = btn.dataset.direction;
+            this._renderTable();
+          });
+        });
       } else {
         filterInfo.style.display = "none";
       }
     }
+
+    // Direction column exists only while a device filter is active; the
+    // unfiltered table is unchanged.
+    const filtered = !!this._tableSourceFilter;
+    const dirTh = this._q("#th-direction");
+    if (dirTh) dirTh.style.display = filtered ? "" : "none";
 
     const healthMap = this._computeHealthMap();
     this._renderHealthSummary(healthMap);
@@ -3595,8 +3624,11 @@ export class ZhaBindingMapCard extends HTMLElement {
         why: "",
         recommendation: null,
       };
+      const dir = filtered ? bindingDirection(b, this._tableSourceFilter) : null;
       return {
         binding: b,
+        direction: dir,
+        directionRank: directionRank(dir),
         sourceLabel,
         targetLabel,
         typeLabel,
@@ -3608,10 +3640,26 @@ export class ZhaBindingMapCard extends HTMLElement {
         healthRank: HEALTH_RANK[health.level] ?? 9,
       };
     });
-    rows = this._sortRows(rows, this._tableSort);
+    // With a device filter and no column sort chosen, list outbound first.
+    // Array.prototype.sort is stable, so scan order is kept within each group.
+    if (filtered && !this._tableSort.key) rows = [...rows].sort((a, b) => a.directionRank - b.directionRank);
+    else rows = this._sortRows(rows, this._tableSort);
 
+    const colCount = filtered ? 9 : 8;
     if (!rows.length) {
-      wrap.innerHTML = `<tr><td colspan="8" class="muted">No bindings loaded yet. Click "Scan bindings" above.</td></tr>`;
+      const all = this._allBindings();
+      const dev = filtered ? this._devices.find((d) => d.ieee === this._tableSourceFilter) : null;
+      const state = emptyTableState({
+        total: all.length,
+        deviceFilterActive: filtered,
+        deviceMatches: filtered
+          ? all.filter((b) => matchesDeviceFilter(b, this._tableSourceFilter, this._tableDirection)).length
+          : all.length,
+        direction: this._tableDirection,
+        deviceName: dev ? this._deviceLabel(dev) : this._tableSourceFilter,
+        coordinatorHidden: !!(dev && (dev.device_type === "Coordinator" || dev.active_coordinator) && this._filters.hideCoordinatorBindings),
+      });
+      wrap.innerHTML = `<tr><td colspan="${colCount}" class="muted">${escapeHtml(state.message)}</td></tr>`;
       return;
     }
 
@@ -3621,6 +3669,7 @@ export class ZhaBindingMapCard extends HTMLElement {
         const h = r.health;
         return `
         <tr data-id="${b.id}">
+          ${filtered ? `<td class="dir-cell dir-${r.direction}">${escapeHtml(directionLabel(r.direction))}</td>` : ""}
           <td><a href="#" class="src-link" data-ieee="${escapeHtml(b.sourceIeee)}">${escapeHtml(
           r.sourceLabel
         )}</a> <span class="muted">(ep ${b.sourceEndpoint})</span></td>
@@ -3651,7 +3700,7 @@ export class ZhaBindingMapCard extends HTMLElement {
     this._qa(".src-link").forEach((el) => {
       el.addEventListener("click", (e) => {
         e.preventDefault();
-        this._tableSourceFilter = el.dataset.ieee;
+        this._setTableDeviceFilter(el.dataset.ieee);
         this._renderTable();
       });
     });
@@ -3757,7 +3806,15 @@ export class ZhaBindingMapCard extends HTMLElement {
     }
   }
 
-  /** "+ Add binding" from a filtered Bindings-tab source device now jumps straight to the
+  /** Sets (or clears, with null) the Bindings tab's device filter. Always
+   *  resets the direction toggle to All so a new device never inherits the
+   *  previous device's Outbound/Inbound choice. */
+  _setTableDeviceFilter(ieee) {
+    this._tableSourceFilter = ieee || null;
+    this._tableDirection = DIRECTION_ALL;
+  }
+
+  /** "Add binding from X" from a filtered Bindings-tab source device now jumps straight to the
    *  Advanced tab with that device pre-selected as Source, instead of showing a separate
    *  target-picker popup first — see _jumpToAdvancedBind for why the popup was retired. */
   _openAddBindingFromFilter() {
@@ -3960,7 +4017,7 @@ export class ZhaBindingMapCard extends HTMLElement {
     this._qa("#devices-table-body .src-link").forEach((el) => {
       el.addEventListener("click", (e) => {
         e.preventDefault();
-        this._tableSourceFilter = el.dataset.ieee;
+        this._setTableDeviceFilter(el.dataset.ieee);
         this._switchView("table");
       });
     });

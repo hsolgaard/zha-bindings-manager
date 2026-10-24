@@ -21,7 +21,7 @@
  * zha_toolkit MUST be installed (via HACS) and working for bind/unbind/scan
  * to function. See README.md for details.
  *
- * Version: 0.35.1
+ * Version: 0.36.0
  */
 (() => {
   // src/capexplorer-constants.js
@@ -78,7 +78,7 @@
 
   // src/constants.js
   var ZTK_DOMAIN = "zha_toolkit";
-  var CARD_VERSION = "0.35.1";
+  var CARD_VERSION = "0.36.0";
   var DEFAULT_BINDABLE_OUT_CLUSTERS = [5, 6, 8, 258, 768];
   var MEMBERSHIP_EDGE_COLOR = "#8e24aa";
   var HISTORY_LIMIT = 10;
@@ -911,6 +911,7 @@
     <div class="table-scroll">
     <table class="bindings-table">
       <thead><tr>
+        <th id="th-direction" data-sort="directionRank" style="display:none">Direction</th>
         <th data-sort="sourceLabel">Source</th>
         <th data-sort="typeLabel">Type</th>
         <th data-sort="areaLabel">Area</th>
@@ -1371,6 +1372,9 @@
 .edge-unknown:hover { stroke-width: 2.2; opacity: 1; }
 .table-filter-info { display:flex; align-items:center; gap:10px; margin-bottom:8px; padding:6px 10px;
   border-radius:8px; background: rgba(76,154,255,0.12); font-size:0.85em; }
+.dir-cell { white-space:nowrap; font-weight:600; }
+.dir-cell.dir-outbound { color: var(--primary-color); }
+.dir-cell.dir-inbound { color: var(--secondary-text-color); }
 .table-toolbar { display:flex; align-items:center; gap:8px; margin-bottom:8px; font-size:0.85em; flex-wrap:wrap; }
 .health-filters { display:flex; gap:6px; flex-wrap:wrap; }
 .bindings-table { width:100%; border-collapse: collapse; font-size: 0.9em; }
@@ -1627,6 +1631,46 @@
   .capexp-mode-btn { width: 100%; }
 }
 `;
+
+  // src/table-filter.js
+  var DIRECTION_ALL = "all";
+  var DIRECTION_OUTBOUND = "outbound";
+  var DIRECTION_INBOUND = "inbound";
+  function bindingDirection(b, ieee) {
+    if (!ieee) return null;
+    if (b.sourceIeee === ieee) return DIRECTION_OUTBOUND;
+    if (!b.isGroup && b.targetIeee === ieee && b.sourceIeee !== ieee) return DIRECTION_INBOUND;
+    return null;
+  }
+  function matchesDeviceFilter(b, ieee, direction = DIRECTION_ALL) {
+    if (!ieee) return true;
+    const dir = bindingDirection(b, ieee);
+    if (!dir) return false;
+    return direction === DIRECTION_ALL || direction === dir;
+  }
+  function directionRank(dir) {
+    return dir === DIRECTION_OUTBOUND ? 0 : dir === DIRECTION_INBOUND ? 1 : 2;
+  }
+  function directionLabel(dir) {
+    return dir === DIRECTION_OUTBOUND ? "\u2192 Outbound" : dir === DIRECTION_INBOUND ? "\u2190 Inbound" : "";
+  }
+  function emptyTableState({ total, deviceFilterActive, deviceMatches, direction, deviceName, coordinatorHidden }) {
+    if (!total) {
+      return { kind: "not-scanned", message: 'No bindings loaded yet. Click "Scan bindings" above.' };
+    }
+    if (deviceFilterActive && !deviceMatches) {
+      const what = direction === DIRECTION_OUTBOUND ? `No outbound bindings from ${deviceName}.` : direction === DIRECTION_INBOUND ? `No inbound bindings to ${deviceName}.` : `No bindings involve ${deviceName}.`;
+      if (coordinatorHidden) {
+        return {
+          kind: "device-filter",
+          message: `${what} Bindings that target the coordinator are hidden by "Hide coordinator bindings" in the Map filters. Untick it to see them.`
+        };
+      }
+      const hidden = `The filter is hiding ${total} other binding${total === 1 ? "" : "s"}. Clear the filter to see ${total === 1 ? "it" : "them"}.`;
+      return { kind: "device-filter", message: `${what} ${hidden}` };
+    }
+    return { kind: "other-filters", message: "No bindings match the current filters." };
+  }
 
   // src/capexplorer.js
   function slugify(s) {
@@ -2225,6 +2269,7 @@
       this._fullscreen = false;
       this._lastScanAt = null;
       this._tableSourceFilter = null;
+      this._tableDirection = DIRECTION_ALL;
       this._tableSort = { key: null, dir: 1 };
       this._devicesSort = { key: null, dir: 1 };
       this._localStorage = new LocalStorageProvider();
@@ -5048,7 +5093,7 @@
       const map = healthMap || this._computeHealthMap();
       const s = this._filters.search;
       return this._allBindings().filter((b) => {
-        if (this._tableSourceFilter && b.sourceIeee !== this._tableSourceFilter) return false;
+        if (!matchesDeviceFilter(b, this._tableSourceFilter, this._tableDirection)) return false;
         if (this._tableHealthFilter !== "all") {
           const level = (map.get(b.id) || {}).level;
           if (this._tableHealthFilter === "problems") {
@@ -5073,19 +5118,33 @@
         if (this._tableSourceFilter) {
           const dev = this._devices.find((d) => d.ieee === this._tableSourceFilter);
           const name = dev ? this._deviceLabel(dev) : this._tableSourceFilter;
-          filterInfo.innerHTML = `Filtering to bindings sourced from <strong>${escapeHtml(name)}</strong>
+          const dirChip = (value, label) => `<button class="chip${this._tableDirection === value ? " active" : ""}" data-direction="${value}">${label}</button>`;
+          filterInfo.innerHTML = `Showing bindings involving <strong>${escapeHtml(name)}</strong>
+          <span class="health-filters">${dirChip(DIRECTION_ALL, "All")}${dirChip(DIRECTION_OUTBOUND, "Outbound")}${dirChip(
+            DIRECTION_INBOUND,
+            "Inbound"
+          )}</span>
           <button class="btn btn-small" id="btn-clear-source-filter">Clear filter</button>
-          <button class="btn btn-small btn-primary" id="btn-add-binding-from-filter">+ Add binding</button>`;
+          <button class="btn btn-small btn-primary" id="btn-add-binding-from-filter">Add binding from ${escapeHtml(name)}</button>`;
           filterInfo.style.display = "flex";
           this._q("#btn-clear-source-filter").addEventListener("click", () => {
-            this._tableSourceFilter = null;
+            this._setTableDeviceFilter(null);
             this._renderTable();
           });
           this._q("#btn-add-binding-from-filter").addEventListener("click", () => this._openAddBindingFromFilter());
+          this._qa("#table-filter-info [data-direction]").forEach((btn) => {
+            btn.addEventListener("click", () => {
+              this._tableDirection = btn.dataset.direction;
+              this._renderTable();
+            });
+          });
         } else {
           filterInfo.style.display = "none";
         }
       }
+      const filtered = !!this._tableSourceFilter;
+      const dirTh = this._q("#th-direction");
+      if (dirTh) dirTh.style.display = filtered ? "" : "none";
       const healthMap = this._computeHealthMap();
       this._renderHealthSummary(healthMap);
       this._updateSortIndicators("#view-table", this._tableSort);
@@ -5105,8 +5164,11 @@
           why: "",
           recommendation: null
         };
+        const dir = filtered ? bindingDirection(b, this._tableSourceFilter) : null;
         return {
           binding: b,
+          direction: dir,
+          directionRank: directionRank(dir),
           sourceLabel,
           targetLabel,
           typeLabel,
@@ -5118,9 +5180,21 @@
           healthRank: HEALTH_RANK[health.level] ?? 9
         };
       });
-      rows = this._sortRows(rows, this._tableSort);
+      if (filtered && !this._tableSort.key) rows = [...rows].sort((a, b) => a.directionRank - b.directionRank);
+      else rows = this._sortRows(rows, this._tableSort);
+      const colCount = filtered ? 9 : 8;
       if (!rows.length) {
-        wrap.innerHTML = `<tr><td colspan="8" class="muted">No bindings loaded yet. Click "Scan bindings" above.</td></tr>`;
+        const all = this._allBindings();
+        const dev = filtered ? this._devices.find((d) => d.ieee === this._tableSourceFilter) : null;
+        const state = emptyTableState({
+          total: all.length,
+          deviceFilterActive: filtered,
+          deviceMatches: filtered ? all.filter((b) => matchesDeviceFilter(b, this._tableSourceFilter, this._tableDirection)).length : all.length,
+          direction: this._tableDirection,
+          deviceName: dev ? this._deviceLabel(dev) : this._tableSourceFilter,
+          coordinatorHidden: !!(dev && (dev.device_type === "Coordinator" || dev.active_coordinator) && this._filters.hideCoordinatorBindings)
+        });
+        wrap.innerHTML = `<tr><td colspan="${colCount}" class="muted">${escapeHtml(state.message)}</td></tr>`;
         return;
       }
       wrap.innerHTML = rows.map((r) => {
@@ -5128,6 +5202,7 @@
         const h = r.health;
         return `
         <tr data-id="${b.id}">
+          ${filtered ? `<td class="dir-cell dir-${r.direction}">${escapeHtml(directionLabel(r.direction))}</td>` : ""}
           <td><a href="#" class="src-link" data-ieee="${escapeHtml(b.sourceIeee)}">${escapeHtml(
           r.sourceLabel
         )}</a> <span class="muted">(ep ${b.sourceEndpoint})</span></td>
@@ -5153,7 +5228,7 @@
       this._qa(".src-link").forEach((el) => {
         el.addEventListener("click", (e) => {
           e.preventDefault();
-          this._tableSourceFilter = el.dataset.ieee;
+          this._setTableDeviceFilter(el.dataset.ieee);
           this._renderTable();
         });
       });
@@ -5227,7 +5302,14 @@
         });
       }
     }
-    /** "+ Add binding" from a filtered Bindings-tab source device now jumps straight to the
+    /** Sets (or clears, with null) the Bindings tab's device filter. Always
+     *  resets the direction toggle to All so a new device never inherits the
+     *  previous device's Outbound/Inbound choice. */
+    _setTableDeviceFilter(ieee) {
+      this._tableSourceFilter = ieee || null;
+      this._tableDirection = DIRECTION_ALL;
+    }
+    /** "Add binding from X" from a filtered Bindings-tab source device now jumps straight to the
      *  Advanced tab with that device pre-selected as Source, instead of showing a separate
      *  target-picker popup first — see _jumpToAdvancedBind for why the popup was retired. */
     _openAddBindingFromFilter() {
@@ -5410,7 +5492,7 @@
       this._qa("#devices-table-body .src-link").forEach((el) => {
         el.addEventListener("click", (e) => {
           e.preventDefault();
-          this._tableSourceFilter = el.dataset.ieee;
+          this._setTableDeviceFilter(el.dataset.ieee);
           this._switchView("table");
         });
       });

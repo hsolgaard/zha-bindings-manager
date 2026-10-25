@@ -128,6 +128,8 @@ All notable changes to ZHA Bindings Manager are documented here.
 
 ## [0.34.3]
 
+> Superseded by 0.34.4, which reverted this change.
+
 ### Fixed
 
 - **The Advanced tab's Cluster dropdown could hide a cluster the source
@@ -145,6 +147,8 @@ All notable changes to ZHA Bindings Manager are documented here.
   advance what will work.
 
 ## [0.34.2]
+
+> Superseded by 0.34.4, which reverted this change.
 
 ### Fixed
 

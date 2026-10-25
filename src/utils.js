@@ -98,6 +98,15 @@ export function uniqueClusters(clusters) {
   return out;
 }
 
+/** Home Assistant's own page for a ZHA device (its Zigbee device info,
+ *  Reconfigure, entities and settings), or null when the device has no
+ *  registry id. `device_reg_id` comes with every device from ZHA's
+ *  zha/devices websocket command. The id is URL-encoded defensively. */
+export function deviceHaUrl(d) {
+  if (!d || !d.device_reg_id) return null;
+  return `/config/devices/device/${encodeURIComponent(d.device_reg_id)}`;
+}
+
 export function escapeHtml(str) {
   return String(str).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 }

@@ -21,7 +21,7 @@
  * zha_toolkit MUST be installed (via HACS) and working for bind/unbind/scan
  * to function. See README.md for details.
  *
- * Version: 0.36.1
+ * Version: 0.36.2
  */
 (() => {
   // src/capexplorer-constants.js
@@ -78,7 +78,7 @@
 
   // src/constants.js
   var ZTK_DOMAIN = "zha_toolkit";
-  var CARD_VERSION = "0.36.1";
+  var CARD_VERSION = "0.36.2";
   var DEFAULT_BINDABLE_OUT_CLUSTERS = [5, 6, 8, 258, 768];
   var MEMBERSHIP_EDGE_COLOR = "#8e24aa";
   var HISTORY_LIMIT = 10;
@@ -503,6 +503,10 @@
       }
     });
     return out;
+  }
+  function deviceHaUrl(d) {
+    if (!d || !d.device_reg_id) return null;
+    return `/config/devices/device/${encodeURIComponent(d.device_reg_id)}`;
   }
   function escapeHtml(str) {
     return String(str).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
@@ -1261,6 +1265,7 @@
   border: 1px solid var(--divider-color, #ccc); background: var(--card-background-color);
   color: var(--primary-text-color); border-radius: 8px; padding: 6px 12px; cursor: pointer; font-size: 0.9em;
 }
+a.btn { display:inline-block; text-decoration:none; }
 .btn:hover { filter: brightness(0.97); }
 .btn:disabled { opacity: 0.6; cursor: default; }
 .btn-primary { background: var(--primary-color); color: var(--text-primary-color, #fff); border-color: transparent; }
@@ -4394,6 +4399,9 @@
       <div class="ep-grid">${cards}</div>
       ${this._deviceShareSectionHtml(d)}
       <div class="dialog-actions">
+        ${deviceHaUrl(d) ? `<a class="btn" id="explode-open-ha" href="${escapeHtml(
+        deviceHaUrl(d)
+      )}" target="_blank" rel="noopener" title="Opens this device's page in Home Assistant, in a new tab">Open in Home Assistant</a>` : ""}
         <button class="btn" id="explode-close">Close</button>
       </div>`;
       this._q("#explode-close").addEventListener("click", () => this._closeDialog());

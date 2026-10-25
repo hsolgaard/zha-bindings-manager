@@ -3,6 +3,16 @@
 All notable changes to ZHA Bindings Manager are documented here.
 
 
+## [0.36.2]
+
+### Added
+
+- **"Open in Home Assistant" button in the exploded device view.** It opens that device's own Home Assistant page
+  (`/config/devices/device/<id>`, where the Zigbee device info, Reconfigure, entities and settings live) in a new tab,
+  the same way Lighting Manager links to a light. The id comes from the device list ZHA already returns, so no extra
+  request is made. If a device has no Home Assistant device id, the button is simply not shown. Clicking a device name
+  in the Devices tab or the Bindings table still sets the Bindings filter, as before.
+
 ## [0.36.1]
 
 ### Changed

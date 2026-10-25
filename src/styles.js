@@ -29,6 +29,7 @@ export const STYLE = `
   border: 1px solid var(--divider-color, #ccc); background: var(--card-background-color);
   color: var(--primary-text-color); border-radius: 8px; padding: 6px 12px; cursor: pointer; font-size: 0.9em;
 }
+a.btn { display:inline-block; text-decoration:none; }
 .btn:hover { filter: brightness(0.97); }
 .btn:disabled { opacity: 0.6; cursor: default; }
 .btn-primary { background: var(--primary-color); color: var(--text-primary-color, #fff); border-color: transparent; }

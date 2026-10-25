@@ -32,6 +32,7 @@ import {
   formatDurationMs,
   uniqueClusters,
   escapeHtml,
+  deviceHaUrl,
   toCsv,
   downloadFile,
 } from "./utils.js";
@@ -2646,6 +2647,13 @@ export class ZhaBindingMapCard extends HTMLElement {
       <div class="ep-grid">${cards}</div>
       ${this._deviceShareSectionHtml(d)}
       <div class="dialog-actions">
+        ${
+          deviceHaUrl(d)
+            ? `<a class="btn" id="explode-open-ha" href="${escapeHtml(
+                deviceHaUrl(d)
+              )}" target="_blank" rel="noopener" title="Opens this device's page in Home Assistant, in a new tab">Open in Home Assistant</a>`
+            : ""
+        }
         <button class="btn" id="explode-close">Close</button>
       </div>`;
     this._q("#explode-close").addEventListener("click", () => this._closeDialog());

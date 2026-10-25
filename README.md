@@ -129,7 +129,8 @@ The exploded device view is built from a live scan rather than assumptions. It s
 - a product image where a Zigbee2MQTT device-image match is available;
 - an offline endpoint diagram when no image is available;
 - an optional local annotation for what each endpoint is physically wired to;
-- an on-demand **Supported commands** check for the control-capable clusters declared by that endpoint.
+- an on-demand **Supported commands** check for the control-capable clusters declared by that endpoint;
+- an **Open in Home Assistant** button that opens the device's own Home Assistant page (Zigbee device info, Reconfigure, entities and settings) in a new tab.
 
 The supported-command check uses `zha_toolkit.scan_device` to query the device directly. Each applicable cluster appears as a collapsed row and, after scanning, expands to show the complete known command set, including both confirmed supported and unsupported commands.
 

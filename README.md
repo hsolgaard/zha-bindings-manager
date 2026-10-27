@@ -4,7 +4,8 @@ A visual topology, binding and endpoint diagnostic tool for Home Assistant's ZHA
 
 See what controls what, identify stale or unexpected bindings, inspect devices endpoint by endpoint, and create or remove direct Zigbee bindings without hand-writing `zha_toolkit` service calls.
 
-![status](https://img.shields.io/badge/status-experimental-orange)
+![release](https://img.shields.io/github/v/release/hsolgaard/zha-bindings-manager)
+![HACS](https://img.shields.io/badge/HACS-Default-41BDF5)
 ![license](https://img.shields.io/badge/license-MIT-blue)
 
 > [!NOTE]

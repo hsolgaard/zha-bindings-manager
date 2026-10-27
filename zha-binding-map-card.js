@@ -21,7 +21,7 @@
  * zha_toolkit MUST be installed (via HACS) and working for bind/unbind/scan
  * to function. See README.md for details.
  *
- * Version: 0.36.2
+ * Version: 0.36.3
  */
 (() => {
   // src/capexplorer-constants.js
@@ -78,7 +78,8 @@
 
   // src/constants.js
   var ZTK_DOMAIN = "zha_toolkit";
-  var CARD_VERSION = "0.36.2";
+  var CARD_VERSION = "0.36.3";
+  var CHANGELOG_URL = "https://github.com/hsolgaard/zha-bindings-manager/blob/main/CHANGELOG.md";
   var DEFAULT_BINDABLE_OUT_CLUSTERS = [5, 6, 8, 258, 768];
   var MEMBERSHIP_EDGE_COLOR = "#8e24aa";
   var HISTORY_LIMIT = 10;
@@ -817,6 +818,8 @@
     <button class="btn" id="btn-refresh-devices" title="Reload device list">\u27F3 Devices</button>
     <button class="btn btn-primary" id="btn-scan" title="Read current bindings from your Zigbee devices">Scan bindings</button>
     <button class="btn btn-small" id="btn-rescan-settings" title="Scan settings">\u2699</button>
+    <a id="card-version" class="card-version muted" href="${CHANGELOG_URL}" target="_blank" rel="noopener"
+      title="ZHA Bindings Manager v${CARD_VERSION}. Click to open the changelog.">v${CARD_VERSION}</a>
   </div>
   <div id="rescan-settings-panel" class="filter-panel">
     <div class="filter-group">
@@ -852,6 +855,12 @@
         <a href="https://github.com/hsolgaard/zha-bindings-manager-backend" target="_blank" rel="noopener">Learn more \u2192</a>
         <button type="button" class="btn btn-small" id="btn-dismiss-storage-hint">Dismiss</button>
       </div>
+    </div>
+    <div class="filter-group">
+      <div class="filter-group-title">About</div>
+      <div class="hint">ZHA Bindings Manager v${CARD_VERSION} \xB7
+        <a href="${CHANGELOG_URL}" target="_blank" rel="noopener">Changelog</a></div>
+      <div id="backend-version-line" class="hint"></div>
     </div>
   </div>
   <div id="status" class="status" style="display:none"></div>
@@ -1100,7 +1109,7 @@
   var WS_SAVE_STATE = "zha_bindings_manager/save_state";
   var WS_GET_CAPABILITIES = "zha_bindings_manager/get_capabilities";
   var SAVE_DEBOUNCE_MS = 1500;
-  var HaStorageProvider = class extends StorageProvider {
+  var HaStorageProvider = class _HaStorageProvider extends StorageProvider {
     constructor(hass, cardId) {
       super();
       this._hass = hass;
@@ -1118,11 +1127,20 @@
      *  error) for "not installed", same as for any other failure — the
      *  caller only needs yes/no, not why. */
     static async isAvailable(hass) {
+      return (await _HaStorageProvider.probe(hass)).available;
+    }
+    /** Same check as isAvailable(), plus the backend's own version string
+     *  (get_capabilities has returned it since backend 0.1.0), so the ⚙
+     *  panel can show which backend build is installed. version is null
+     *  when the backend isn't installed or didn't report one. */
+    static async probe(hass) {
       try {
         const res = await hass.connection.sendMessagePromise({ type: WS_GET_CAPABILITIES });
-        return !!(res && res.available);
+        const available = !!(res && res.available);
+        const version = available && res && typeof res.version === "string" && res.version ? res.version : null;
+        return { available, version };
       } catch (e) {
-        return false;
+        return { available: false, version: null };
       }
     }
     async _ensureLoaded() {
@@ -1257,7 +1275,7 @@
 }
 .tab.active { background: var(--primary-color); color: var(--text-primary-color, #fff); }
 .search {
-  flex: 1 1 160px; min-width: 120px; padding: 6px 10px; border-radius: 8px;
+  flex: 1 1 120px; min-width: 120px; padding: 6px 10px; border-radius: 8px;
   border: 1px solid var(--divider-color, #ccc); background: var(--card-background-color);
   color: var(--primary-text-color);
 }
@@ -1295,6 +1313,8 @@ a.btn { display:inline-block; text-decoration:none; }
 .spacer { flex:1; }
 .scan-info { font-size: 0.85em; white-space: nowrap; }
 .storage-mode-badge { font-size: 0.8em; white-space: nowrap; }
+.card-version { font-size: 0.8em; white-space: nowrap; text-decoration: none; }
+.card-version:hover { text-decoration: underline; }
 .filter-panel { display:none; border:1px solid var(--divider-color, #e0e0e0); border-radius:10px;
   padding:10px 12px 12px; margin-bottom:10px; background: var(--secondary-background-color, #fafafa); }
 .filter-panel.open { display:block; }
@@ -2236,6 +2256,7 @@ a.btn { display:inline-block; text-decoration:none; }
     if (!m) return "\u2014";
     return isGenericTuyaManufacturer(m) ? `${GENERIC_TUYA_LABEL} (${m})` : m;
   }
+  var SEARCHABLE_VIEWS = /* @__PURE__ */ new Set(["graph", "table", "devices"]);
   var ZhaBindingMapCard = class extends HTMLElement {
     constructor() {
       super();
@@ -2292,6 +2313,7 @@ a.btn { display:inline-block; text-decoration:none; }
       this._localStorage = new LocalStorageProvider();
       this._storage = this._localStorage;
       this._backendAvailable = null;
+      this._backendVersion = null;
       this._storageMode = null;
       this._scanFailures = /* @__PURE__ */ new Set();
       this._scanPartial = /* @__PURE__ */ new Map();
@@ -2536,7 +2558,9 @@ a.btn { display:inline-block; text-decoration:none; }
      *  inventing new dialog UI for something that happens at most once per
      *  browser. */
     async _resolveStorageProvider() {
-      this._backendAvailable = await HaStorageProvider.isAvailable(this._hass);
+      const probe = await HaStorageProvider.probe(this._hass);
+      this._backendAvailable = probe.available;
+      this._backendVersion = probe.version;
       if (!this._backendAvailable) {
         this._storageMode = "local";
         this._storage = this._localStorage;
@@ -2659,6 +2683,10 @@ a.btn { display:inline-block; text-decoration:none; }
       const detail = this._q("#storage-mode-detail");
       if (detail) {
         detail.textContent = this._storageMode === "shared" ? "Using shared storage: this browser's scan data is saved via the ZHA Bindings Manager Backend integration, so it's the same data in every browser and device that opens this card." : "Using this browser's local storage: scan data is only available here, not shared with other browsers or devices.";
+      }
+      const backendLine = this._q("#backend-version-line");
+      if (backendLine) {
+        backendLine.textContent = this._backendAvailable ? `ZHA Bindings Manager Backend ${this._backendVersion ? "v" + this._backendVersion : "(version not reported)"} is installed.` : this._backendAvailable === false ? "ZHA Bindings Manager Backend is not installed." : "";
       }
       const hint = this._q("#storage-backend-hint");
       if (hint) {
@@ -3536,6 +3564,8 @@ a.btn { display:inline-block; text-decoration:none; }
     _switchView(view) {
       this._view = view;
       this._qa(".tab").forEach((b) => b.classList.toggle("active", b.dataset.view === view));
+      const search = this._q("#search");
+      if (search) search.style.display = SEARCHABLE_VIEWS.has(view) ? "" : "none";
       this._qa(".view").forEach((v) => v.classList.toggle("active", v.id === `view-${view}`));
       this._render();
     }
@@ -3603,6 +3633,7 @@ a.btn { display:inline-block; text-decoration:none; }
         this._filters.search = e.target.value.toLowerCase();
         this._renderGraph();
         this._renderTable();
+        if (this._view === "devices") this._renderDevicesTab();
       });
       ["coordinator", "routers", "endDevices", "unbound", "groups", "hideCoordinatorBindings", "showReportingBindings"].forEach((key) => {
         const el = this._q(`#f-${key}`);
@@ -3944,6 +3975,14 @@ a.btn { display:inline-block; text-decoration:none; }
       const battery = d.power_source && /battery/i.test(d.power_source);
       if (battery) return "\u{1F518}";
       return "\u{1F4A1}";
+    }
+    /** Toolbar search for the Devices tab: matches either name (the one you
+     *  gave the device or ZHA's own), manufacturer, model, area or IEEE, so a
+     *  device can be found in a long list by whatever you remember about it. */
+    _deviceMatchesSearch(d, s) {
+      if (!s) return true;
+      const hay = [d.user_given_name, d.name, d.manufacturer, d.model, this._areaName(d.area_id), d.ieee].filter(Boolean).join(" ").toLowerCase();
+      return hay.includes(s.trim());
     }
     _deviceLabel(d) {
       return d.user_given_name || d.name || d.model || d.ieee;
@@ -5495,7 +5534,8 @@ a.btn { display:inline-block; text-decoration:none; }
         wrap.innerHTML = `<tr><td colspan="9" class="muted">Loading devices\u2026</td></tr>`;
         return;
       }
-      let rows = this._devices.map((d) => {
+      const search = (this._filters.search || "").trim();
+      let rows = this._devices.filter((d) => this._deviceMatchesSearch(d, search)).map((d) => {
         const scanCell = this._lastScanCellInfo(d);
         return {
           device: d,
@@ -5513,7 +5553,7 @@ a.btn { display:inline-block; text-decoration:none; }
       });
       rows = this._devicesSort.key ? this._sortRows(rows, this._devicesSort) : rows.sort((a, b) => a.name.localeCompare(b.name));
       if (!rows.length) {
-        wrap.innerHTML = `<tr><td colspan="9" class="muted">No devices found.</td></tr>`;
+        wrap.innerHTML = search ? `<tr><td colspan="9" class="muted">No devices match \u201C${escapeHtml(search)}\u201D. Clear the search box to see all ${this._devices.length} devices.</td></tr>` : `<tr><td colspan="9" class="muted">No devices found.</td></tr>`;
         return;
       }
       wrap.innerHTML = rows.map(

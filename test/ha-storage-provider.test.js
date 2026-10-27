@@ -39,6 +39,25 @@ describe("HaStorageProvider.isAvailable", () => {
   });
 });
 
+describe("HaStorageProvider.probe", () => {
+  it("returns the backend's version alongside availability", async () => {
+    const connection = makeFakeConnection();
+    connection.on("zha_bindings_manager/get_capabilities", async () => ({ available: true, version: "0.1.0" }));
+    expect(await HaStorageProvider.probe({ connection })).toEqual({ available: true, version: "0.1.0" });
+  });
+
+  it("returns a null version when the backend doesn't report one", async () => {
+    const connection = makeFakeConnection();
+    connection.on("zha_bindings_manager/get_capabilities", async () => ({ available: true }));
+    expect(await HaStorageProvider.probe({ connection })).toEqual({ available: true, version: null });
+  });
+
+  it("returns unavailable with no version when the integration isn't installed", async () => {
+    const connection = makeFakeConnection();
+    expect(await HaStorageProvider.probe({ connection })).toEqual({ available: false, version: null });
+  });
+});
+
 describe("HaStorageProvider — reads", () => {
   it("getScanState returns the default shape when the backend has nothing stored yet", async () => {
     const connection = makeFakeConnection();

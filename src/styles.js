@@ -21,7 +21,7 @@ export const STYLE = `
 }
 .tab.active { background: var(--primary-color); color: var(--text-primary-color, #fff); }
 .search {
-  flex: 1 1 160px; min-width: 120px; padding: 6px 10px; border-radius: 8px;
+  flex: 1 1 120px; min-width: 120px; padding: 6px 10px; border-radius: 8px;
   border: 1px solid var(--divider-color, #ccc); background: var(--card-background-color);
   color: var(--primary-text-color);
 }
@@ -59,6 +59,8 @@ a.btn { display:inline-block; text-decoration:none; }
 .spacer { flex:1; }
 .scan-info { font-size: 0.85em; white-space: nowrap; }
 .storage-mode-badge { font-size: 0.8em; white-space: nowrap; }
+.card-version { font-size: 0.8em; white-space: nowrap; text-decoration: none; }
+.card-version:hover { text-decoration: underline; }
 .filter-panel { display:none; border:1px solid var(--divider-color, #e0e0e0); border-radius:10px;
   padding:10px 12px 12px; margin-bottom:10px; background: var(--secondary-background-color, #fafafa); }
 .filter-panel.open { display:block; }

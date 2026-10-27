@@ -1,4 +1,4 @@
-import { DEFAULT_SCAN_BATCH_SIZE, DEFAULT_RETRY_COUNT } from "./constants.js";
+import { DEFAULT_SCAN_BATCH_SIZE, DEFAULT_RETRY_COUNT, CARD_VERSION, CHANGELOG_URL } from "./constants.js";
 
 export const SHELL_HTML = `
 <div class="card">
@@ -16,6 +16,8 @@ export const SHELL_HTML = `
     <button class="btn" id="btn-refresh-devices" title="Reload device list">⟳ Devices</button>
     <button class="btn btn-primary" id="btn-scan" title="Read current bindings from your Zigbee devices">Scan bindings</button>
     <button class="btn btn-small" id="btn-rescan-settings" title="Scan settings">⚙</button>
+    <a id="card-version" class="card-version muted" href="${CHANGELOG_URL}" target="_blank" rel="noopener"
+      title="ZHA Bindings Manager v${CARD_VERSION}. Click to open the changelog.">v${CARD_VERSION}</a>
   </div>
   <div id="rescan-settings-panel" class="filter-panel">
     <div class="filter-group">
@@ -51,6 +53,12 @@ export const SHELL_HTML = `
         <a href="https://github.com/hsolgaard/zha-bindings-manager-backend" target="_blank" rel="noopener">Learn more →</a>
         <button type="button" class="btn btn-small" id="btn-dismiss-storage-hint">Dismiss</button>
       </div>
+    </div>
+    <div class="filter-group">
+      <div class="filter-group-title">About</div>
+      <div class="hint">ZHA Bindings Manager v${CARD_VERSION} ·
+        <a href="${CHANGELOG_URL}" target="_blank" rel="noopener">Changelog</a></div>
+      <div id="backend-version-line" class="hint"></div>
     </div>
   </div>
   <div id="status" class="status" style="display:none"></div>

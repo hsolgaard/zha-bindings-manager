@@ -3,6 +3,27 @@
 All notable changes to ZHA Bindings Manager are documented here.
 
 
+## [0.36.3]
+
+### Added
+
+- **The card's version is now shown in the GUI.** A small `v0.36.3` label sits in the toolbar next to the storage
+  badge, so you can see which build a browser has actually loaded without opening the developer console. This helps
+  when one system seems to be running an older copy after an update (usually a cached Lovelace resource). Clicking the
+  label opens this changelog.
+- **New "About" section in the ⚙ settings panel.** It shows the card version with a changelog link and, when the
+  optional ZHA Bindings Manager Backend integration is installed, the backend's version too.
+
+### Fixed
+
+- **The search box now filters the Devices tab.** It already filtered the Map and Bindings tabs but did nothing on
+  Devices, which made a long device list hard to work through. It matches the name you gave the device, ZHA's own
+  name, manufacturer, model, area or IEEE address. If nothing matches, the table says so and tells you how many
+  devices the search is hiding.
+- **The search box is hidden on tabs it doesn't apply to.** Floor Plan and Advanced don't use it, and the Zigbee
+  Capability Explorer has its own search, so the toolbar box no longer appears there. Whatever you typed is kept for
+  when you switch back.
+
 ## [0.36.2]
 
 ### Added

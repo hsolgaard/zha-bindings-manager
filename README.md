@@ -273,7 +273,7 @@ A **ZHA Bindings** entry should then appear in the sidebar.
 
 ### Browser caching after a manual update
 
-A browser may continue serving an older copy of a manually installed `/local/` resource. Try a hard refresh first: **Ctrl/Cmd+Shift+R**.
+A browser may continue serving an older copy of a manually installed `/local/` resource. The version label in the card's toolbar shows which build is actually loaded. If it isn't the version you installed, try a hard refresh first: **Ctrl/Cmd+Shift+R**.
 
 When necessary, add and increment a version query to the resource URL:
 

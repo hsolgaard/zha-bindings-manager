@@ -123,6 +123,9 @@ function manufacturerDisplayLabel(m) {
 // ---------------------------------------------------------------------------
 // The card itself
 // ---------------------------------------------------------------------------
+// Tabs the toolbar search box filters. It is hidden on every other tab.
+const SEARCHABLE_VIEWS = new Set(["graph", "table", "devices"]);
+
 export class ZhaBindingMapCard extends HTMLElement {
   constructor() {
     super();
@@ -199,6 +202,7 @@ export class ZhaBindingMapCard extends HTMLElement {
     this._localStorage = new LocalStorageProvider();
     this._storage = this._localStorage;
     this._backendAvailable = null; // null = not checked yet this load
+    this._backendVersion = null; // backend integration's version, when it reports one
     this._storageMode = null; // "local" | "shared", set by _resolveStorageProvider
 
     // Binding Health: which devices failed to respond on the *most recent*
@@ -503,7 +507,9 @@ export class ZhaBindingMapCard extends HTMLElement {
    *  inventing new dialog UI for something that happens at most once per
    *  browser. */
   async _resolveStorageProvider() {
-    this._backendAvailable = await HaStorageProvider.isAvailable(this._hass);
+    const probe = await HaStorageProvider.probe(this._hass);
+    this._backendAvailable = probe.available;
+    this._backendVersion = probe.version;
     if (!this._backendAvailable) {
       this._storageMode = "local";
       this._storage = this._localStorage;
@@ -651,6 +657,15 @@ export class ZhaBindingMapCard extends HTMLElement {
         this._storageMode === "shared"
           ? "Using shared storage: this browser's scan data is saved via the ZHA Bindings Manager Backend integration, so it's the same data in every browser and device that opens this card."
           : "Using this browser's local storage: scan data is only available here, not shared with other browsers or devices.";
+    }
+
+    const backendLine = this._q("#backend-version-line");
+    if (backendLine) {
+      backendLine.textContent = this._backendAvailable
+        ? `ZHA Bindings Manager Backend ${this._backendVersion ? "v" + this._backendVersion : "(version not reported)"} is installed.`
+        : this._backendAvailable === false
+          ? "ZHA Bindings Manager Backend is not installed."
+          : "";
     }
 
     const hint = this._q("#storage-backend-hint");
@@ -1660,6 +1675,12 @@ export class ZhaBindingMapCard extends HTMLElement {
   _switchView(view) {
     this._view = view;
     this._qa(".tab").forEach((b) => b.classList.toggle("active", b.dataset.view === view));
+    // The toolbar search only filters the Map, Bindings and Devices tabs.
+    // Hide it elsewhere so it never looks like it should do something it
+    // doesn't (Floor Plan, the Capability Explorer, which has its own
+    // search, and Advanced). The typed term is kept for when you come back.
+    const search = this._q("#search");
+    if (search) search.style.display = SEARCHABLE_VIEWS.has(view) ? "" : "none";
     this._qa(".view").forEach((v) => v.classList.toggle("active", v.id === `view-${view}`));
     this._render();
   }
@@ -1731,6 +1752,7 @@ export class ZhaBindingMapCard extends HTMLElement {
       this._filters.search = e.target.value.toLowerCase();
       this._renderGraph();
       this._renderTable();
+      if (this._view === "devices") this._renderDevicesTab();
     });
 
     ["coordinator", "routers", "endDevices", "unbound", "groups", "hideCoordinatorBindings", "showReportingBindings"].forEach((key) => {
@@ -2114,6 +2136,18 @@ export class ZhaBindingMapCard extends HTMLElement {
     // crude "role" guess just for the icon, not used for logic
     if (battery) return "🔘";
     return "💡";
+  }
+
+  /** Toolbar search for the Devices tab: matches either name (the one you
+   *  gave the device or ZHA's own), manufacturer, model, area or IEEE, so a
+   *  device can be found in a long list by whatever you remember about it. */
+  _deviceMatchesSearch(d, s) {
+    if (!s) return true;
+    const hay = [d.user_given_name, d.name, d.manufacturer, d.model, this._areaName(d.area_id), d.ieee]
+      .filter(Boolean)
+      .join(" ")
+      .toLowerCase();
+    return hay.includes(s.trim());
   }
 
   _deviceLabel(d) {
@@ -4019,7 +4053,8 @@ export class ZhaBindingMapCard extends HTMLElement {
       wrap.innerHTML = `<tr><td colspan="9" class="muted">Loading devices…</td></tr>`;
       return;
     }
-    let rows = this._devices.map((d) => {
+    const search = (this._filters.search || "").trim();
+    let rows = this._devices.filter((d) => this._deviceMatchesSearch(d, search)).map((d) => {
       const scanCell = this._lastScanCellInfo(d);
       return {
         device: d,
@@ -4038,7 +4073,9 @@ export class ZhaBindingMapCard extends HTMLElement {
     rows = this._devicesSort.key ? this._sortRows(rows, this._devicesSort) : rows.sort((a, b) => a.name.localeCompare(b.name));
 
     if (!rows.length) {
-      wrap.innerHTML = `<tr><td colspan="9" class="muted">No devices found.</td></tr>`;
+      wrap.innerHTML = search
+        ? `<tr><td colspan="9" class="muted">No devices match “${escapeHtml(search)}”. Clear the search box to see all ${this._devices.length} devices.</td></tr>`
+        : `<tr><td colspan="9" class="muted">No devices found.</td></tr>`;
       return;
     }
     wrap.innerHTML = rows

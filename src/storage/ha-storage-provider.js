@@ -39,11 +39,21 @@ export class HaStorageProvider extends StorageProvider {
    *  error) for "not installed", same as for any other failure — the
    *  caller only needs yes/no, not why. */
   static async isAvailable(hass) {
+    return (await HaStorageProvider.probe(hass)).available;
+  }
+
+  /** Same check as isAvailable(), plus the backend's own version string
+   *  (get_capabilities has returned it since backend 0.1.0), so the ⚙
+   *  panel can show which backend build is installed. version is null
+   *  when the backend isn't installed or didn't report one. */
+  static async probe(hass) {
     try {
       const res = await hass.connection.sendMessagePromise({ type: WS_GET_CAPABILITIES });
-      return !!(res && res.available);
+      const available = !!(res && res.available);
+      const version = available && res && typeof res.version === "string" && res.version ? res.version : null;
+      return { available, version };
     } catch (e) {
-      return false;
+      return { available: false, version: null };
     }
   }
 

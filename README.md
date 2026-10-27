@@ -161,7 +161,7 @@ Completed scans can also be reviewed and shared with the public [`zigbee-capabil
 
 Nothing is submitted automatically. The card prepares a GitHub issue for the user to review and submit using their own GitHub account.
 
-The physical-load annotation is saved locally by default, the same as everything else the card stores — see [Optional: shared storage across devices](#optional-shared-storage-across-devices) above if you'd like it, along with the rest of the card's data, to follow you across browsers and devices.
+The physical-load annotation is saved locally by default, the same as everything else the card stores — see [Where your data is saved](#where-your-data-is-saved) above if you'd like it, along with the rest of the card's data, to follow you across browsers and devices.
 
 ### Explore device capabilities
 

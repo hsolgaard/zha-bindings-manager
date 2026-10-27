@@ -24,7 +24,7 @@ card plus shared storage, an automatic sidebar page and removed-device notices. 
   options, the card uses this browser's storage.
 - "ZHA Bindings Manager Backend" is now called the ZHA Bindings Manager integration throughout.
 
-
+## [0.36.5]
 
 ### Fixed
 

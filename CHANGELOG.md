@@ -3,6 +3,14 @@
 All notable changes to ZHA Bindings Manager are documented here.
 
 
+## [0.36.5]
+
+### Fixed
+
+- **Bindings from a removed device now always show as an Error with a Forget button.** If the device had also failed
+  to respond to its last scan (common, since a device is often offline before it's removed), its rows showed as Info
+  ("did not respond, wake it and rescan") with an Unbind button instead. "No longer in ZHA" is now checked first.
+
 ## [0.36.4]
 
 ### Added

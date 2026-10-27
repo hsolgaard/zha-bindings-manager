@@ -21,7 +21,7 @@
  * zha_toolkit MUST be installed (via HACS) and working for bind/unbind/scan
  * to function. See README.md for details.
  *
- * Version: 0.36.4
+ * Version: 0.36.5
  */
 (() => {
   // src/capexplorer-constants.js
@@ -78,7 +78,7 @@
 
   // src/constants.js
   var ZTK_DOMAIN = "zha_toolkit";
-  var CARD_VERSION = "0.36.4";
+  var CARD_VERSION = "0.36.5";
   var CHANGELOG_URL = "https://github.com/hsolgaard/zha-bindings-manager/blob/main/CHANGELOG.md";
   var DEFAULT_BINDABLE_OUT_CLUSTERS = [5, 6, 8, 258, 768];
   var MEMBERSHIP_EDGE_COLOR = "#8e24aa";
@@ -3475,6 +3475,15 @@ a.btn { display:inline-block; text-decoration:none; }
      *  Rule 7 in particular must never be overridden by a Warning/Error). */
     _evalBindingHealth(b, coord, dupCounts) {
       const sourceIeeeN = normIeee(b.sourceIeee);
+      if (this._devices.length && !this._devices.some((d) => normIeee(d.ieee) === sourceIeeeN)) {
+        return {
+          level: "error",
+          code: "source_missing",
+          message: "The source device no longer exists.",
+          why: "This binding was read from a device that's since been removed from ZHA, so it's leftover saved data rather than something currently controllable. Unbinding isn't possible because there's no device left to send the command to.",
+          recommendation: "Click Forget to remove the leftover data (nothing is sent to your Zigbee network). The next full scan also clears it automatically."
+        };
+      }
       if (this._scanFailures.has(sourceIeeeN)) {
         return {
           level: "info",
@@ -3493,15 +3502,6 @@ a.btn { display:inline-block; text-decoration:none; }
           message: `Only part of this device's binding table could be read.${countText}`,
           why: "A later page of this device's binding table timed out during the scan, so there may be additional bindings on it that aren't shown yet \u2014 the bindings that were read are still valid.",
           recommendation: "Rescan this device to try retrieving the rest of its binding table."
-        };
-      }
-      if (!this._devices.some((d) => normIeee(d.ieee) === sourceIeeeN)) {
-        return {
-          level: "error",
-          code: "source_missing",
-          message: "The source device no longer exists.",
-          why: "This binding was read from a device that's since been removed from ZHA, so it's leftover saved data rather than something currently controllable. Unbinding isn't possible because there's no device left to send the command to.",
-          recommendation: "Click Forget to remove the leftover data (nothing is sent to your Zigbee network). The next full scan also clears it automatically."
         };
       }
       if (b.isGroup) {

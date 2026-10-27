@@ -1520,6 +1520,24 @@ export class ZhaBindingMapCard extends HTMLElement {
   _evalBindingHealth(b, coord, dupCounts) {
     const sourceIeeeN = normIeee(b.sourceIeee);
 
+    // Mirrors Rule 1, for the source side (implied by "source device exists"
+    // being an OK condition) — reachable when a device is removed/re-paired
+    // after being scanned, since scan results are cached across reloads.
+    // Checked before Rule 7 and partial_scan: a removed device that also
+    // failed its last scan (it was often offline before removal) is still
+    // gone, and needs the Forget button rather than "wake it and rescan".
+    // Skipped while the device list is empty so nothing reads as missing
+    // before ZHA has loaded.
+    if (this._devices.length && !this._devices.some((d) => normIeee(d.ieee) === sourceIeeeN)) {
+      return {
+        level: "error",
+        code: "source_missing",
+        message: "The source device no longer exists.",
+        why: "This binding was read from a device that's since been removed from ZHA, so it's leftover saved data rather than something currently controllable. Unbinding isn't possible because there's no device left to send the command to.",
+        recommendation: "Click Forget to remove the leftover data (nothing is sent to your Zigbee network). The next full scan also clears it automatically.",
+      };
+    }
+
     // Rule 7 — source didn't respond to the most recent scan attempt. Short-
     // circuits everything else: we're looking at possibly-stale cached data,
     // so no other rule is allowed to escalate this to Warning/Error.
@@ -1549,19 +1567,6 @@ export class ZhaBindingMapCard extends HTMLElement {
         message: `Only part of this device's binding table could be read.${countText}`,
         why: "A later page of this device's binding table timed out during the scan, so there may be additional bindings on it that aren't shown yet — the bindings that were read are still valid.",
         recommendation: "Rescan this device to try retrieving the rest of its binding table.",
-      };
-    }
-
-    // Mirrors Rule 1, for the source side (implied by "source device exists"
-    // being an OK condition) — reachable when a device is removed/re-paired
-    // after being scanned, since scan results are cached across reloads.
-    if (!this._devices.some((d) => normIeee(d.ieee) === sourceIeeeN)) {
-      return {
-        level: "error",
-        code: "source_missing",
-        message: "The source device no longer exists.",
-        why: "This binding was read from a device that's since been removed from ZHA, so it's leftover saved data rather than something currently controllable. Unbinding isn't possible because there's no device left to send the command to.",
-        recommendation: "Click Forget to remove the leftover data (nothing is sent to your Zigbee network). The next full scan also clears it automatically.",
       };
     }
 

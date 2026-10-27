@@ -105,6 +105,7 @@ export const SHELL_HTML = `
 
   <div id="view-table" class="view">
     <div id="health-summary" class="health-summary" style="display:none"></div>
+    <div id="stale-banner" class="stale-banner" style="display:none"></div>
     <div id="table-filter-info" class="table-filter-info" style="display:none"></div>
     <div class="table-toolbar">
       <span class="health-filters" id="health-filters">

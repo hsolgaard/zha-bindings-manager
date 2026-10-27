@@ -3,6 +3,28 @@
 All notable changes to ZHA Bindings Manager are documented here.
 
 
+## [0.36.4]
+
+### Added
+
+- **Clean up bindings to removed devices.** When a live device still has bindings to a device that is no longer in
+  ZHA, a banner above the Bindings table says how many there are. These bindings use slots in the device's binding
+  table and send commands to nobody. **Show** filters the table to them, and **Unbind all** removes them one by one,
+  rescans the devices involved, and reports what is really gone. Battery devices are usually asleep, so any that
+  didn't respond are listed for a retry. Nothing is unbound automatically, because a device removed only to be paired
+  again comes back with the same address and its bindings work again.
+- **"Forget" for leftover data from removed devices.** Bindings read from a device that has since been removed from
+  ZHA used to stay in the table permanently, marked as an error with an Unbind button that could never work. They now
+  have a **Forget** button (also in the Health details), and the banner offers **Forget all**. Forgetting only removes
+  the card's saved copy. Nothing is sent to your Zigbee network.
+
+### Fixed
+
+- **A full "Scan bindings" now clears saved data for devices no longer in ZHA.** Removed devices were never rescanned,
+  so their old bindings were kept for ever. A single-device rescan never clears anything, and neither does a scan
+  while the device list is empty, so a ZHA that fails to load can't wipe your data. Thanks to @MattWestb for the
+  report.
+
 ## [0.36.3]
 
 ### Added

@@ -141,6 +141,10 @@ a.btn { display:inline-block; text-decoration:none; }
    default same as control, just visually flagged as unresolved. */
 .edge-unknown { stroke-width: 1.6; stroke-dasharray: 2,2; opacity: 0.7; }
 .edge-unknown:hover { stroke-width: 2.2; opacity: 1; }
+.stale-banner { margin-bottom:10px; padding:8px 12px; border-radius:8px; background: rgba(255,152,0,0.14); font-size:0.9em;
+  display:flex; flex-direction:column; gap:6px; }
+.stale-row { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+.stale-row > span { flex: 1 1 260px; }
 .table-filter-info { display:flex; align-items:center; gap:10px; margin-bottom:8px; padding:6px 10px;
   border-radius:8px; background: rgba(76,154,255,0.12); font-size:0.85em; }
 .dir-cell { white-space:nowrap; font-weight:600; }

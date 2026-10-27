@@ -41,6 +41,7 @@ import { ZhaApi } from "./api-client.js";
 import { SHELL_HTML } from "./template.js";
 import { LocalStorageProvider } from "./storage/local-storage-provider.js";
 import { HaStorageProvider } from "./storage/ha-storage-provider.js";
+import { removedSources, deadTargetBindings, pruneRemovedSources, forgetSource } from "./stale-bindings.js";
 import { STYLE } from "./styles.js";
 import {
   DIRECTION_ALL,
@@ -1059,7 +1060,8 @@ export class ZhaBindingMapCard extends HTMLElement {
    *  a "batch" of 1 and behave exactly as before. */
   async _scanBindings(ieeeList, opts = {}) {
     if (this._scanState.running) return;
-    const targets = ieeeList && ieeeList.length ? ieeeList : this._devices.map((d) => d.ieee);
+    const fullScan = !(ieeeList && ieeeList.length);
+    const targets = fullScan ? this._devices.map((d) => d.ieee) : ieeeList;
     this._scanState = { running: true, done: 0, total: targets.length };
     this._renderStatus();
     let okCount = 0;
@@ -1107,6 +1109,14 @@ export class ZhaBindingMapCard extends HTMLElement {
     }
 
     this._scanState.running = false;
+    // A full scan covers every device ZHA has, so anything else in the
+    // saved data belongs to a device that's since been removed. Drop it
+    // here; pruneRemovedSources() refuses to act on an empty device list.
+    const pruned = fullScan ? pruneRemovedSources(this._bindings, this._devices) : [];
+    pruned.forEach((ieee) => {
+      this._scanFailures.delete(normIeee(ieee));
+      this._scanPartial.delete(normIeee(ieee));
+    });
     // No args: _scanFailures/_scanPartial already reflect this just-
     // completed run (updated live per device inside scanOne above), so
     // _saveScanState reads current state rather than needing it passed in.
@@ -1114,6 +1124,7 @@ export class ZhaBindingMapCard extends HTMLElement {
     const summary = [`${okCount} device(s) read`];
     if (partialCount) summary.push(`${partialCount} partial (a later page timed out — rescan for the rest)`);
     if (failCount) summary.push(`${failCount} did not respond (sleepy/offline devices are normal)`);
+    if (pruned.length) summary.push(`cleared saved data for ${pruned.length} device(s) no longer in ZHA`);
     // timeout: 0 — the final scan summary stays on screen until dismissed
     // (via the × button) rather than auto-hiding after a few seconds, since
     // it's easy to miss if you glance away while a larger scan is running.
@@ -1549,8 +1560,8 @@ export class ZhaBindingMapCard extends HTMLElement {
         level: "error",
         code: "source_missing",
         message: "The source device no longer exists.",
-        why: "This binding was read from a device that's since been removed or re-paired, so it's leftover data rather than something currently controllable.",
-        recommendation: "Remove the binding or recreate it.",
+        why: "This binding was read from a device that's since been removed from ZHA, so it's leftover saved data rather than something currently controllable. Unbinding isn't possible because there's no device left to send the command to.",
+        recommendation: "Click Forget to remove the leftover data (nothing is sent to your Zigbee network). The next full scan also clears it automatically.",
       };
     }
 
@@ -1582,8 +1593,8 @@ export class ZhaBindingMapCard extends HTMLElement {
           level: "error",
           code: "target_missing",
           message: "Target device no longer exists.",
-          why: "A binding sends commands from the source straight to this target over Zigbee. Since the target no longer exists, those commands go nowhere.",
-          recommendation: "Remove the binding or recreate it.",
+          why: "A binding sends commands from the source straight to this target over Zigbee. Since the target no longer exists, those commands go nowhere, and the binding still uses one of the source device's limited binding-table slots.",
+          recommendation: "Unbind it here, or use \"Unbind all\" above the table to clean up every binding to removed devices at once.",
         };
       }
       const targetClusters = this._clusterCache.get(targetDevice.ieee);
@@ -3675,6 +3686,7 @@ export class ZhaBindingMapCard extends HTMLElement {
 
     const healthMap = this._computeHealthMap();
     this._renderHealthSummary(healthMap);
+    this._renderStaleBanner();
 
     this._updateSortIndicators("#view-table", this._tableSort);
 
@@ -3765,7 +3777,11 @@ export class ZhaBindingMapCard extends HTMLElement {
           <td><button class="health-badge health-${h.level}" data-health="${b.id}" title="${escapeHtml(
           h.message
         )}">${HEALTH_ICON[h.level]} ${escapeHtml(HEALTH_LABEL[h.level])}</button></td>
-          <td><button class="btn btn-small btn-danger" data-unbind="${b.id}">Unbind</button></td>
+          <td>${
+            h.code === "source_missing"
+              ? `<button class="btn btn-small" data-forget="${escapeHtml(b.sourceIeee)}" title="Remove the leftover saved data for this removed device. Nothing is sent to Zigbee.">Forget</button>`
+              : `<button class="btn btn-small btn-danger" data-unbind="${b.id}">Unbind</button>`
+          }</td>
         </tr>`;
       })
       .join("");
@@ -3775,6 +3791,10 @@ export class ZhaBindingMapCard extends HTMLElement {
         const binding = this._allBindings().find((b) => b.id === btn.dataset.unbind);
         if (binding) this._openUnbindPopover(binding);
       });
+    });
+
+    this._qa("#table-body [data-forget]").forEach((btn) => {
+      btn.addEventListener("click", () => this._confirmForgetSources([btn.dataset.forget]));
     });
 
     this._qa(".src-link").forEach((el) => {
@@ -3792,6 +3812,169 @@ export class ZhaBindingMapCard extends HTMLElement {
         if (binding && health) this._openHealthDetail(binding, health);
       });
     });
+  }
+
+  /** Banner above the Bindings table for saved data that points at devices
+   *  ZHA no longer has (see stale-bindings.js): leftover entries from
+   *  removed devices, which are forgotten, and bindings on live devices to
+   *  removed targets, which are unbound. Hidden when there are neither. */
+  _renderStaleBanner() {
+    const el = this._q("#stale-banner");
+    if (!el) return;
+    if (!this._loaded || !this._devices.length) {
+      el.style.display = "none";
+      return;
+    }
+    const gone = removedSources(this._bindings, this._devices);
+    const dead = deadTargetBindings(this._bindings, this._devices);
+    if (!gone.length && !dead.length) {
+      el.style.display = "none";
+      return;
+    }
+    const parts = [];
+    if (dead.length) {
+      const sources = new Set(dead.map((b) => normIeee(b.sourceIeee))).size;
+      parts.push(`
+        <div class="stale-row">
+          <span><strong>${dead.length} binding${dead.length === 1 ? "" : "s"}</strong> on ${sources} device${
+        sources === 1 ? "" : "s"
+      } point to devices that are no longer in ZHA. They use binding-table slots and send commands to nobody.</span>
+          <button class="btn btn-small" id="btn-stale-show">Show</button>
+          <button class="btn btn-small btn-danger" id="btn-stale-unbind-all">Unbind all</button>
+        </div>`);
+    }
+    if (gone.length) {
+      const count = gone.reduce((n, g) => n + g.count, 0);
+      parts.push(`
+        <div class="stale-row">
+          <span><strong>${count} saved binding${count === 1 ? "" : "s"}</strong> from ${gone.length} device${
+        gone.length === 1 ? "" : "s"
+      } that ${gone.length === 1 ? "was" : "were"} removed from ZHA. This is leftover data in the card, not on your Zigbee network.</span>
+          <button class="btn btn-small" id="btn-stale-forget-all">Forget all</button>
+        </div>`);
+    }
+    el.innerHTML = parts.join("");
+    el.style.display = "";
+    const show = this._q("#btn-stale-show");
+    if (show)
+      show.addEventListener("click", () => {
+        this._tableHealthFilter = "error";
+        this._qa("#health-filters [data-health-filter]").forEach((b) =>
+          b.classList.toggle("active", b.dataset.healthFilter === "error")
+        );
+        this._renderTable();
+      });
+    const unbindAll = this._q("#btn-stale-unbind-all");
+    if (unbindAll) unbindAll.addEventListener("click", () => this._confirmUnbindDeadTargets());
+    const forgetAll = this._q("#btn-stale-forget-all");
+    if (forgetAll) forgetAll.addEventListener("click", () => this._confirmForgetSources(gone.map((g) => g.ieee)));
+  }
+
+  _confirmForgetSources(ieees) {
+    const total = ieees.reduce((n, ieee) => {
+      for (const [k, list] of this._bindings) if (normIeee(k) === normIeee(ieee)) n += (list || []).length;
+      return n;
+    }, 0);
+    this._q("#dialog-title").textContent = "Forget leftover data";
+    this._q("#dialog-body").innerHTML = `
+      <p>This removes ${total} saved binding${total === 1 ? "" : "s"} for ${
+      ieees.length === 1 ? `<code>${escapeHtml(ieees[0])}</code>, a device` : `${ieees.length} devices`
+    } no longer in ZHA.</p>
+      <p class="hint">Nothing is sent to your Zigbee network. If the device is paired again later, the next scan reads its bindings afresh.</p>
+      <div class="dialog-actions">
+        <button class="btn btn-primary" id="forget-confirm">Forget</button>
+        <button class="btn" id="forget-cancel">Cancel</button>
+      </div>`;
+    this._q("#dialog").classList.add("open");
+    this._q("#forget-cancel").addEventListener("click", () => this._closeDialog());
+    this._q("#forget-confirm").addEventListener("click", async () => {
+      this._closeDialog();
+      let dropped = 0;
+      ieees.forEach((ieee) => {
+        dropped += forgetSource(this._bindings, ieee);
+        this._scanFailures.delete(normIeee(ieee));
+        this._scanPartial.delete(normIeee(ieee));
+      });
+      await this._saveScanState();
+      this._setStatus("success", `Forgot ${dropped} saved binding${dropped === 1 ? "" : "s"} from removed devices.`);
+      this._renderGraph();
+      this._renderTable();
+      this._renderDevicesTab();
+    });
+  }
+
+  _confirmUnbindDeadTargets() {
+    const dead = deadTargetBindings(this._bindings, this._devices);
+    if (!dead.length) return;
+    const rowsHtml = dead
+      .map((b) => {
+        const src = this._devices.find((d) => normIeee(d.ieee) === normIeee(b.sourceIeee));
+        return `<tr><td>${escapeHtml(src ? this._deviceLabel(src) : b.sourceIeee)} (ep ${b.sourceEndpoint})</td><td>${escapeHtml(
+          clusterName(b.clusterId)
+        )}</td><td><code>${escapeHtml(b.targetIeee)}</code></td></tr>`;
+      })
+      .join("");
+    this._q("#dialog-title").textContent = "Unbind bindings to removed devices";
+    this._q("#dialog-body").innerHTML = `
+      <p>These bindings point to devices that are no longer in ZHA:</p>
+      <table class="detail-table"><tr><td><strong>Source</strong></td><td><strong>Cluster</strong></td><td><strong>Removed target</strong></td></tr>${rowsHtml}</table>
+      <p class="hint">If you removed a device only to pair it again, cancel: once it's back with the same address, these bindings work again.
+        Battery devices are usually asleep, so wake them (press a button) just before you start, or some unbinds may not go through.</p>
+      <div class="dialog-actions">
+        <button class="btn btn-danger" id="stale-unbind-confirm">Unbind ${dead.length}</button>
+        <button class="btn" id="stale-unbind-cancel">Cancel</button>
+      </div>`;
+    this._q("#dialog").classList.add("open");
+    this._q("#stale-unbind-cancel").addEventListener("click", () => this._closeDialog());
+    this._q("#stale-unbind-confirm").addEventListener("click", () => {
+      this._closeDialog();
+      this._unbindDeadTargets(dead);
+    });
+  }
+
+  /** Unbinds each binding in turn, then rescans just the sources involved
+   *  (never the removed targets, which can't answer) and reports what is
+   *  really gone, the same verify-against-a-rescan approach the single
+   *  Unbind uses rather than trusting zha_toolkit's own result. */
+  async _unbindDeadTargets(dead) {
+    if (this._scanState.running) {
+      this._setStatus("error", "A scan is already running. Try again when it has finished.");
+      return;
+    }
+    const sources = [...new Map(dead.map((b) => [normIeee(b.sourceIeee), b.sourceIeee])).values()];
+    for (let i = 0; i < dead.length; i++) {
+      const b = dead[i];
+      this._setStatus("info", `Unbinding ${i + 1} of ${dead.length}…`, 0);
+      try {
+        await this._api.unbindIeee(b.sourceIeee, b.targetIeee, [b.clusterId], {
+          endpoint: b.sourceEndpoint,
+          dstEndpoint: b.targetEndpoint,
+        });
+      } catch (err) {
+        console.warn("[ZHA Bindings Manager] unbind call raised, verifying against rescan anyway", err);
+      }
+    }
+    await this._scanBindings(sources);
+    const stillThere = dead.filter((b) =>
+      this._bindingPresent(b.sourceIeee, b.sourceEndpoint, b.clusterId, {
+        isGroup: false,
+        ieee: b.targetIeee,
+        endpoint: b.targetEndpoint,
+      })
+    );
+    const removed = dead.length - stillThere.length;
+    if (!stillThere.length) {
+      this._setStatus("success", `Removed all ${removed} binding${removed === 1 ? "" : "s"} to removed devices.`);
+    } else {
+      const unreadable = sources.filter((s) => this._scanFailures.has(normIeee(s))).length;
+      this._setStatus(
+        "error",
+        `Removed ${removed} of ${dead.length}. ${stillThere.length} still present${
+          unreadable ? ` (${unreadable} device${unreadable === 1 ? "" : "s"} didn't respond to the check, probably asleep)` : ""
+        }. Wake those devices and click "Unbind all" again.`,
+        0
+      );
+    }
   }
 
   /** Summary card above the Bindings table — counts across every scanned
@@ -3871,10 +4054,17 @@ export class ZhaBindingMapCard extends HTMLElement {
             ? `<button class="btn" id="health-detail-rescan" data-ieee="${escapeHtml(source.ieee)}">Rescan now</button>`
             : ""
         }
+        ${
+          health.code === "source_missing"
+            ? `<button class="btn" id="health-detail-forget" data-ieee="${escapeHtml(binding.sourceIeee)}">Forget</button>`
+            : ""
+        }
         <button class="btn" id="health-detail-close">Close</button>
       </div>`;
     this._q("#dialog").classList.add("open");
     this._q("#health-detail-close").addEventListener("click", () => this._closeDialog());
+    const forgetBtn = this._q("#health-detail-forget");
+    if (forgetBtn) forgetBtn.addEventListener("click", () => this._confirmForgetSources([forgetBtn.dataset.ieee]));
     const rescanBtn = this._q("#health-detail-rescan");
     if (rescanBtn) {
       rescanBtn.addEventListener("click", async () => {

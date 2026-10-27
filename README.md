@@ -31,24 +31,44 @@ A real example: an outside light kept turning on when the wrong switch was press
 ## Requirements
 
 - Home Assistant using the **ZHA** integration
-- Home Assistant Core **2023.7 or newer**
+- Home Assistant Core **2023.7 or newer** for the card on its own, **2024.7 or newer** for the integration
 - [`zha-toolkit`](https://github.com/mdeweerd/zha-toolkit) installed and working
 
 ZHA Bindings Manager is a frontend-only Lovelace card. It uses Home Assistant's built-in ZHA websocket API to read devices, endpoints, clusters and groups, and uses `zha-toolkit` to read and modify device binding tables.
 
-## Optional: shared storage across devices
+## Two ways to install
 
-By default, everything the card saves — bindings and health data, floor plan (image and device placements), Map positions, endpoint annotations, filters, and the other settings in the ⚙ panel — lives only in the browser you're using. Open the dashboard on your phone and it starts from scratch.
+ZHA Bindings Manager comes in two forms. Both run exactly the same card, built from this repository, and both carry the same version number.
 
-If you'd rather every browser and device see the same thing, install the companion integration [`zha-bindings-manager-backend`](https://github.com/hsolgaard/zha-bindings-manager-backend). It isn't in the default HACS store yet, so add it as a custom repository: **HACS → ⋮ → Custom repositories**, add `https://github.com/hsolgaard/zha-bindings-manager-backend` with category **Integration**, then install and add it (no configuration needed) and reload this card — it detects the backend automatically.
+| | **Card only** (this repository) | **Integration** ([`zha-bindings-manager-integration`](https://github.com/hsolgaard/zha-bindings-manager-integration)) |
+|---|---|---|
+| Install | HACS → Frontend. No restart. | HACS → Integrations, restart, then **Add integration**. |
+| Where your data is saved | Only in the browser you're using | Shared in Home Assistant, the same on every browser and device (can be switched off) |
+| Sidebar page | Set up yourself (see [Dedicated full-page dashboard](#dedicated-full-page-dashboard)) | Added automatically: **ZHA Bindings**, admins only (can be switched off) |
+| Notice when you remove a device others are bound to | No | Yes (can be switched off) |
+| After an update | Hard-refresh your browser | Restart Home Assistant; the browser always picks up the new card |
 
-A small badge in the toolbar always shows which mode is active — 🔒 **This browser only** or ☁ **Shared in Home Assistant**. The first time a browser detects the backend, it asks once whether to switch to shared storage; nothing changes without confirming, and if shared storage already has data from another device, this browser's copy is never overwritten — only whatever's actually missing gets filled in. You can switch either direction at any time from the ⚙ settings panel's Storage section, using the **Use shared storage** / **Use this browser only** buttons.
+**Install one or the other, not both.** If you have the integration, remove this card from HACS. The integration already includes it, and having both means two copies compete for the same page (the integration raises a Repairs notice if it finds both).
 
-This is entirely optional. Skip it and the card keeps working exactly as before, saved only in the current browser.
+### Using the card on your own dashboards with the integration
+
+The integration's sidebar page works on its own. To also place the card on your own dashboards (`type: custom:zha-binding-map-card`), open **Settings → Devices & services → ZHA Bindings Manager → Configure** and turn on **Load the card on every page**.
+
+It's off by default for a reason: the card is about 380 KB (about 100 KB compressed), and with this option on, every dashboard page loads it, including on phones and tablets that never open it. Leave it off unless you want the card outside the sidebar page.
+
+### Where your data is saved
+
+Everything the card saves (bindings and health data, the floor plan and device placements, Map positions, endpoint annotations, filters and the other ⚙ settings) lives in the browser you're using, unless the integration is installed with shared storage on.
+
+A badge in the toolbar always shows which mode is active: 🔒 **This browser only** or ☁ **Shared in Home Assistant**. The first time a browser finds shared storage, it asks once whether to use it. Nothing changes without confirming, and if shared storage already has data from another device, it's never overwritten: only what's missing is filled in from this browser. You can switch either way at any time in the ⚙ panel's Storage section.
+
+⚙ → **About** shows the card version and, if the integration is installed, its version too.
 
 ## Installation
 
 ### HACS — recommended
+
+These steps install the card only. For the integration, follow the installation steps in [its README](https://github.com/hsolgaard/zha-bindings-manager-integration) instead.
 
 This repository is in the default HACS store, so no custom repository step is needed:
 
@@ -234,7 +254,7 @@ Endpoint- and cluster-aware manual binding with existing-binding context.
 
 ## Dedicated full-page dashboard
 
-The repository includes `zha-binding-map-dashboard.yaml`, which creates a ready-made Panel dashboard.
+With the integration installed, you don't need this: it adds the **ZHA Bindings** sidebar page for you. For a card-only install, the repository includes `zha-binding-map-dashboard.yaml`, which creates a ready-made Panel dashboard.
 
 1. Copy `zha-binding-map-dashboard.yaml` into your Home Assistant config directory, alongside `configuration.yaml`.
 2. Add the following, merging it into an existing `lovelace:` block where necessary:
@@ -345,7 +365,7 @@ A GitHub Action (`.github/workflows/build.yml`) runs the build (plus tests) auto
 - Home Assistant's native **ZHA → Manage Zigbee Device → Bindings** interface can create bindings, but does not provide a network-wide view of existing binding tables.
 - [`zigbee-floorplan-card`](https://github.com/TheLarsinator/zigbee-floorplan-card) visualises Zigbee mesh routing and link quality, primarily for Zigbee2MQTT. It does not read or manage ZHA binding tables.
 - [`zigbee-capabilities`](https://github.com/hsolgaard/zigbee-capabilities) is the openly licensed community device-capability dataset behind the Zigbee Capability Explorer view. ZHA Bindings Manager is one contributor and one consumer of it, not the other way around — the dataset itself is usable independently of this card, and of Home Assistant entirely.
-- [`zha-bindings-manager-backend`](https://github.com/hsolgaard/zha-bindings-manager-backend) is the optional companion integration for shared storage described above.
+- [`zha-bindings-manager-integration`](https://github.com/hsolgaard/zha-bindings-manager-integration) is the integration version described in [Two ways to install](#two-ways-to-install). It includes this card.
 
 ## Credits
 

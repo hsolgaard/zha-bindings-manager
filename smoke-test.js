@@ -23,7 +23,14 @@ global.localStorage = {
 };
 let CapturedClass = null;
 global.window = { customCards: [] };
-global.customElements = { define: (name, cls) => { CapturedClass = cls; } };
+const definedElements = new Map();
+global.customElements = {
+  define: (name, cls) => {
+    definedElements.set(name, cls);
+    if (name === "zha-binding-map-card") CapturedClass = cls;
+  },
+  get: (name) => definedElements.get(name),
+};
 global.HTMLElement = class {
   attachShadow() {
     return { innerHTML: "", querySelector: () => null, querySelectorAll: () => [] };

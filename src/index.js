@@ -11,6 +11,7 @@
 /* eslint-disable no-console */
 
 import { ZhaBindingMapCard } from "./card.js";
+import { ZhaBindingsPanel } from "./panel.js";
 import { CARD_VERSION } from "./constants.js";
 
 // Logged once per script load (not per card instance) so you can confirm
@@ -23,15 +24,40 @@ console.info(
   "color: #039be5; background: white; font-weight: 700; border-radius: 0 3px 3px 0;"
 );
 
-customElements.define("zha-binding-map-card", ZhaBindingMapCard);
+// A browser can define an element only once. If another copy of this card
+// already did (typically the HACS card plus the copy the ZHA Bindings
+// Manager integration ships), step aside instead of throwing, and say which
+// version is actually running. The integration raises a Repairs issue for
+// this case too.
+const CARD_TAG = "zha-binding-map-card";
+const existingCard = customElements.get(CARD_TAG);
+if (existingCard) {
+  console.warn(
+    `ZHA Bindings Manager: card v${CARD_VERSION} was not loaded because v${existingCard.cardVersion || "unknown"} ` +
+      "is already loaded on this page. This happens when the card is installed twice (from HACS and through " +
+      "the ZHA Bindings Manager integration). See Settings → Repairs."
+  );
+} else {
+  ZhaBindingMapCard.cardVersion = CARD_VERSION;
+  customElements.define(CARD_TAG, ZhaBindingMapCard);
+  registerCardPicker();
+}
 
-window.customCards = window.customCards || [];
-window.customCards.push({
-  // NOTE: "type" and the customElements.define() name above must never change —
-  // existing dashboards reference `custom:zha-binding-map-card` in their YAML.
-  // Only the display name/description below (shown in the card picker and HACS)
-  // reflect the "ZHA Bindings Manager" project name.
-  type: "zha-binding-map-card",
-  name: "ZHA Bindings Manager",
-  description: "Visual manager for ZHA Zigbee direct bindings — graph/table overview plus drag-and-drop bind/unbind, built on top of zha-toolkit.",
-});
+// The integration's sidebar panel (see panel.js). Harmless in a card-only
+// install: nothing uses it unless the integration registers the panel.
+if (!customElements.get("zha-bindings-manager-panel")) {
+  customElements.define("zha-bindings-manager-panel", ZhaBindingsPanel);
+}
+
+function registerCardPicker() {
+  window.customCards = window.customCards || [];
+  window.customCards.push({
+    // NOTE: "type" and the customElements.define() name above must never change —
+    // existing dashboards reference `custom:zha-binding-map-card` in their YAML.
+    // Only the display name/description below (shown in the card picker and HACS)
+    // reflect the "ZHA Bindings Manager" project name.
+    type: "zha-binding-map-card",
+    name: "ZHA Bindings Manager",
+    description: "Visual manager for ZHA Zigbee direct bindings — graph/table overview plus drag-and-drop bind/unbind, built on top of zha-toolkit.",
+  });
+}

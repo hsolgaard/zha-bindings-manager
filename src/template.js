@@ -48,9 +48,9 @@ export const SHELL_HTML = `
       <button type="button" class="btn btn-small" id="btn-use-shared-storage" style="display:none">Use shared storage</button>
       <button type="button" class="btn btn-small" id="btn-use-local-storage" style="display:none">Use this browser only</button>
       <div id="storage-backend-hint" class="hint" style="display:none">
-        Your data is only saved in this browser. An optional backend integration can save it centrally in
-        Home Assistant instead, so it's available from every browser and device.
-        <a href="https://github.com/hsolgaard/zha-bindings-manager-backend" target="_blank" rel="noopener">Learn more →</a>
+        Your data is only saved in this browser. The optional ZHA Bindings Manager integration can save it
+        centrally in Home Assistant instead, so it's available from every browser and device.
+        <a href="https://github.com/hsolgaard/zha-bindings-manager-integration" target="_blank" rel="noopener">Learn more →</a>
         <button type="button" class="btn btn-small" id="btn-dismiss-storage-hint">Dismiss</button>
       </div>
     </div>

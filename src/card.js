@@ -42,6 +42,7 @@ import { SHELL_HTML } from "./template.js";
 import { LocalStorageProvider } from "./storage/local-storage-provider.js";
 import { HaStorageProvider } from "./storage/ha-storage-provider.js";
 import { removedSources, deadTargetBindings, pruneRemovedSources, forgetSource } from "./stale-bindings.js";
+import { aboutIntegrationText } from "./about.js";
 import { STYLE } from "./styles.js";
 import {
   DIRECTION_ALL,
@@ -203,7 +204,9 @@ export class ZhaBindingMapCard extends HTMLElement {
     this._localStorage = new LocalStorageProvider();
     this._storage = this._localStorage;
     this._backendAvailable = null; // null = not checked yet this load
-    this._backendVersion = null; // backend integration's version, when it reports one
+    this._backendVersion = null; // integration's version, when it reports one
+    this._backendInstalled = false; // integration answered, even if shared storage is switched off
+    this._bundledCardVersion = null; // card version the integration ships (1.0.0+)
     this._storageMode = null; // "local" | "shared", set by _resolveStorageProvider
 
     // Binding Health: which devices failed to respond on the *most recent*
@@ -510,7 +513,9 @@ export class ZhaBindingMapCard extends HTMLElement {
   async _resolveStorageProvider() {
     const probe = await HaStorageProvider.probe(this._hass);
     this._backendAvailable = probe.available;
+    this._backendInstalled = probe.installed;
     this._backendVersion = probe.version;
+    this._bundledCardVersion = probe.bundledCardVersion;
     if (!this._backendAvailable) {
       this._storageMode = "local";
       this._storage = this._localStorage;
@@ -540,7 +545,7 @@ export class ZhaBindingMapCard extends HTMLElement {
     }
 
     const useShared = confirm(
-      "ZHA Bindings Manager found a shared storage backend on this Home Assistant instance.\n\n" +
+      "ZHA Bindings Manager found shared storage (the ZHA Bindings Manager integration) on this Home Assistant instance.\n\n" +
         "Use shared storage? Anything shared storage is missing (bindings, floor plan, filters, and other settings) " +
         "will be filled in from this browser's local copy. Anything already saved there — e.g. from another browser " +
         "or device — will NOT be overwritten.\n\n" +
@@ -640,7 +645,7 @@ export class ZhaBindingMapCard extends HTMLElement {
     if (badge) {
       if (this._storageMode === "shared") {
         badge.textContent = "☁ Shared in Home Assistant";
-        badge.title = "This card's scan data is saved centrally via the ZHA Bindings Manager Backend integration — available from any browser or device.";
+        badge.title = "This card's scan data is saved centrally via the ZHA Bindings Manager integration — available from any browser or device.";
       } else if (this._storageMode === "local") {
         badge.textContent = "🔒 This browser only";
         badge.title = this._backendAvailable
@@ -656,22 +661,25 @@ export class ZhaBindingMapCard extends HTMLElement {
     if (detail) {
       detail.textContent =
         this._storageMode === "shared"
-          ? "Using shared storage: this browser's scan data is saved via the ZHA Bindings Manager Backend integration, so it's the same data in every browser and device that opens this card."
+          ? "Using shared storage: this browser's scan data is saved via the ZHA Bindings Manager integration, so it's the same data in every browser and device that opens this card."
           : "Using this browser's local storage: scan data is only available here, not shared with other browsers or devices.";
     }
 
     const backendLine = this._q("#backend-version-line");
     if (backendLine) {
-      backendLine.textContent = this._backendAvailable
-        ? `ZHA Bindings Manager Backend ${this._backendVersion ? "v" + this._backendVersion : "(version not reported)"} is installed.`
-        : this._backendAvailable === false
-          ? "ZHA Bindings Manager Backend is not installed."
-          : "";
+      backendLine.textContent = aboutIntegrationText({
+        checked: this._backendAvailable !== null,
+        installed: this._backendInstalled,
+        storageOn: this._backendAvailable,
+        version: this._backendVersion,
+        bundledCardVersion: this._bundledCardVersion,
+        cardVersion: CARD_VERSION,
+      });
     }
 
     const hint = this._q("#storage-backend-hint");
     if (hint) {
-      const show = !this._backendAvailable && !this._loadStorageHintDismissed();
+      const show = !this._backendInstalled && !this._backendAvailable && !this._loadStorageHintDismissed();
       hint.style.display = show ? "" : "none";
     }
 

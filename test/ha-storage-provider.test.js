@@ -43,18 +43,50 @@ describe("HaStorageProvider.probe", () => {
   it("returns the backend's version alongside availability", async () => {
     const connection = makeFakeConnection();
     connection.on("zha_bindings_manager/get_capabilities", async () => ({ available: true, version: "0.1.0" }));
-    expect(await HaStorageProvider.probe({ connection })).toEqual({ available: true, version: "0.1.0" });
+    expect(await HaStorageProvider.probe({ connection })).toEqual({
+      installed: true,
+      available: true,
+      version: "0.1.0",
+      bundledCardVersion: null,
+    });
   });
 
   it("returns a null version when the backend doesn't report one", async () => {
     const connection = makeFakeConnection();
     connection.on("zha_bindings_manager/get_capabilities", async () => ({ available: true }));
-    expect(await HaStorageProvider.probe({ connection })).toEqual({ available: true, version: null });
+    expect(await HaStorageProvider.probe({ connection })).toEqual({
+      installed: true,
+      available: true,
+      version: null,
+      bundledCardVersion: null,
+    });
   });
 
   it("returns unavailable with no version when the integration isn't installed", async () => {
     const connection = makeFakeConnection();
-    expect(await HaStorageProvider.probe({ connection })).toEqual({ available: false, version: null });
+    expect(await HaStorageProvider.probe({ connection })).toEqual({
+      installed: false,
+      available: false,
+      version: null,
+      bundledCardVersion: null,
+    });
+  });
+
+  it("reports the bundled card version, and storage as unavailable when switched off in the integration", async () => {
+    const connection = makeFakeConnection();
+    connection.on("zha_bindings_manager/get_capabilities", async () => ({
+      available: true,
+      version: "1.0.0",
+      bundled_card_version: "1.0.0",
+      features: { shared_storage: false },
+    }));
+    expect(await HaStorageProvider.probe({ connection })).toEqual({
+      installed: true,
+      available: false,
+      version: "1.0.0",
+      bundledCardVersion: "1.0.0",
+    });
+    expect(await HaStorageProvider.isAvailable({ connection })).toBe(false);
   });
 });
 

@@ -3,7 +3,28 @@
 All notable changes to ZHA Bindings Manager are documented here.
 
 
-## [0.36.5]
+## [1.0.0]
+
+ZHA Bindings Manager now comes in two forms that share one version number: this card on its own, and the
+[ZHA Bindings Manager integration](https://github.com/hsolgaard/zha-bindings-manager-integration), which includes this
+card plus shared storage, an automatic sidebar page and removed-device notices. See "Two ways to install" in the README.
+
+### Added
+
+- **Sidebar page support.** The integration's **ZHA Bindings** sidebar page runs this card full-page, with Home
+  Assistant's usual header and menu button. It uses the same saved data as a dashboard card.
+- **⚙ → About shows the integration** and its version, or "Card-only install". If the page is running a different card
+  version from the one the integration includes, it says so: another copy of the card loaded first.
+
+### Changed
+
+- **Installing the card twice no longer breaks the page.** If a second copy loads (for example the HACS card and the
+  integration's copy), it steps aside and logs which version is running instead of failing.
+- **Shared storage respects the integration's setting.** If shared storage is switched off in the integration's
+  options, the card uses this browser's storage.
+- "ZHA Bindings Manager Backend" is now called the ZHA Bindings Manager integration throughout.
+
+
 
 ### Fixed
 

@@ -21,7 +21,7 @@
  * zha_toolkit MUST be installed (via HACS) and working for bind/unbind/scan
  * to function. See README.md for details.
  *
- * Version: 0.36.5
+ * Version: 1.0.0
  */
 (() => {
   // src/capexplorer-constants.js
@@ -78,7 +78,7 @@
 
   // src/constants.js
   var ZTK_DOMAIN = "zha_toolkit";
-  var CARD_VERSION = "0.36.5";
+  var CARD_VERSION = "1.0.0";
   var CHANGELOG_URL = "https://github.com/hsolgaard/zha-bindings-manager/blob/main/CHANGELOG.md";
   var DEFAULT_BINDABLE_OUT_CLUSTERS = [5, 6, 8, 258, 768];
   var MEMBERSHIP_EDGE_COLOR = "#8e24aa";
@@ -850,9 +850,9 @@
       <button type="button" class="btn btn-small" id="btn-use-shared-storage" style="display:none">Use shared storage</button>
       <button type="button" class="btn btn-small" id="btn-use-local-storage" style="display:none">Use this browser only</button>
       <div id="storage-backend-hint" class="hint" style="display:none">
-        Your data is only saved in this browser. An optional backend integration can save it centrally in
-        Home Assistant instead, so it's available from every browser and device.
-        <a href="https://github.com/hsolgaard/zha-bindings-manager-backend" target="_blank" rel="noopener">Learn more \u2192</a>
+        Your data is only saved in this browser. The optional ZHA Bindings Manager integration can save it
+        centrally in Home Assistant instead, so it's available from every browser and device.
+        <a href="https://github.com/hsolgaard/zha-bindings-manager-integration" target="_blank" rel="noopener">Learn more \u2192</a>
         <button type="button" class="btn btn-small" id="btn-dismiss-storage-hint">Dismiss</button>
       </div>
     </div>
@@ -1130,18 +1130,29 @@
     static async isAvailable(hass) {
       return (await _HaStorageProvider.probe(hass)).available;
     }
-    /** Same check as isAvailable(), plus the backend's own version string
-     *  (get_capabilities has returned it since backend 0.1.0), so the ⚙
-     *  panel can show which backend build is installed. version is null
-     *  when the backend isn't installed or didn't report one. */
+    /** What the ZHA Bindings Manager integration reports about itself.
+     *  - installed: the integration answered at all.
+     *  - available: shared storage can be used (installed, and not switched
+     *    off in the integration's options; integrations older than 1.0.0
+     *    don't report features, so storage counts as on).
+     *  - version: the integration's version (reported since 0.1.0).
+     *  - bundledCardVersion: the card version the integration ships (1.0.0+).
+     *  Unknown values are null. */
     static async probe(hass) {
+      const none = { installed: false, available: false, version: null, bundledCardVersion: null };
       try {
         const res = await hass.connection.sendMessagePromise({ type: WS_GET_CAPABILITIES });
-        const available = !!(res && res.available);
-        const version = available && res && typeof res.version === "string" && res.version ? res.version : null;
-        return { available, version };
+        if (!res || !res.available) return none;
+        const str = (v) => typeof v === "string" && v ? v : null;
+        const storageOff = !!(res.features && res.features.shared_storage === false);
+        return {
+          installed: true,
+          available: !storageOff,
+          version: str(res.version),
+          bundledCardVersion: str(res.bundled_card_version)
+        };
       } catch (e) {
-        return { available: false, version: null };
+        return none;
       }
     }
     async _ensureLoaded() {
@@ -1290,6 +1301,22 @@
       }
     }
     return dropped;
+  }
+
+  // src/about.js
+  function aboutIntegrationText({ checked, installed, storageOn, version, bundledCardVersion, cardVersion }) {
+    if (!checked) return "";
+    if (!installed) {
+      return "Card-only install. The ZHA Bindings Manager integration adds shared storage, a sidebar page and notices when a bound device is removed.";
+    }
+    const parts = [`ZHA Bindings Manager integration ${version ? "v" + version : "(version not reported)"} is installed.`];
+    if (bundledCardVersion && bundledCardVersion !== cardVersion) {
+      parts.push(
+        `This page is running card v${cardVersion}, but the integration includes card v${bundledCardVersion}: another copy of the card loaded first. See Settings \u2192 Repairs.`
+      );
+    }
+    if (!storageOn) parts.push("Shared storage is switched off in the integration's options.");
+    return parts.join(" ");
   }
 
   // src/styles.js
@@ -2359,6 +2386,8 @@ a.btn { display:inline-block; text-decoration:none; }
       this._storage = this._localStorage;
       this._backendAvailable = null;
       this._backendVersion = null;
+      this._backendInstalled = false;
+      this._bundledCardVersion = null;
       this._storageMode = null;
       this._scanFailures = /* @__PURE__ */ new Set();
       this._scanPartial = /* @__PURE__ */ new Map();
@@ -2605,7 +2634,9 @@ a.btn { display:inline-block; text-decoration:none; }
     async _resolveStorageProvider() {
       const probe = await HaStorageProvider.probe(this._hass);
       this._backendAvailable = probe.available;
+      this._backendInstalled = probe.installed;
       this._backendVersion = probe.version;
+      this._bundledCardVersion = probe.bundledCardVersion;
       if (!this._backendAvailable) {
         this._storageMode = "local";
         this._storage = this._localStorage;
@@ -2631,7 +2662,7 @@ a.btn { display:inline-block; text-decoration:none; }
         return;
       }
       const useShared = confirm(
-        "ZHA Bindings Manager found a shared storage backend on this Home Assistant instance.\n\nUse shared storage? Anything shared storage is missing (bindings, floor plan, filters, and other settings) will be filled in from this browser's local copy. Anything already saved there \u2014 e.g. from another browser or device \u2014 will NOT be overwritten.\n\nOK \u2014 use shared storage\nCancel \u2014 keep using this browser only"
+        "ZHA Bindings Manager found shared storage (the ZHA Bindings Manager integration) on this Home Assistant instance.\n\nUse shared storage? Anything shared storage is missing (bindings, floor plan, filters, and other settings) will be filled in from this browser's local copy. Anything already saved there \u2014 e.g. from another browser or device \u2014 will NOT be overwritten.\n\nOK \u2014 use shared storage\nCancel \u2014 keep using this browser only"
       );
       if (useShared) {
         await this._fillMissingBackendDataFromLocal(haStorage);
@@ -2716,7 +2747,7 @@ a.btn { display:inline-block; text-decoration:none; }
       if (badge) {
         if (this._storageMode === "shared") {
           badge.textContent = "\u2601 Shared in Home Assistant";
-          badge.title = "This card's scan data is saved centrally via the ZHA Bindings Manager Backend integration \u2014 available from any browser or device.";
+          badge.title = "This card's scan data is saved centrally via the ZHA Bindings Manager integration \u2014 available from any browser or device.";
         } else if (this._storageMode === "local") {
           badge.textContent = "\u{1F512} This browser only";
           badge.title = this._backendAvailable ? "This card's scan data is saved only in this browser. A shared backend is installed but you've chosen not to use it \u2014 see the \u2699 settings panel to change that." : "This card's scan data is saved only in this browser. See the \u2699 settings panel for an optional way to share it across devices.";
@@ -2727,15 +2758,22 @@ a.btn { display:inline-block; text-decoration:none; }
       }
       const detail = this._q("#storage-mode-detail");
       if (detail) {
-        detail.textContent = this._storageMode === "shared" ? "Using shared storage: this browser's scan data is saved via the ZHA Bindings Manager Backend integration, so it's the same data in every browser and device that opens this card." : "Using this browser's local storage: scan data is only available here, not shared with other browsers or devices.";
+        detail.textContent = this._storageMode === "shared" ? "Using shared storage: this browser's scan data is saved via the ZHA Bindings Manager integration, so it's the same data in every browser and device that opens this card." : "Using this browser's local storage: scan data is only available here, not shared with other browsers or devices.";
       }
       const backendLine = this._q("#backend-version-line");
       if (backendLine) {
-        backendLine.textContent = this._backendAvailable ? `ZHA Bindings Manager Backend ${this._backendVersion ? "v" + this._backendVersion : "(version not reported)"} is installed.` : this._backendAvailable === false ? "ZHA Bindings Manager Backend is not installed." : "";
+        backendLine.textContent = aboutIntegrationText({
+          checked: this._backendAvailable !== null,
+          installed: this._backendInstalled,
+          storageOn: this._backendAvailable,
+          version: this._backendVersion,
+          bundledCardVersion: this._bundledCardVersion,
+          cardVersion: CARD_VERSION
+        });
       }
       const hint = this._q("#storage-backend-hint");
       if (hint) {
-        const show = !this._backendAvailable && !this._loadStorageHintDismissed();
+        const show = !this._backendInstalled && !this._backendAvailable && !this._loadStorageHintDismissed();
         hint.style.display = show ? "" : "none";
       }
       const useSharedBtn = this._q("#btn-use-shared-storage");
@@ -7406,21 +7444,102 @@ a.btn { display:inline-block; text-decoration:none; }
     }
   };
 
+  // src/panel.js
+  var STYLE2 = `
+:host { display: block; min-height: 100vh; background: var(--primary-background-color); }
+.header {
+  display: flex; align-items: center; gap: 4px; height: var(--header-height, 56px); padding: 0 12px;
+  background: var(--app-header-background-color, var(--primary-color));
+  color: var(--app-header-text-color, var(--text-primary-color, #fff));
+  border-bottom: var(--app-header-border-bottom, none);
+  box-sizing: border-box; position: sticky; top: 0; z-index: 2;
+}
+.title { font-size: 20px; font-weight: 400; margin-left: 8px; }
+.content { padding: 8px; box-sizing: border-box; }
+`;
+  var ZhaBindingsPanel = class extends HTMLElement {
+    constructor() {
+      super();
+      this.attachShadow({ mode: "open" });
+      this._hass = null;
+      this._narrow = false;
+      this._card = null;
+      this._menu = null;
+    }
+    connectedCallback() {
+      if (this._card) return;
+      this.shadowRoot.innerHTML = `<style>${STYLE2}</style>
+      <div class="header"><span class="menu"></span><div class="title">ZHA Bindings</div></div>
+      <div class="content"></div>`;
+      this._menu = document.createElement("ha-menu-button");
+      this.shadowRoot.querySelector(".menu").appendChild(this._menu);
+      this._card = document.createElement("zha-binding-map-card");
+      if (typeof this._card.setConfig === "function") {
+        this._card.setConfig({ type: "custom:zha-binding-map-card" });
+      }
+      this.shadowRoot.querySelector(".content").appendChild(this._card);
+      this._apply();
+    }
+    set hass(hass) {
+      this._hass = hass;
+      this._apply();
+    }
+    get hass() {
+      return this._hass;
+    }
+    set narrow(narrow) {
+      this._narrow = !!narrow;
+      this._apply();
+    }
+    get narrow() {
+      return this._narrow;
+    }
+    // route and panel are set by Home Assistant; nothing here needs them yet.
+    set route(route) {
+      this._route = route;
+    }
+    set panel(panel) {
+      this._panel = panel;
+    }
+    _apply() {
+      if (this._menu) {
+        this._menu.hass = this._hass;
+        this._menu.narrow = this._narrow;
+      }
+      if (this._card && this._hass) this._card.hass = this._hass;
+    }
+  };
+
   // src/index.js
   console.info(
     `%c ZHA-BINDING-MAP-CARD %c v${CARD_VERSION} `,
     "color: white; background: #039be5; font-weight: 700; border-radius: 3px 0 0 3px;",
     "color: #039be5; background: white; font-weight: 700; border-radius: 0 3px 3px 0;"
   );
-  customElements.define("zha-binding-map-card", ZhaBindingMapCard);
-  window.customCards = window.customCards || [];
-  window.customCards.push({
-    // NOTE: "type" and the customElements.define() name above must never change —
-    // existing dashboards reference `custom:zha-binding-map-card` in their YAML.
-    // Only the display name/description below (shown in the card picker and HACS)
-    // reflect the "ZHA Bindings Manager" project name.
-    type: "zha-binding-map-card",
-    name: "ZHA Bindings Manager",
-    description: "Visual manager for ZHA Zigbee direct bindings \u2014 graph/table overview plus drag-and-drop bind/unbind, built on top of zha-toolkit."
-  });
+  var CARD_TAG = "zha-binding-map-card";
+  var existingCard = customElements.get(CARD_TAG);
+  if (existingCard) {
+    console.warn(
+      `ZHA Bindings Manager: card v${CARD_VERSION} was not loaded because v${existingCard.cardVersion || "unknown"} is already loaded on this page. This happens when the card is installed twice (from HACS and through the ZHA Bindings Manager integration). See Settings \u2192 Repairs.`
+    );
+  } else {
+    ZhaBindingMapCard.cardVersion = CARD_VERSION;
+    customElements.define(CARD_TAG, ZhaBindingMapCard);
+    registerCardPicker();
+  }
+  if (!customElements.get("zha-bindings-manager-panel")) {
+    customElements.define("zha-bindings-manager-panel", ZhaBindingsPanel);
+  }
+  function registerCardPicker() {
+    window.customCards = window.customCards || [];
+    window.customCards.push({
+      // NOTE: "type" and the customElements.define() name above must never change —
+      // existing dashboards reference `custom:zha-binding-map-card` in their YAML.
+      // Only the display name/description below (shown in the card picker and HACS)
+      // reflect the "ZHA Bindings Manager" project name.
+      type: "zha-binding-map-card",
+      name: "ZHA Bindings Manager",
+      description: "Visual manager for ZHA Zigbee direct bindings \u2014 graph/table overview plus drag-and-drop bind/unbind, built on top of zha-toolkit."
+    });
+  }
 })();

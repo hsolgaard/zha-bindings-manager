@@ -42,18 +42,29 @@ export class HaStorageProvider extends StorageProvider {
     return (await HaStorageProvider.probe(hass)).available;
   }
 
-  /** Same check as isAvailable(), plus the backend's own version string
-   *  (get_capabilities has returned it since backend 0.1.0), so the ⚙
-   *  panel can show which backend build is installed. version is null
-   *  when the backend isn't installed or didn't report one. */
+  /** What the ZHA Bindings Manager integration reports about itself.
+   *  - installed: the integration answered at all.
+   *  - available: shared storage can be used (installed, and not switched
+   *    off in the integration's options; integrations older than 1.0.0
+   *    don't report features, so storage counts as on).
+   *  - version: the integration's version (reported since 0.1.0).
+   *  - bundledCardVersion: the card version the integration ships (1.0.0+).
+   *  Unknown values are null. */
   static async probe(hass) {
+    const none = { installed: false, available: false, version: null, bundledCardVersion: null };
     try {
       const res = await hass.connection.sendMessagePromise({ type: WS_GET_CAPABILITIES });
-      const available = !!(res && res.available);
-      const version = available && res && typeof res.version === "string" && res.version ? res.version : null;
-      return { available, version };
+      if (!res || !res.available) return none;
+      const str = (v) => (typeof v === "string" && v ? v : null);
+      const storageOff = !!(res.features && res.features.shared_storage === false);
+      return {
+        installed: true,
+        available: !storageOff,
+        version: str(res.version),
+        bundledCardVersion: str(res.bundled_card_version),
+      };
     } catch (e) {
-      return { available: false, version: null };
+      return none;
     }
   }
 

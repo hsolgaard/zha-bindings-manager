@@ -4,6 +4,9 @@ import {
   deadTargetBindings,
   pruneRemovedSources,
   forgetSource,
+  vanishedDevices,
+  rememberDevices,
+  knownDevicesToSave,
 } from "../src/stale-bindings.js";
 
 const LIVE = "aa:aa:aa:aa:aa:aa:aa:01";
@@ -66,5 +69,35 @@ describe("forgetSource", () => {
     expect(forgetSource(m, GONE.toUpperCase())).toBe(2);
     expect(m.has(GONE)).toBe(false);
     expect(m.has(LIVE)).toBe(true);
+  });
+});
+
+describe("vanishedDevices", () => {
+  it("lists devices missing from the new list", () => {
+    expect(vanishedDevices([{ ieee: LIVE }, { ieee: GONE }], [{ ieee: LIVE.toUpperCase() }])).toEqual([GONE]);
+  });
+  it("reports nothing when the new list is empty (failed load)", () => {
+    expect(vanishedDevices([{ ieee: LIVE }], [])).toEqual([]);
+  });
+});
+
+describe("rememberDevices / knownDevicesToSave", () => {
+  const label = (d) => d.name;
+  it("records names and reports changes only when something differs", () => {
+    const known = new Map();
+    expect(rememberDevices(known, [{ ieee: GONE.toUpperCase(), name: "Hall switch", model: "M" }], label)).toBe(true);
+    expect(known.get(GONE).name).toBe("Hall switch");
+    expect(rememberDevices(known, [{ ieee: GONE, name: "Hall switch", model: "M" }], label)).toBe(false);
+    expect(rememberDevices(known, [{ ieee: GONE, name: "Renamed", model: "M" }], label)).toBe(true);
+  });
+  it("keeps live devices and removed devices still in saved bindings, drops the rest", () => {
+    const known = new Map([
+      [LIVE, { name: "live" }],
+      [GONE, { name: "gone, still saved" }],
+      [GONE_TARGET, { name: "gone, still a target" }],
+      ["ff:ff:ff:ff:ff:ff:ff:ff", { name: "gone and forgotten" }],
+    ]);
+    const saved = knownDevicesToSave(known, devices, makeMap());
+    expect(Object.keys(saved)).toEqual([GONE, GONE_TARGET, LIVE].sort());
   });
 });

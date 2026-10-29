@@ -71,3 +71,61 @@ export function forgetSource(bindingsMap, ieee) {
   }
   return dropped;
 }
+
+/** IEEEs present in `prev` but missing from `next`: devices removed from
+ *  ZHA since the list was last loaded. Empty when `next` is empty, so a
+ *  failed or partial reload never reports every device as removed. */
+export function vanishedDevices(prev, next) {
+  if (!next || !next.length) return [];
+  const now = knownIeees(next);
+  return (prev || []).map((d) => normIeee(d.ieee)).filter((ieee) => !now.has(ieee));
+}
+
+/** Records what each live device was called and where it was, so a device
+ *  that is later removed can still be shown by name. `label` turns a ZHA
+ *  device into its display name. Updates `known` (a Map keyed by
+ *  lower-case IEEE) in place and returns true if anything changed. */
+export function rememberDevices(known, devices, label) {
+  let changed = false;
+  for (const d of devices || []) {
+    const ieee = normIeee(d.ieee);
+    if (!ieee) continue;
+    const info = {
+      name: label(d) || "",
+      manufacturer: d.manufacturer || "",
+      model: d.model || "",
+      area_id: d.area_id || null,
+    };
+    const old = known.get(ieee);
+    if (
+      !old ||
+      old.name !== info.name ||
+      old.manufacturer !== info.manufacturer ||
+      old.model !== info.model ||
+      old.area_id !== info.area_id
+    ) {
+      known.set(ieee, info);
+      changed = true;
+    }
+  }
+  return changed;
+}
+
+/** The part of `known` worth saving: live devices, plus removed devices
+ *  the saved bindings still mention (as source or target). Anything else
+ *  is a removed device whose data has been forgotten, so its name is no
+ *  longer needed. Returns a plain object sorted by IEEE so two snapshots
+ *  of the same data compare equal as JSON. */
+export function knownDevicesToSave(known, devices, bindingsMap) {
+  const keep = knownIeees(devices);
+  for (const [ieee, list] of bindingsMap || []) {
+    keep.add(normIeee(ieee));
+    for (const b of list || []) if (b.targetIeee) keep.add(normIeee(b.targetIeee));
+  }
+  const out = {};
+  [...(known || new Map()).keys()]
+    .filter((ieee) => keep.has(ieee))
+    .sort()
+    .forEach((ieee) => (out[ieee] = known.get(ieee)));
+  return out;
+}

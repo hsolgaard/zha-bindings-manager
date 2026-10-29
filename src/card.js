@@ -41,7 +41,15 @@ import { ZhaApi } from "./api-client.js";
 import { SHELL_HTML } from "./template.js";
 import { LocalStorageProvider } from "./storage/local-storage-provider.js";
 import { HaStorageProvider } from "./storage/ha-storage-provider.js";
-import { removedSources, deadTargetBindings, pruneRemovedSources, forgetSource } from "./stale-bindings.js";
+import {
+  removedSources,
+  deadTargetBindings,
+  pruneRemovedSources,
+  forgetSource,
+  vanishedDevices,
+  rememberDevices,
+  knownDevicesToSave,
+} from "./stale-bindings.js";
 import { aboutIntegrationText } from "./about.js";
 import { STYLE } from "./styles.js";
 import {
@@ -138,6 +146,15 @@ export class ZhaBindingMapCard extends HTMLElement {
 
     this._devices = [];
     this._groups = [];
+    // Last-known name, model and area of every device seen, keyed by
+    // lower-case IEEE, so a device removed from ZHA can still be shown by
+    // name in its leftover bindings. Persisted as the "known-devices" item.
+    this._knownDevices = new Map();
+    this._savedKnownJson = null;
+    // Device-registry subscription (a Promise of the unsubscribe function)
+    // and the debounce timer for the device-list reload it triggers.
+    this._registrySub = null;
+    this._deviceReloadTimer = null;
     this._clusterCache = new Map(); // ieee -> Cluster[]
     this._bindings = new Map(); // ieee(lower) -> [normalized binding, ...]
     this._positions = {}; // nodeKey -> {x,y}
@@ -315,6 +332,7 @@ export class ZhaBindingMapCard extends HTMLElement {
     if (first) {
       this._render();
       this._loadAll();
+      this._subscribeRegistry();
     }
   }
 
@@ -338,9 +356,54 @@ export class ZhaBindingMapCard extends HTMLElement {
 
   connectedCallback() {
     window.addEventListener("resize", this._onResize);
+    // Re-attached (e.g. back from another dashboard view): listen again.
+    if (this._hass) this._subscribeRegistry();
   }
   disconnectedCallback() {
     window.removeEventListener("resize", this._onResize);
+    this._unsubscribeRegistry();
+  }
+
+  /** Listens for Home Assistant device-registry changes, so a device removed
+   *  from ZHA (or renamed, or moved to another area) is picked up without
+   *  reloading the page. Before this, the device list was read once when the
+   *  page opened, and a removed device still looked live until a browser
+   *  refresh: its saved bindings stayed Info and scans failed on it as if it
+   *  were asleep. */
+  _subscribeRegistry() {
+    if (this._registrySub || !this._hass || !this._hass.connection || !this._hass.connection.subscribeEvents) return;
+    this._registrySub = this._hass.connection
+      .subscribeEvents((ev) => this._onRegistryEvent(ev), "device_registry_updated")
+      .catch((e) => {
+        console.warn("ZHA Bindings Manager: could not watch for device changes:", e.message || e);
+        this._registrySub = null;
+        return null;
+      });
+  }
+  _unsubscribeRegistry() {
+    const sub = this._registrySub;
+    this._registrySub = null;
+    if (this._deviceReloadTimer) clearTimeout(this._deviceReloadTimer);
+    this._deviceReloadTimer = null;
+    if (sub) sub.then((unsub) => unsub && unsub()).catch(() => {});
+  }
+  /** The registry covers every integration, not just ZHA, and a removal can
+   *  arrive as several events, so reloads are debounced. A scan reloads the
+   *  list itself before starting; if one is running, try again after it. */
+  _onRegistryEvent(ev) {
+    const action = ev && ev.data && ev.data.action;
+    if (!["create", "remove", "update"].includes(action)) return;
+    if (this._deviceReloadTimer) clearTimeout(this._deviceReloadTimer);
+    const attempt = () => {
+      this._deviceReloadTimer = null;
+      if (!this._loaded) return;
+      if (this._scanState.running) {
+        this._deviceReloadTimer = setTimeout(attempt, 3000);
+        return;
+      }
+      this._reloadDevices();
+    };
+    this._deviceReloadTimer = setTimeout(attempt, 1500);
   }
 
   async _loadPositions() {
@@ -906,6 +969,33 @@ export class ZhaBindingMapCard extends HTMLElement {
     await this._storage.setItem(this._config.id, "show-device-photos", this._showDevicePhotos);
   }
 
+  // Last-known device names (see the constructor). Deliberately not in
+  // SYNCED_ITEM_KEYS: it's rewritten whenever names change, so counting it
+  // would make every browser look like it "has data" in the storage-mode
+  // check. It rebuilds itself from the live device list anyway.
+  async _loadKnownDevices() {
+    try {
+      const raw = await this._storage.getItem(this._config.id, "known-devices");
+      this._knownDevices = new Map(Object.entries(raw && typeof raw === "object" ? raw : {}));
+    } catch (e) {
+      this._knownDevices = new Map();
+    }
+    this._savedKnownJson = JSON.stringify(knownDevicesToSave(this._knownDevices, this._devices, this._bindings));
+  }
+  /** Saves only when the snapshot actually changed, so routine reloads
+   *  don't write to (shared) storage. */
+  async _saveKnownDevices() {
+    const snap = knownDevicesToSave(this._knownDevices, this._devices, this._bindings);
+    const json = JSON.stringify(snap);
+    if (json === this._savedKnownJson) return;
+    this._savedKnownJson = json;
+    try {
+      await this._storage.setItem(this._config.id, "known-devices", snap);
+    } catch (e) {
+      /* ignore quota errors */
+    }
+  }
+
   _setStatus(level, text, timeout = 6000) {
     this._status = { level, text };
     this._renderStatus();
@@ -945,22 +1035,59 @@ export class ZhaBindingMapCard extends HTMLElement {
     await this._loadFloorplan();
     await this._loadEndpointAnnotations();
     await this._loadShowDevicePhotos();
+    await this._loadKnownDevices();
     if (this._fpImageUrl) this._loadFpImage(this._fpImageUrl);
     this._setStatus("info", "Loading ZHA devices…", 0);
+    await this._reloadDevices({ initial: true });
+  }
+
+  /** Fetches ZHA's current device and group lists. Used on first load, by
+   *  the device-registry listener, and at the start of every scan, so health
+   *  checks and scans always work from what ZHA has now.
+   *  - initial: first load of the page (reports load errors, no "removed" notice).
+   *  - quiet: a scan is about to run and will report and re-render itself.
+   *  Returns the IEEEs of devices that have disappeared since the last load.
+   *  On a failed fetch the previous lists are kept, so a ZHA hiccup never
+   *  makes every device look removed. */
+  async _reloadDevices({ initial = false, quiet = false } = {}) {
+    let devices;
+    let groups;
     try {
-      const [devices, groups] = await Promise.all([this._api.fetchDevices(), this._api.fetchGroups()]);
-      this._devices = devices
-        .filter((d) => !!d.ieee)
-        .map((d) => ({ ...d, ieee: normIeee(d.ieee) }));
-      this._groups = groups;
-      this._loaded = true;
-      this._setStatus("success", `Loaded ${this._devices.length} devices, ${this._groups.length} groups.`);
-      this._render();
-      this._renderFilterChips();
+      [devices, groups] = await Promise.all([this._api.fetchDevices(), this._api.fetchGroups()]);
     } catch (err) {
       console.error(err);
-      this._setStatus("error", `Failed to load ZHA devices: ${err.message || err}`, 0);
+      if (initial) this._setStatus("error", `Failed to load ZHA devices: ${err.message || err}`, 0);
+      else console.warn("ZHA Bindings Manager: could not refresh the device list; keeping the previous one.");
+      return [];
     }
+    const next = devices.filter((d) => !!d.ieee).map((d) => ({ ...d, ieee: normIeee(d.ieee) }));
+    const vanished = initial ? [] : vanishedDevices(this._devices, next);
+    const fingerprint = (list) => list.map((d) => `${d.ieee}|${this._deviceLabel(d)}|${d.area_id || ""}`).join(";");
+    const changed = initial || fingerprint(this._devices) !== fingerprint(next) || this._groups.length !== groups.length;
+    rememberDevices(this._knownDevices, next, (d) => this._deviceLabel(d));
+    this._devices = next;
+    this._groups = groups;
+    this._loaded = true;
+    this._saveKnownDevices();
+    if (initial) {
+      this._setStatus("success", `Loaded ${this._devices.length} devices, ${this._groups.length} groups.`);
+    } else if (vanished.length && !quiet) {
+      const names = vanished.map((ieee) => this._ieeeLabel(ieee, { plain: true }));
+      this._setStatus(
+        "info",
+        `${names.join(", ")} ${vanished.length === 1 ? "was" : "were"} removed from ZHA. ${
+          vanished.length === 1 ? "Its" : "Their"
+        } saved bindings now show as errors on the Bindings tab, where you can forget them or unbind what still points to ${
+          vanished.length === 1 ? "it" : "them"
+        }.`,
+        0
+      );
+    }
+    if (changed && !quiet) {
+      this._render();
+      this._renderFilterChips();
+    }
+    return vanished;
   }
 
   /** `force: true` bypasses the cache and refetches from ZHA even if this
@@ -1069,8 +1196,19 @@ export class ZhaBindingMapCard extends HTMLElement {
   async _scanBindings(ieeeList, opts = {}) {
     if (this._scanState.running) return;
     const fullScan = !(ieeeList && ieeeList.length);
-    const targets = fullScan ? this._devices.map((d) => d.ieee) : ieeeList;
-    this._scanState = { running: true, done: 0, total: targets.length };
+    // Claim the run before awaiting anything, so a second click can't start
+    // a parallel scan while the device list reloads.
+    this._scanState = { running: true, done: 0, total: 0 };
+    this._renderStatus();
+    // Check against ZHA's device list as it is now, not as it was when the
+    // page opened: otherwise a full scan can't clear a removed device's
+    // saved data, and a single-device scan of a removed device fails as if
+    // the device were asleep. If the reload fails the old list is kept.
+    await this._reloadDevices({ quiet: true });
+    const live = new Set(this._devices.map((d) => d.ieee));
+    const notInZha = !fullScan && this._devices.length ? ieeeList.filter((ieee) => !live.has(normIeee(ieee))) : [];
+    const targets = fullScan ? this._devices.map((d) => d.ieee) : ieeeList.filter((ieee) => !notInZha.includes(ieee));
+    this._scanState.total = targets.length;
     this._renderStatus();
     let okCount = 0;
     let failCount = 0;
@@ -1129,7 +1267,20 @@ export class ZhaBindingMapCard extends HTMLElement {
     // completed run (updated live per device inside scanOne above), so
     // _saveScanState reads current state rather than needing it passed in.
     await this._saveScanState();
+    const goneNames = notInZha.map((ieee) => this._ieeeLabel(ieee, { plain: true })).join(", ");
+    if (notInZha.length && !targets.length) {
+      this._setStatus(
+        "info",
+        `Not scanned: ${goneNames} ${notInZha.length === 1 ? "is" : "are"} no longer in ZHA. ${
+          notInZha.length === 1 ? "Its" : "Their"
+        } saved bindings show as errors; use Forget to clear them.`,
+        0
+      );
+      this._render();
+      return;
+    }
     const summary = [`${okCount} device(s) read`];
+    if (notInZha.length) summary.push(`skipped ${goneNames} (no longer in ZHA)`);
     if (partialCount) summary.push(`${partialCount} partial (a later page timed out — rescan for the rest)`);
     if (failCount) summary.push(`${failCount} did not respond (sleepy/offline devices are normal)`);
     if (pruned.length) summary.push(`cleared saved data for ${pruned.length} device(s) no longer in ZHA`);
@@ -1160,7 +1311,13 @@ export class ZhaBindingMapCard extends HTMLElement {
     const raw = this._rawBindings();
     if (this._filters.hideCoordinatorBindings) {
       const coord = this._coordinatorIeee();
-      return raw.filter((b) => b.isGroup || !coord || b.targetIeee !== coord);
+      // Coordinator bindings from a device removed from ZHA stay visible:
+      // they're leftover data counted in Binding Health and the removed-
+      // device banner, so hiding them made those counts disagree with the
+      // rows shown (e.g. "8 saved bindings" with only 5 rows).
+      return raw.filter(
+        (b) => b.isGroup || !coord || b.targetIeee !== coord || this._isRemovedDevice(b.sourceIeee)
+      );
     }
     return raw;
   }
@@ -2183,8 +2340,31 @@ export class ZhaBindingMapCard extends HTMLElement {
    *  network — shared by the exploded view's badge renderers so they don't
    *  each repeat the same find-or-fallback lookup. */
   _targetDeviceLabel(ieee) {
-    const d = this._devices.find((x) => x.ieee === ieee);
-    return d ? this._deviceLabel(d) : ieee;
+    return this._ieeeLabel(ieee);
+  }
+
+  /** Last-known details of a device by IEEE (see _knownDevices), or null. */
+  _knownDeviceInfo(ieee) {
+    return this._knownDevices.get(normIeee(ieee)) || null;
+  }
+
+  /** Whether `ieee` is a device ZHA no longer has. False while the device
+   *  list is empty (not loaded, or failed to load). */
+  _isRemovedDevice(ieee) {
+    if (!ieee || !this._devices.length) return false;
+    return !this._devices.some((d) => d.ieee === normIeee(ieee));
+  }
+
+  /** Display name for any device IEEE: the live name, or for a device
+   *  removed from ZHA its last-known name marked "(removed)", or the raw
+   *  IEEE if the card never saw it. `plain` leaves off the marker, for
+   *  sentences that already say it was removed. */
+  _ieeeLabel(ieee, { plain = false } = {}) {
+    const d = this._devices.find((x) => x.ieee === normIeee(ieee));
+    if (d) return this._deviceLabel(d);
+    const k = this._knownDeviceInfo(ieee);
+    if (k && k.name) return plain ? k.name : `${k.name} (removed)`;
+    return ieee;
   }
 
   /** Same idea as _targetDeviceLabel() but for a Zigbee group referenced by
@@ -3654,7 +3834,31 @@ export class ZhaBindingMapCard extends HTMLElement {
     if (filterInfo) {
       if (deviceIeee) {
         const dev = this._devices.find((d) => d.ieee === deviceIeee);
-        const name = dev ? this._deviceLabel(dev) : deviceIeee;
+        const name = this._ieeeLabel(deviceIeee, { plain: true });
+        const removed = !dev && this._isRemovedDevice(deviceIeee);
+        let actionsHtml = `<button class="btn btn-small btn-primary" id="btn-add-binding-from-filter">Add binding from ${escapeHtml(name)}</button>`;
+        if (removed) {
+          // A removed device can't be bound from. Offer the clean-up for this
+          // one device instead: forget its saved data, unbind what still
+          // points to it.
+          const saved = removedSources(this._bindings, this._devices)
+            .filter((g) => normIeee(g.ieee) === deviceIeee)
+            .reduce((n, g) => n + g.count, 0);
+          const pointing = deadTargetBindings(this._bindings, this._devices).filter(
+            (b) => normIeee(b.targetIeee) === deviceIeee
+          ).length;
+          actionsHtml = `<span class="removed-note">Removed from ZHA${
+            name !== deviceIeee ? ` · <code>${escapeHtml(deviceIeee)}</code>` : ""
+          }</span>${
+            saved
+              ? `<button class="btn btn-small" id="btn-filter-forget">Forget ${saved} saved binding${saved === 1 ? "" : "s"}</button>`
+              : ""
+          }${
+            pointing
+              ? `<button class="btn btn-small btn-danger" id="btn-filter-unbind-dead">Unbind ${pointing} pointing to it</button>`
+              : ""
+          }`;
+        }
         const dirChip = (value, label) =>
           `<button class="chip${this._tableDirection === value ? " active" : ""}" data-direction="${value}">${label}</button>`;
         filterInfo.innerHTML = `Showing bindings involving <strong>${escapeHtml(name)}</strong>${
@@ -3665,7 +3869,7 @@ export class ZhaBindingMapCard extends HTMLElement {
           "Inbound"
         )}</span>
           <button class="btn btn-small" id="btn-clear-source-filter">${bySearch ? "Clear search" : "Clear filter"}</button>
-          <button class="btn btn-small btn-primary" id="btn-add-binding-from-filter">Add binding from ${escapeHtml(name)}</button>`;
+          ${actionsHtml}`;
         filterInfo.style.display = "flex";
         this._q("#btn-clear-source-filter").addEventListener("click", () => {
           if (bySearch) {
@@ -3679,7 +3883,12 @@ export class ZhaBindingMapCard extends HTMLElement {
             this._renderTable();
           }
         });
-        this._q("#btn-add-binding-from-filter").addEventListener("click", () => this._openAddBindingFromFilter());
+        const addBtn = this._q("#btn-add-binding-from-filter");
+        if (addBtn) addBtn.addEventListener("click", () => this._openAddBindingFromFilter());
+        const forgetBtn = this._q("#btn-filter-forget");
+        if (forgetBtn) forgetBtn.addEventListener("click", () => this._confirmForgetSources([deviceIeee]));
+        const unbindDeadBtn = this._q("#btn-filter-unbind-dead");
+        if (unbindDeadBtn) unbindDeadBtn.addEventListener("click", () => this._confirmUnbindDeadTargets(deviceIeee));
         this._qa("#table-filter-info [data-direction]").forEach((btn) => {
           btn.addEventListener("click", () => {
             this._tableDirection = btn.dataset.direction;
@@ -3708,16 +3917,23 @@ export class ZhaBindingMapCard extends HTMLElement {
       const target = b.isGroup
         ? this._groups.find((g) => g.group_id === b.groupId)
         : this._devices.find((d) => d.ieee === b.targetIeee);
-      const sourceLabel = source ? this._deviceLabel(source) : b.sourceIeee;
+      // A removed source falls back to what the card last knew about it.
+      const known = source ? null : this._knownDeviceInfo(b.sourceIeee);
+      const sourceLabel = source ? this._deviceLabel(source) : this._ieeeLabel(b.sourceIeee);
       const targetLabel = b.isGroup
         ? (target && target.name) || `Group ${b.groupId}`
         : target
         ? this._deviceLabel(target)
-        : b.targetIeee;
+        : this._ieeeLabel(b.targetIeee);
       const typeLabel = source ? this._devicePrimaryType(source) : "—";
       const typeFull = source ? this._deviceTypeTags(source).join(", ") : "";
-      const areaLabel = source ? this._areaName(source.area_id) : "—";
-      const manModel = source ? [source.manufacturer, source.model].filter(Boolean).join(" / ") || "—" : "—";
+      const areaLabel = source
+        ? this._areaName(source.area_id)
+        : known && known.area_id
+        ? this._areaName(known.area_id)
+        : "—";
+      const manModelOf = (d) => [d.manufacturer, d.model].filter(Boolean).join(" / ") || "—";
+      const manModel = source ? manModelOf(source) : known ? manModelOf(known) : "—";
       const health = healthMap.get(b.id) || {
         level: "ok",
         code: "ok",
@@ -3891,7 +4107,9 @@ export class ZhaBindingMapCard extends HTMLElement {
     this._q("#dialog-title").textContent = "Forget leftover data";
     this._q("#dialog-body").innerHTML = `
       <p>This removes ${total} saved binding${total === 1 ? "" : "s"} for ${
-      ieees.length === 1 ? `<code>${escapeHtml(ieees[0])}</code>, a device` : `${ieees.length} devices`
+      ieees.length === 1
+        ? `<strong>${escapeHtml(this._ieeeLabel(ieees[0], { plain: true }))}</strong> (<code>${escapeHtml(ieees[0])}</code>), a device`
+        : `${ieees.length} devices`
     } no longer in ZHA.</p>
       <p class="hint">Nothing is sent to your Zigbee network. If the device is paired again later, the next scan reads its bindings afresh.</p>
       <div class="dialog-actions">
@@ -3909,6 +4127,7 @@ export class ZhaBindingMapCard extends HTMLElement {
         this._scanPartial.delete(normIeee(ieee));
       });
       await this._saveScanState();
+      this._saveKnownDevices();
       this._setStatus("success", `Forgot ${dropped} saved binding${dropped === 1 ? "" : "s"} from removed devices.`);
       this._renderGraph();
       this._renderTable();
@@ -3916,15 +4135,19 @@ export class ZhaBindingMapCard extends HTMLElement {
     });
   }
 
-  _confirmUnbindDeadTargets() {
-    const dead = deadTargetBindings(this._bindings, this._devices);
+  /** `onlyTarget` (an IEEE) limits this to bindings pointing at one removed
+   *  device, as offered from the filter bar. */
+  _confirmUnbindDeadTargets(onlyTarget) {
+    const dead = deadTargetBindings(this._bindings, this._devices).filter(
+      (b) => !onlyTarget || normIeee(b.targetIeee) === normIeee(onlyTarget)
+    );
     if (!dead.length) return;
     const rowsHtml = dead
       .map((b) => {
         const src = this._devices.find((d) => normIeee(d.ieee) === normIeee(b.sourceIeee));
         return `<tr><td>${escapeHtml(src ? this._deviceLabel(src) : b.sourceIeee)} (ep ${b.sourceEndpoint})</td><td>${escapeHtml(
           clusterName(b.clusterId)
-        )}</td><td><code>${escapeHtml(b.targetIeee)}</code></td></tr>`;
+        )}</td><td>${escapeHtml(this._ieeeLabel(b.targetIeee, { plain: true }))} <code>${escapeHtml(b.targetIeee)}</code></td></tr>`;
       })
       .join("");
     this._q("#dialog-title").textContent = "Unbind bindings to removed devices";

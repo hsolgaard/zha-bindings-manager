@@ -145,13 +145,15 @@ a.btn { display:inline-block; text-decoration:none; }
   display:flex; flex-direction:column; gap:6px; }
 .stale-row { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
 .stale-row > span { flex: 1 1 260px; }
-.table-filter-info { display:flex; align-items:center; gap:10px; margin-bottom:8px; padding:6px 10px;
+.table-filter-info { display:flex; flex-wrap:wrap; align-items:center; gap:10px; margin-bottom:8px; padding:6px 10px;
   border-radius:8px; background: rgba(76,154,255,0.12); font-size:0.85em; }
 .dir-cell { white-space:nowrap; font-weight:600; }
 .dir-cell.dir-outbound { color: var(--primary-color); }
 .dir-cell.dir-inbound { color: var(--secondary-text-color); }
 .table-toolbar { display:flex; align-items:center; gap:8px; margin-bottom:8px; font-size:0.85em; flex-wrap:wrap; }
 .health-filters { display:flex; gap:6px; flex-wrap:wrap; }
+.removed-note { color: var(--error-color, #db4437); font-weight:600; font-size:0.9em; }
+.removed-note code { font-weight:400; }
 .bindings-table { width:100%; border-collapse: collapse; font-size: 0.9em; }
 .bindings-table th, .bindings-table td { text-align:left; padding: 8px 10px; border-bottom: 1px solid var(--divider-color, #eee); }
 .bindings-table th[data-sort] { cursor: pointer; user-select: none; white-space: nowrap; }

@@ -3,6 +3,29 @@
 All notable changes to ZHA Bindings Manager are documented here.
 
 
+## [1.0.1]
+
+### Fixed
+
+- **Removing a device from ZHA is picked up straight away.** The card used to read the device list once, when the page
+  opened, so a device removed from ZHA still looked live until the browser was refreshed. Its saved bindings stayed
+  Info, "Scan bindings" couldn't clear them, and scanning it failed as if it were asleep. The card now watches Home
+  Assistant's device registry and reloads the device list when a device is removed, added, renamed or moved to
+  another area. Every scan also reloads the list before it starts.
+- **Scanning a removed device says so.** A single-device scan of a device that's no longer in ZHA now reports "Not
+  scanned: … is no longer in ZHA" instead of "did not respond".
+- **Counts for a removed device match the rows shown.** Coordinator bindings from a removed device were counted in
+  Binding Health and the removed-device banner but hidden by "Hide coordinator bindings", so the banner could say 8
+  saved bindings while the table showed 5. They're now always shown, since they need forgetting too.
+
+### Changed
+
+- **Removed devices keep their name.** Bindings from or to a removed device show its last-known name marked
+  "(removed)", with its model and area, instead of a bare IEEE address and dashes.
+- **Filtering on a removed device offers the clean-up.** The filter bar shows "Removed from ZHA" with **Forget** for
+  its saved bindings and **Unbind** for bindings on other devices that still point to it. "Add binding from" is no
+  longer offered for a device that can't be bound.
+
 ## [1.0.0]
 
 ZHA Bindings Manager now comes in two forms that share one version number: this card on its own, and the

@@ -3,6 +3,12 @@
 All notable changes to ZHA Bindings Manager are documented here.
 
 
+## [1.0.2]
+
+No card changes. This release keeps the card's version in step with the
+[ZHA Bindings Manager integration 1.0.2](https://github.com/hsolgaard/zha-bindings-manager-integration/releases/tag/v1.0.2),
+which fixes a deprecation warning in the Home Assistant log.
+
 ## [1.0.1]
 
 ### Fixed

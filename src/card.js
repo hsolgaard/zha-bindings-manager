@@ -51,6 +51,7 @@ import {
   knownDevicesToSave,
 } from "./stale-bindings.js";
 import { aboutIntegrationText } from "./about.js";
+import { summarizeScan, toolkitAvailable } from "./scan-summary.js";
 import { STYLE } from "./styles.js";
 import {
   DIRECTION_ALL,
@@ -1195,6 +1196,17 @@ export class ZhaBindingMapCard extends HTMLElement {
    *  a "batch" of 1 and behave exactly as before. */
   async _scanBindings(ieeeList, opts = {}) {
     if (this._scanState.running) return;
+    // Without zha-toolkit every device "fails", which used to be reported
+    // as sleepy devices (integration issue #2). Say what's actually wrong.
+    if (!toolkitAvailable(this._hass)) {
+      this._setStatus(
+        "error",
+        "Can't scan: zha-toolkit isn't installed or isn't loaded, and ZHA Bindings Manager uses it to read binding " +
+          "tables. Install zha-toolkit from HACS (Integrations), restart Home Assistant, then scan again.",
+        0
+      );
+      return;
+    }
     const fullScan = !(ieeeList && ieeeList.length);
     // Claim the run before awaiting anything, so a second click can't start
     // a parallel scan while the device list reloads.
@@ -1211,8 +1223,8 @@ export class ZhaBindingMapCard extends HTMLElement {
     this._scanState.total = targets.length;
     this._renderStatus();
     let okCount = 0;
-    let failCount = 0;
     let partialCount = 0;
+    const failures = [];
 
     const scanOne = async (ieee) => {
       const startedAt = Date.now();
@@ -1232,7 +1244,11 @@ export class ZhaBindingMapCard extends HTMLElement {
         }
         okCount++;
       } catch (err) {
-        failCount++;
+        failures.push({
+          device: this._devices.find((d) => normIeee(d.ieee) === normIeee(ieee)),
+          name: this._ieeeLabel(ieee, { plain: true }),
+          error: err,
+        });
         this._recordScanOutcome(ieee, { success: false });
         // Tracked for Binding Health's Rule 7 ("unable to verify") — in-memory
         // only, reflects just this most recent attempt for this device.
@@ -1279,19 +1295,20 @@ export class ZhaBindingMapCard extends HTMLElement {
       this._render();
       return;
     }
-    const summary = [`${okCount} device(s) read`];
-    if (notInZha.length) summary.push(`skipped ${goneNames} (no longer in ZHA)`);
-    if (partialCount) summary.push(`${partialCount} partial (a later page timed out — rescan for the rest)`);
-    if (failCount) summary.push(`${failCount} did not respond (sleepy/offline devices are normal)`);
-    if (pruned.length) summary.push(`cleared saved data for ${pruned.length} device(s) no longer in ZHA`);
+    // See scan-summary.js: separates sleepy battery devices from mains
+    // devices, and recognises "nothing responded at all" as a zha-toolkit
+    // problem rather than sleepy devices.
+    const outcome = summarizeScan({
+      okCount,
+      partialCount,
+      failures,
+      skippedNames: notInZha.map((ieee) => this._ieeeLabel(ieee, { plain: true })),
+      prunedCount: pruned.length,
+    });
     // timeout: 0 — the final scan summary stays on screen until dismissed
     // (via the × button) rather than auto-hiding after a few seconds, since
     // it's easy to miss if you glance away while a larger scan is running.
-    this._setStatus(
-      failCount ? "error" : partialCount ? "info" : "success",
-      `Scan complete: ${summary.join(", ")}.`,
-      0
-    );
+    this._setStatus(outcome.level, outcome.message, 0);
     this._renderGraph();
     this._renderTable();
     this._renderDevicesTab();

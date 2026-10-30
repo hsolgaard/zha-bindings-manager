@@ -21,7 +21,7 @@
  * zha_toolkit MUST be installed (via HACS) and working for bind/unbind/scan
  * to function. See README.md for details.
  *
- * Version: 1.0.2
+ * Version: 1.0.3
  */
 (() => {
   // src/capexplorer-constants.js
@@ -78,7 +78,7 @@
 
   // src/constants.js
   var ZTK_DOMAIN = "zha_toolkit";
-  var CARD_VERSION = "1.0.2";
+  var CARD_VERSION = "1.0.3";
   var CHANGELOG_URL = "https://github.com/hsolgaard/zha-bindings-manager/blob/main/CHANGELOG.md";
   var DEFAULT_BINDABLE_OUT_CLUSTERS = [5, 6, 8, 258, 768];
   var MEMBERSHIP_EDGE_COLOR = "#8e24aa";
@@ -1351,6 +1351,54 @@
     }
     if (!storageOn) parts.push("Shared storage is switched off in the integration's options.");
     return parts.join(" ");
+  }
+
+  // src/scan-summary.js
+  function isBatteryPowered(device) {
+    return !!(device && device.power_source && /battery/i.test(device.power_source));
+  }
+  function toolkitAvailable(hass, service = "binds_get") {
+    return !!(hass && hass.services && hass.services.zha_toolkit && hass.services.zha_toolkit[service]);
+  }
+  function shortError(err) {
+    const text = String(err && (err.message || err) || "").replace(/\s+/g, " ").trim();
+    return text.length > 180 ? `${text.slice(0, 177)}\u2026` : text;
+  }
+  function nameList(names, max = 3) {
+    if (names.length <= max) return names.join(", ");
+    return `${names.slice(0, max).join(", ")} and ${names.length - max} more`;
+  }
+  function summarizeScan({ okCount, partialCount, failures, skippedNames = [], prunedCount = 0 }) {
+    const failed = failures || [];
+    const battery = failed.filter((f) => isBatteryPowered(f.device));
+    const mains = failed.filter((f) => !isBatteryPowered(f.device));
+    const extras = [];
+    if (skippedNames.length) extras.push(`skipped ${skippedNames.join(", ")} (no longer in ZHA)`);
+    if (prunedCount) extras.push(`cleared saved data for ${prunedCount} device(s) no longer in ZHA`);
+    const tail = extras.length ? ` Also ${extras.join("; ")}.` : "";
+    if (okCount === 0 && partialCount === 0 && failed.length >= 2 && mains.length > 0) {
+      const firstError = shortError((mains[0] || failed[0]).error);
+      return {
+        level: "error",
+        message: `Scan failed: no device responded (${failed.length} of ${failed.length}), including mains-powered devices that never sleep, so this isn't sleepy devices. It usually means zha-toolkit isn't working. ` + (firstError ? `First error: "${firstError}". ` : "") + `Check Settings \u2192 System \u2192 Logs for zha_toolkit errors.` + tail
+      };
+    }
+    const parts = [`${okCount} device(s) read`];
+    if (partialCount) parts.push(`${partialCount} partial (a later page timed out \u2014 rescan for the rest)`);
+    if (mains.length) {
+      parts.push(
+        `${mains.length} mains-powered device(s) did not respond (check they're online in ZHA): ${nameList(
+          mains.map((f) => f.name)
+        )}`
+      );
+    }
+    if (battery.length) {
+      parts.push(
+        `${battery.length} battery device(s) did not respond (normal, they sleep: wake one and use its Rescan)`
+      );
+    }
+    const level = mains.length ? "error" : battery.length || partialCount ? "info" : "success";
+    return { level, message: `Scan complete: ${parts.join(", ")}.${tail}` };
   }
 
   // src/styles.js
@@ -3255,6 +3303,14 @@ a.btn { display:inline-block; text-decoration:none; }
      *  a "batch" of 1 and behave exactly as before. */
     async _scanBindings(ieeeList, opts = {}) {
       if (this._scanState.running) return;
+      if (!toolkitAvailable(this._hass)) {
+        this._setStatus(
+          "error",
+          "Can't scan: zha-toolkit isn't installed or isn't loaded, and ZHA Bindings Manager uses it to read binding tables. Install zha-toolkit from HACS (Integrations), restart Home Assistant, then scan again.",
+          0
+        );
+        return;
+      }
       const fullScan = !(ieeeList && ieeeList.length);
       this._scanState = { running: true, done: 0, total: 0 };
       this._renderStatus();
@@ -3265,8 +3321,8 @@ a.btn { display:inline-block; text-decoration:none; }
       this._scanState.total = targets.length;
       this._renderStatus();
       let okCount = 0;
-      let failCount = 0;
       let partialCount = 0;
+      const failures = [];
       const scanOne = async (ieee) => {
         const startedAt = Date.now();
         try {
@@ -3285,7 +3341,11 @@ a.btn { display:inline-block; text-decoration:none; }
           }
           okCount++;
         } catch (err) {
-          failCount++;
+          failures.push({
+            device: this._devices.find((d) => normIeee(d.ieee) === normIeee(ieee)),
+            name: this._ieeeLabel(ieee, { plain: true }),
+            error: err
+          });
           this._recordScanOutcome(ieee, { success: false });
           this._scanFailures.add(normIeee(ieee));
           this._scanPartial.delete(normIeee(ieee));
@@ -3317,16 +3377,14 @@ a.btn { display:inline-block; text-decoration:none; }
         this._render();
         return;
       }
-      const summary = [`${okCount} device(s) read`];
-      if (notInZha.length) summary.push(`skipped ${goneNames} (no longer in ZHA)`);
-      if (partialCount) summary.push(`${partialCount} partial (a later page timed out \u2014 rescan for the rest)`);
-      if (failCount) summary.push(`${failCount} did not respond (sleepy/offline devices are normal)`);
-      if (pruned.length) summary.push(`cleared saved data for ${pruned.length} device(s) no longer in ZHA`);
-      this._setStatus(
-        failCount ? "error" : partialCount ? "info" : "success",
-        `Scan complete: ${summary.join(", ")}.`,
-        0
-      );
+      const outcome = summarizeScan({
+        okCount,
+        partialCount,
+        failures,
+        skippedNames: notInZha.map((ieee) => this._ieeeLabel(ieee, { plain: true })),
+        prunedCount: pruned.length
+      });
+      this._setStatus(outcome.level, outcome.message, 0);
       this._renderGraph();
       this._renderTable();
       this._renderDevicesTab();

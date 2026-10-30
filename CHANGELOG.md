@@ -3,6 +3,24 @@
 All notable changes to ZHA Bindings Manager are documented here.
 
 
+## [1.0.3]
+
+### Fixed
+
+- **A scan where nothing responds no longer blames sleepy devices.** If every device failed, including mains-powered
+  devices and the coordinator (which never sleep), the summary still said "N did not respond (sleepy/offline devices
+  are normal)". That usually means zha-toolkit isn't working, so the card now says so and shows the first actual error.
+  Thanks to tamernbl for the report
+  ([integration issue #2](https://github.com/hsolgaard/zha-bindings-manager-integration/issues/2)).
+- **Scanning without zha-toolkit** now stops straight away with a clear message ("zha-toolkit isn't installed or isn't
+  loaded"), instead of trying every device and reporting them all as not responding.
+
+### Changed
+
+- **The scan summary separates battery devices from mains-powered ones.** Battery devices that miss a scan are normal
+  (they sleep) and are shown as information. Mains-powered devices that don't respond are named, because they're
+  worth checking.
+
 ## [1.0.2]
 
 No card changes. This release keeps the card's version in step with the

@@ -3,6 +3,26 @@
 All notable changes to ZHA Bindings Manager are documented here.
 
 
+## [Unreleased]
+
+### Fixed
+
+- **"Share this scan" no longer lets ZHA quirks leak into the shared record.** ZHA's device list and zha-toolkit's scan
+  both use zigpy's in-memory view of a device, which a quirk can rename (for example "Ceiling Light T1M" instead of
+  `lumi.light.acn032`) and whose endpoints and clusters a quirk can replace. With the integration installed, the card
+  now asks the device itself for its manufacturer, model, endpoints and clusters before building the record. Clusters
+  that only the quirk declares are listed separately instead of being shared as capabilities. Standard clusters use
+  zigpy's standard names rather than quirk class names.
+- **Firmware details are no longer thrown away when a device has no `sw_build_id`.** Hardware version and date code
+  were previously dropped in that case. The record now also includes `app_version` and, with the integration, the OTA
+  file version (the most reliable firmware identifier), plus whether each field was read, unsupported or unanswered.
+
+### Changed
+
+- Shared records say where their identity and signature came from (`identity_source` / `signature_source`: `device`
+  or `zha`), whether a quirk is applied, and the device's node type and power source.
+
+
 ## [1.0.3]
 
 ### Fixed

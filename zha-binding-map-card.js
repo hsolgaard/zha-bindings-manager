@@ -787,6 +787,14 @@
       const response = await this.callToolkit("scan_device", data);
       return response.scan || null;
     }
+    /** The device's own identity, endpoint descriptors and firmware, read
+     *  over the air by the companion integration (zha_bindings_manager/
+     *  raw_device_info) instead of from ZHA's possibly-quirked view. Only
+     *  works when the integration is installed; callers fall back to the
+     *  scan_device/ZHA data otherwise. See src/capability-record.js. */
+    async rawDeviceInfo(ieee) {
+      return this.hass.callWS({ type: "zha_bindings_manager/raw_device_info", ieee });
+    }
     async bindGroup(sourceIeee, groupId, clusterIds, opts = {}) {
       const data = { ieee: sourceIeee, command_data: groupId };
       if (clusterIds && clusterIds.length === 1) data.cluster = clusterIds[0];
@@ -1351,6 +1359,136 @@
     }
     if (!storageOn) parts.push("Shared storage is switched off in the integration's options.");
     return parts.join(" ");
+  }
+
+  // src/capability-record.js
+  var IDENTITY_FIELDS = ["sw_build_id", "app_version", "hw_version", "date_code", "ota_file_version"];
+  var num = (v) => Number(v);
+  var hex42 = (n) => `0x${Number(n).toString(16).padStart(4, "0")}`;
+  function extractIdentity(epScan) {
+    const inClusters = epScan && epScan.in_clusters || {};
+    const basicKey = Object.keys(inClusters).find((k) => num(k) === 0);
+    const basic = basicKey != null ? inClusters[basicKey] : null;
+    const find = (name) => {
+      if (!basic || !basic.attributes) return null;
+      const hit = Object.values(basic.attributes).find((a) => a.attribute_name === name);
+      return hit && hit.attribute_value != null && hit.attribute_value !== "" ? hit.attribute_value : null;
+    };
+    return {
+      sw_build_id: find("sw_build_id"),
+      app_version: find("app_version"),
+      hw_version: find("hw_version"),
+      date_code: find("date_code")
+    };
+  }
+  function mergeIdentity(...identities) {
+    const out = {};
+    IDENTITY_FIELDS.forEach((f) => {
+      const hit = identities.find((i) => i && i[f] != null && i[f] !== "");
+      out[f] = hit ? hit[f] : null;
+    });
+    return out;
+  }
+  function firmwareLabel(identity) {
+    if (!identity) return null;
+    if (identity.sw_build_id) return String(identity.sw_build_id);
+    if (identity.ota_file_version) return `OTA ${identity.ota_file_version}`;
+    if (identity.app_version != null && identity.app_version !== "") return `app ${identity.app_version}`;
+    if (identity.date_code) return `date ${identity.date_code}`;
+    return null;
+  }
+  var okValue = (part) => part && part.status === "ok" && part.value != null && part.value !== "" ? part.value : null;
+  function applyRawDeviceInfo(record, raw, zhaDevice) {
+    const out = JSON.parse(JSON.stringify(record));
+    out.provenance = { ...out.provenance || {} };
+    if (!raw) {
+      out.provenance.identity_source = "zha";
+      out.provenance.signature_source = "zha";
+      return out;
+    }
+    const rawMfr = okValue(raw.manufacturer);
+    const rawModel = okValue(raw.model);
+    if (rawMfr && rawModel) {
+      out.manufacturer = rawMfr;
+      out.model = rawModel;
+      out.provenance.identity_source = "device";
+      const shownMfr = zhaDevice && zhaDevice.manufacturer || record.manufacturer;
+      const shownModel = zhaDevice && zhaDevice.model || record.model;
+      out.provenance.display_name_differs = shownMfr !== rawMfr || shownModel !== rawModel;
+    } else {
+      out.provenance.identity_source = "zha";
+    }
+    const rawIdentity = {};
+    const status = {};
+    IDENTITY_FIELDS.forEach((f) => {
+      const part = raw.identity && raw.identity[f];
+      rawIdentity[f] = okValue(part);
+      if (part && part.status) status[f] = part.status;
+    });
+    out.identity = mergeIdentity(rawIdentity, record.identity);
+    out.identity_status = status;
+    if (raw.node && Object.keys(raw.node).length) out.node = { ...raw.node };
+    if (typeof raw.quirk_applied === "boolean") out.provenance.quirk_applied = raw.quirk_applied;
+    const names = raw.standard_cluster_names || {};
+    const sig = raw.signature || {};
+    const rawEps = (sig.endpoints || []).filter((e) => e && e.status === "ok");
+    if (!rawEps.length) {
+      out.provenance.signature_source = "zha";
+      return out;
+    }
+    const byId = new Map((record.endpoints || []).map((e) => [num(e.endpoint && e.endpoint.id), e]));
+    const failedIds = new Set((sig.endpoints || []).filter((e) => e && e.status !== "ok").map((e) => num(e.id)));
+    const endpoints = [];
+    let allFromDevice = sig.status === "ok";
+    rawEps.forEach((rep) => {
+      const epId = num(rep.id);
+      const inIds = (rep.in_clusters || []).map(num);
+      const outIds = (rep.out_clusters || []).map(num);
+      const prev = byId.get(epId);
+      const ep = {
+        endpoint: {
+          id: epId,
+          profile: rep.profile || null,
+          device_type: rep.device_type || null,
+          in_clusters: inIds.map(hex42),
+          out_clusters: outIds.map(hex42)
+        },
+        scanned: !!(prev && prev.scanned)
+      };
+      if (prev && prev.scanned) {
+        const clusters = {};
+        const quirkOnly = [];
+        Object.entries(prev.clusters || {}).forEach(([key, c]) => {
+          const id = num(key);
+          if (!inIds.includes(id)) {
+            quirkOnly.push(hex42(id));
+            return;
+          }
+          const std = names[hex42(id)];
+          clusters[hex42(id)] = { ...c, name: std || c.name };
+        });
+        ep.clusters = clusters;
+        const notScanned = inIds.filter((id) => !(hex42(id) in clusters)).map(hex42);
+        if (quirkOnly.length) ep.quirk_only_clusters = quirkOnly;
+        if (notScanned.length) ep.not_scanned_clusters = notScanned;
+      }
+      endpoints.push(ep);
+      byId.delete(epId);
+    });
+    const quirkOnlyEndpoints = [];
+    byId.forEach((e, epId) => {
+      if (failedIds.has(epId)) {
+        endpoints.push({ ...e, signature_source: "zha" });
+        allFromDevice = false;
+      } else {
+        quirkOnlyEndpoints.push(epId);
+      }
+    });
+    endpoints.sort((a, b) => a.endpoint.id - b.endpoint.id);
+    out.endpoints = endpoints;
+    if (quirkOnlyEndpoints.length) out.quirk_only_endpoints = quirkOnlyEndpoints;
+    out.provenance.signature_source = allFromDevice ? "device" : "partial";
+    return out;
   }
 
   // src/scan-summary.js
@@ -5126,18 +5264,7 @@ a.btn { display:inline-block; text-decoration:none; }
      *  and the device-level capability record below (identity is a whole-
      *  device fact, so the first scanned endpoint that has it wins). */
     _extractIdentity(epScan) {
-      const inClusters = epScan && epScan.in_clusters || {};
-      const basic = inClusters["0x0000"];
-      const findIdentityAttr = (name) => {
-        if (!basic || !basic.attributes) return null;
-        const hit = Object.values(basic.attributes).find((a) => a.attribute_name === name);
-        return hit && hit.attribute_value != null ? hit.attribute_value : null;
-      };
-      return {
-        sw_build_id: findIdentityAttr("sw_build_id"),
-        hw_version: findIdentityAttr("hw_version"),
-        date_code: findIdentityAttr("date_code")
-      };
+      return extractIdentity(epScan);
     }
     /** Builds the `clusters` block of a shareable capability record from one
      *  endpoint's completed scan_device result — unit-tested in
@@ -5211,14 +5338,13 @@ a.btn { display:inline-block; text-decoration:none; }
       const epIds = this._deviceEndpointsIncludingGP(d);
       if (!epIds.length) return null;
       const rawClusters = this._clusterCache.get(d.ieee) || [];
-      let identity = { sw_build_id: null, hw_version: null, date_code: null };
+      let identity = mergeIdentity();
       const endpoints = epIds.map((epId) => {
         const key = this._commandScanKey(d.ieee, epId);
         const entry = this._commandScans.get(key);
         const epScan = entry && entry.status === "done" ? (entry.scan && entry.scan.endpoints || []).find((e) => Number(e.id) === Number(epId)) : null;
         if (epScan) {
-          const scannedIdentity = this._extractIdentity(epScan);
-          if (scannedIdentity.sw_build_id) identity = scannedIdentity;
+          identity = mergeIdentity(identity, this._extractIdentity(epScan));
           return {
             endpoint: {
               id: epId,
@@ -5270,13 +5396,25 @@ a.btn { display:inline-block; text-decoration:none; }
      *  pasted/submitted. Past the cutoff, the title still gets pre-filled
      *  (titles are always short) with a paste placeholder body — see
      *  _shareDraftHtml(). */
-    _shareDeviceCapabilities(d) {
-      const record = this._buildDeviceCapabilityRecord(d);
-      if (!record || !record.endpoints.some((e) => e.scanned)) {
+    async _shareDeviceCapabilities(d) {
+      const built = this._buildDeviceCapabilityRecord(d);
+      if (!built || !built.endpoints.some((e) => e.scanned)) {
         this._setStatus("error", "Nothing to share yet \u2014 check supported commands on at least one endpoint first.");
         return;
       }
-      const title = `[Device Submission] ${record.manufacturer || "Unknown"} ${record.model || "Unknown"}${record.identity.sw_build_id ? ` (fw ${record.identity.sw_build_id})` : ""}`;
+      let raw = null;
+      if (this._backendInstalled) {
+        this._setStatus("info", "Reading the device's own identity and endpoints\u2026 (wake battery devices first)", 0);
+        try {
+          raw = await this._api.rawDeviceInfo(d.ieee);
+        } catch (err) {
+          console.warn("[ZHA Bindings Manager] raw_device_info failed \u2014 sharing ZHA's view instead", err);
+        }
+        this._setStatus("info", raw ? "Read the device's own identity." : "Couldn't read the device directly \u2014 sharing ZHA's view.", 4e3);
+      }
+      const record = applyRawDeviceInfo(built, raw, d);
+      const fw = firmwareLabel(record.identity);
+      const title = `[Device Submission] ${record.manufacturer || "Unknown"} ${record.model || "Unknown"}${fw ? ` (fw ${fw})` : ""}`;
       const displayBody = "```json\n" + JSON.stringify(record, null, 2) + "\n```";
       const compactBody = "```json\n" + JSON.stringify(record) + "\n```";
       const labelsParam = `labels=${encodeURIComponent("device-submission")}`;

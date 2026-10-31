@@ -211,6 +211,15 @@ export class ZhaApi {
     return response.scan || null;
   }
 
+  /** The device's own identity, endpoint descriptors and firmware, read
+   *  over the air by the companion integration (zha_bindings_manager/
+   *  raw_device_info) instead of from ZHA's possibly-quirked view. Only
+   *  works when the integration is installed; callers fall back to the
+   *  scan_device/ZHA data otherwise. See src/capability-record.js. */
+  async rawDeviceInfo(ieee) {
+    return this.hass.callWS({ type: "zha_bindings_manager/raw_device_info", ieee });
+  }
+
   async bindGroup(sourceIeee, groupId, clusterIds, opts = {}) {
     const data = { ieee: sourceIeee, command_data: groupId };
     if (clusterIds && clusterIds.length === 1) data.cluster = clusterIds[0];

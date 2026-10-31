@@ -51,6 +51,7 @@ import {
   knownDevicesToSave,
 } from "./stale-bindings.js";
 import { aboutIntegrationText } from "./about.js";
+import { extractIdentity, mergeIdentity, firmwareLabel, applyRawDeviceInfo } from "./capability-record.js";
 import { summarizeScan, toolkitAvailable } from "./scan-summary.js";
 import { STYLE } from "./styles.js";
 import {
@@ -3362,18 +3363,7 @@ export class ZhaBindingMapCard extends HTMLElement {
    *  and the device-level capability record below (identity is a whole-
    *  device fact, so the first scanned endpoint that has it wins). */
   _extractIdentity(epScan) {
-    const inClusters = (epScan && epScan.in_clusters) || {};
-    const basic = inClusters["0x0000"];
-    const findIdentityAttr = (name) => {
-      if (!basic || !basic.attributes) return null;
-      const hit = Object.values(basic.attributes).find((a) => a.attribute_name === name);
-      return hit && hit.attribute_value != null ? hit.attribute_value : null;
-    };
-    return {
-      sw_build_id: findIdentityAttr("sw_build_id"),
-      hw_version: findIdentityAttr("hw_version"),
-      date_code: findIdentityAttr("date_code"),
-    };
+    return extractIdentity(epScan);
   }
 
   /** Builds the `clusters` block of a shareable capability record from one
@@ -3450,7 +3440,10 @@ export class ZhaBindingMapCard extends HTMLElement {
     const epIds = this._deviceEndpointsIncludingGP(d);
     if (!epIds.length) return null;
     const rawClusters = this._clusterCache.get(d.ieee) || [];
-    let identity = { sw_build_id: null, hw_version: null, date_code: null };
+    // Merged field by field across scanned endpoints. Previously the whole
+    // identity was dropped unless sw_build_id was present, which lost
+    // hw_version/date_code on most Tuya devices.
+    let identity = mergeIdentity();
     const endpoints = epIds.map((epId) => {
       const key = this._commandScanKey(d.ieee, epId);
       const entry = this._commandScans.get(key);
@@ -3459,8 +3452,7 @@ export class ZhaBindingMapCard extends HTMLElement {
           ? ((entry.scan && entry.scan.endpoints) || []).find((e) => Number(e.id) === Number(epId))
           : null;
       if (epScan) {
-        const scannedIdentity = this._extractIdentity(epScan);
-        if (scannedIdentity.sw_build_id) identity = scannedIdentity;
+        identity = mergeIdentity(identity, this._extractIdentity(epScan));
         return {
           endpoint: {
             id: epId,
@@ -3517,14 +3509,30 @@ export class ZhaBindingMapCard extends HTMLElement {
    *  pasted/submitted. Past the cutoff, the title still gets pre-filled
    *  (titles are always short) with a paste placeholder body — see
    *  _shareDraftHtml(). */
-  _shareDeviceCapabilities(d) {
-    const record = this._buildDeviceCapabilityRecord(d);
-    if (!record || !record.endpoints.some((e) => e.scanned)) {
+  async _shareDeviceCapabilities(d) {
+    const built = this._buildDeviceCapabilityRecord(d);
+    if (!built || !built.endpoints.some((e) => e.scanned)) {
       this._setStatus("error", "Nothing to share yet — check supported commands on at least one endpoint first.");
       return;
     }
+    // With the integration installed, ask the device itself for its
+    // manufacturer/model, endpoint descriptors and firmware, so quirks can't
+    // leak into the shared record (see src/capability-record.js). Without
+    // it, the record is shared as before, marked as ZHA-sourced.
+    let raw = null;
+    if (this._backendInstalled) {
+      this._setStatus("info", "Reading the device's own identity and endpoints… (wake battery devices first)", 0);
+      try {
+        raw = await this._api.rawDeviceInfo(d.ieee);
+      } catch (err) {
+        console.warn("[ZHA Bindings Manager] raw_device_info failed — sharing ZHA's view instead", err);
+      }
+      this._setStatus("info", raw ? "Read the device's own identity." : "Couldn't read the device directly — sharing ZHA's view.", 4000);
+    }
+    const record = applyRawDeviceInfo(built, raw, d);
+    const fw = firmwareLabel(record.identity);
     const title = `[Device Submission] ${record.manufacturer || "Unknown"} ${record.model || "Unknown"}${
-      record.identity.sw_build_id ? ` (fw ${record.identity.sw_build_id})` : ""
+      fw ? ` (fw ${fw})` : ""
     }`;
     const displayBody = "```json\n" + JSON.stringify(record, null, 2) + "\n```";
     const compactBody = "```json\n" + JSON.stringify(record) + "\n```";

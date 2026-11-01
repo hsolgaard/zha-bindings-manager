@@ -53,6 +53,7 @@ import {
 import { aboutIntegrationText } from "./about.js";
 import { summarizeScan, toolkitAvailable } from "./scan-summary.js";
 import { unusualDeviceBindingRule } from "./health-rules.js";
+import { groupClusterSupport, groupSupportSummary, groupSupportHealth } from "./group-support.js";
 import { COMMAND_CHECK_LIMIT_MS, formatElapsed, shouldApplyResult } from "./command-check.js";
 import { bindOutcome, unbindOutcome, OUTCOME_LEVEL, pendingKey, reconcilePending } from "./action-verify.js";
 import { STYLE } from "./styles.js";
@@ -1816,6 +1817,13 @@ export class ZhaBindingMapCard extends HTMLElement {
       if (!b.isGroup && b.targetIeee && this._devices.some((d) => d.ieee === b.targetIeee)) {
         ieees.add(b.targetIeee);
       }
+      // Group bindings: the members' clusters decide whether anything in
+      // the group can act on the bound cluster (see group-support.js).
+      if (b.isGroup) {
+        this._groupMembers(b.groupId).forEach((m) => {
+          if (!m.isCoordinator && this._devices.some((d) => d.ieee === m.ieee)) ieees.add(m.ieee);
+        });
+      }
     });
     const toFetch = [...ieees].filter((ieee) => !this._clusterCache.has(ieee));
     if (!toFetch.length) return;
@@ -1826,6 +1834,40 @@ export class ZhaBindingMapCard extends HTMLElement {
     if (this._view === "table") this._renderTable();
     if (this._view === "graph") this._renderGraph();
     if (this._view === "floorplan") this._renderFloorplan();
+  }
+
+  /** A ZHA group's members as {ieee, endpoint, name, isCoordinator}, from
+   *  zha/groups (already loaded into this._groups). */
+  _groupMembers(groupId) {
+    const g = (this._groups || []).find((x) => Number(x.group_id) === Number(groupId));
+    if (!g) return [];
+    const coord = normIeee(this._coordinatorIeee() || "");
+    return (g.members || [])
+      .filter((m) => m.device && m.device.ieee)
+      .map((m) => {
+        const ieee = normIeee(m.device.ieee);
+        const d = this._devices.find((x) => normIeee(x.ieee) === ieee);
+        return {
+          ieee: d ? d.ieee : ieee,
+          endpoint: m.endpoint_id,
+          name: d ? this._deviceLabel(d) : m.device.user_given_name || m.device.name || ieee,
+          isCoordinator: ieee === coord || !!(d && (d.device_type === "Coordinator" || d.active_coordinator)),
+        };
+      });
+  }
+
+  /** Which members of a group support `clusterId`, from cached cluster lists. */
+  _groupSupport(groupId, clusterId) {
+    return groupClusterSupport({
+      members: this._groupMembers(groupId),
+      clusterId,
+      clustersFor: (ieee) => this._clusterCache.get(ieee),
+    });
+  }
+
+  _groupName(groupId) {
+    const g = (this._groups || []).find((x) => Number(x.group_id) === Number(groupId));
+    return g ? g.name : `group ${groupId}`;
   }
 
   /** Health for every currently-scanned binding, keyed by binding id. Computed
@@ -1916,6 +1958,14 @@ export class ZhaBindingMapCard extends HTMLElement {
           recommendation: "Recreate the group or remove the binding.",
         };
       }
+      // Can anything in the group act on this cluster?
+      const support = groupSupportHealth(
+        this._groupSupport(b.groupId, b.clusterId),
+        clusterName(b.clusterId),
+        this._groupName(b.groupId)
+      );
+      if (support && support.level !== "info") return support;
+      if (support && (dupCounts.get(this._healthDupKey(b)) || 0) <= 1) return support;
     } else {
       const targetIeeeN = normIeee(b.targetIeee);
       if (coord && targetIeeeN === normIeee(coord)) {
@@ -6335,6 +6385,7 @@ export class ZhaBindingMapCard extends HTMLElement {
           <label>Cluster
             <select id="adv-cluster"><option value="">— zha-toolkit default —</option></select>
           </label>
+          <p id="adv-group-support" class="hint adv-group-support" style="display:none"></p>
           <label id="adv-cluster-custom-wrap" style="display:none">Custom cluster ID
             <input type="text" id="adv-cluster-custom" placeholder="e.g. 0x0000 or 0">
           </label>
@@ -6372,6 +6423,7 @@ export class ZhaBindingMapCard extends HTMLElement {
     this._q("#adv-target-device").addEventListener("change", () => this._advPopulateTargetEndpoints());
     this._q("#adv-dst-ep").addEventListener("change", () => this._advRenderTargetBindings());
     this._q("#adv-cluster").addEventListener("change", () => this._advUpdateCustomClusterState());
+    this._q("#adv-target-group").addEventListener("change", () => this._advRenderGroupSupport());
     this._q("#adv-cluster-custom").addEventListener("input", () => this._advUpdateCustomClusterState());
 
     const getClusterIds = () => {
@@ -6442,6 +6494,19 @@ export class ZhaBindingMapCard extends HTMLElement {
             { sourceIeee, sourceEndpoint: opts.endpoint, clusterId: clusters[0], target: bindTarget },
             scan
           );
+          // A confirmed group binding that nothing in the group can use is
+          // worth saying out loud, not just in the hint above the button.
+          if (bindTarget.isGroup && res.outcome !== "failed") {
+            const sup = groupSupportSummary(
+              this._groupSupport(bindTarget.groupId, clusters[0]),
+              clusterName(clusters[0]),
+              this._groupName(bindTarget.groupId)
+            );
+            if (sup.level === "warning" || sup.level === "empty") {
+              res.message = `${res.message} But: ${sup.text}`;
+              if (res.level === "success") res.level = "warning";
+            }
+          }
           this._setStatus(res.level, res.message, res.level === "success" ? undefined : 0, res.action);
         } else if (!callErr && !sourceRead) {
           this._setStatus(
@@ -6588,6 +6653,7 @@ export class ZhaBindingMapCard extends HTMLElement {
     this._q("#adv-target-ep-wrap").style.display = type === "device" ? "" : "none";
     this._q("#adv-target-panel-wrap").style.display = type === "device" ? "" : "none";
     if (type === "device") this._advPopulateTargetEndpoints();
+    this._advRenderGroupSupport();
   }
 
   /** Unique endpoint ids present on a device, from its cluster list (source of truth: zha/devices/clusters). */
@@ -6703,6 +6769,48 @@ export class ZhaBindingMapCard extends HTMLElement {
     const unbindBtn = this._q("#adv-unbind");
     if (bindBtn) bindBtn.disabled = !valid;
     if (unbindBtn) unbindBtn.disabled = !valid;
+    this._advRenderGroupSupport();
+  }
+
+  /** The cluster the Advanced tab currently has selected, or null for
+   *  "zha-toolkit default" / an invalid custom id. */
+  _advSelectedClusterId() {
+    const sel = this._q("#adv-cluster");
+    if (!sel) return null;
+    if (sel.value === "__custom__") return parseClusterIdInput(this._q("#adv-cluster-custom").value);
+    return sel.value === "" ? null : Number(sel.value);
+  }
+
+  /** Under the Cluster field, when the target is a group: how many of its
+   *  members can act on the selected cluster. Reads members' cluster lists
+   *  (cheap local zha/devices/clusters calls) if they aren't cached yet. */
+  async _advRenderGroupSupport() {
+    const el = this._q("#adv-group-support");
+    if (!el) return;
+    const type = this._q("#adv-target-type") && this._q("#adv-target-type").value;
+    const clusterId = this._advSelectedClusterId();
+    const groupId = this._q("#adv-target-group") && this._q("#adv-target-group").value;
+    if (type !== "group" || clusterId == null || groupId === "" || groupId == null) {
+      el.style.display = "none";
+      return;
+    }
+    const reqId = (this._advGroupSupportReq = (this._advGroupSupportReq || 0) + 1);
+    const draw = () => {
+      const summary = groupSupportSummary(
+        this._groupSupport(Number(groupId), clusterId),
+        clusterName(clusterId),
+        this._groupName(Number(groupId))
+      );
+      el.className = `hint adv-group-support adv-group-support-${summary.level}`;
+      el.textContent = summary.text;
+      el.style.display = "";
+      return summary;
+    };
+    const first = draw();
+    if (first.level !== "unknown" && !this._groupSupport(Number(groupId), clusterId).unknown.length) return;
+    const toRead = this._groupMembers(Number(groupId)).filter((m) => !m.isCoordinator && !this._clusterCache.has(m.ieee));
+    await Promise.all(toRead.map((m) => this._ensureClusters(m.ieee).catch(() => {})));
+    if (reqId === this._advGroupSupportReq) draw();
   }
 
   _advRenderSourceBindings() {
@@ -6797,6 +6905,7 @@ export class ZhaBindingMapCard extends HTMLElement {
     } else if (target && target.kind === "group") {
       this._advApplyTargetType("group");
       this._q("#adv-target-group").value = target.group.group_id;
+      this._advRenderGroupSupport();
       this._setStatus("info", "Pick the source endpoint and cluster, then click Bind.");
     } else {
       this._setStatus("info", `Source set to ${this._deviceLabel(sourceDevice)} — pick a target below.`);

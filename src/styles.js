@@ -144,6 +144,11 @@ a.btn { display:inline-block; text-decoration:none; }
 .stale-banner { margin-bottom:10px; padding:8px 12px; border-radius:8px; background: rgba(255,152,0,0.14); font-size:0.9em;
   display:flex; flex-direction:column; gap:6px; }
 .pending-banner { background: rgba(255,193,7,0.16); }
+.adv-group-support { margin:4px 0 8px; padding:6px 10px; border-radius:6px; font-style:normal; }
+.adv-group-support-ok { background: rgba(76,175,80,0.12); }
+.adv-group-support-info { background: rgba(3,169,244,0.12); }
+.adv-group-support-warning, .adv-group-support-empty { background: rgba(255,152,0,0.18); }
+.adv-group-support-unknown { opacity: 0.8; }
 .pending-list { margin:0; padding-left:20px; }
 .status-warning { background: rgba(255,152,0,0.16); color: var(--primary-text-color); }
 .status .status-action { margin-left:8px; flex:0 0 auto; }

@@ -3,6 +3,12 @@
 All notable changes to ZHA Bindings Manager are documented here.
 
 
+## [1.3.1]
+
+No card changes. This release keeps the card's version in step with the
+[ZHA Bindings Manager integration 1.3.1](https://github.com/hsolgaard/zha-bindings-manager-integration/releases/tag/v1.3.1),
+which shortens the device-page Bindings sensor to a count and lets Rescan bindings count as a binding check.
+
 ## [1.3.0]
 
 No card changes. This release keeps the card's version in step with the

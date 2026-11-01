@@ -21,7 +21,7 @@
  * zha_toolkit MUST be installed (via HACS) and working for bind/unbind/scan
  * to function. See README.md for details.
  *
- * Version: 1.3.0
+ * Version: 1.3.1
  */
 (() => {
   // src/capexplorer-constants.js
@@ -78,7 +78,7 @@
 
   // src/constants.js
   var ZTK_DOMAIN = "zha_toolkit";
-  var CARD_VERSION = "1.3.0";
+  var CARD_VERSION = "1.3.1";
   var CHANGELOG_URL = "https://github.com/hsolgaard/zha-bindings-manager/blob/main/CHANGELOG.md";
   var DEFAULT_BINDABLE_OUT_CLUSTERS = [5, 6, 8, 258, 768];
   var MEMBERSHIP_EDGE_COLOR = "#8e24aa";
@@ -1442,6 +1442,26 @@
       };
     }
     return null;
+  }
+
+  // src/deep-link.js
+  function deepLinkIeee(search) {
+    let raw;
+    try {
+      raw = new URLSearchParams(search || "").get("device");
+    } catch (e) {
+      return null;
+    }
+    if (!raw) return null;
+    const hex2 = raw.toLowerCase().replace(/[^0-9a-f]/g, "");
+    if (hex2.length !== 16) return null;
+    return hex2.match(/../g).join(":");
+  }
+  function withoutDeviceParam(search) {
+    const params = new URLSearchParams(search || "");
+    params.delete("device");
+    const s = params.toString();
+    return s ? `?${s}` : "";
   }
 
   // src/group-support.js
@@ -3557,6 +3577,32 @@ a.btn { display:inline-block; text-decoration:none; }
       if (this._fpImageUrl) this._loadFpImage(this._fpImageUrl);
       this._setStatus("info", "Loading ZHA devices\u2026", 0);
       await this._reloadDevices({ initial: true });
+      this._openDeepLinkedDevice();
+    }
+    /** /zha-bindings-manager?device=<ieee> (linked from the integration's
+     *  device-page Bindings sensor and Repairs issues) opens that device's
+     *  view once devices are loaded. The parameter is then removed, so a
+     *  reload doesn't open it again. */
+    _openDeepLinkedDevice() {
+      let search = "";
+      try {
+        search = window.location.search;
+      } catch (e) {
+        return;
+      }
+      const ieee = deepLinkIeee(search);
+      if (!ieee) return;
+      try {
+        const url = window.location.pathname + withoutDeviceParam(search) + window.location.hash;
+        window.history.replaceState(window.history.state, "", url);
+      } catch (e) {
+      }
+      const d = this._devices.find((x) => normIeee(x.ieee) === ieee);
+      if (!d) {
+        this._setStatus("error", `The linked device (${ieee}) isn't in ZHA any more.`);
+        return;
+      }
+      this._openDeviceExplodedView(d);
     }
     /** Fetches ZHA's current device and group lists. Used on first load, by
      *  the device-registry listener, and at the start of every scan, so health

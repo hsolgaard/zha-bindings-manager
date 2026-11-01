@@ -3,6 +3,15 @@
 All notable changes to ZHA Bindings Manager are documented here.
 
 
+## [1.3.1]
+
+### Added
+
+- **Open a device straight from a link.** `/zha-bindings-manager?device=<address>` opens that device's view as soon
+  as the page has loaded. The [ZHA Bindings Manager integration 1.3.1](https://github.com/hsolgaard/zha-bindings-manager-integration/releases/tag/v1.3.1)
+  uses it for the **Open in ZHA Bindings Manager** link on each device page's Bindings sensor, and for **Learn more**
+  on its "Bindings disappeared" Repairs issue.
+
 ## [1.3.0]
 
 No card changes. This release keeps the card's version in step with the

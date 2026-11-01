@@ -21,7 +21,7 @@
  * zha_toolkit MUST be installed (via HACS) and working for bind/unbind/scan
  * to function. See README.md for details.
  *
- * Version: 1.2.0
+ * Version: 1.3.0
  */
 (() => {
   // src/capexplorer-constants.js

@@ -52,6 +52,9 @@ import {
 } from "./stale-bindings.js";
 import { aboutIntegrationText } from "./about.js";
 import { summarizeScan, toolkitAvailable } from "./scan-summary.js";
+import { unusualDeviceBindingRule } from "./health-rules.js";
+import { COMMAND_CHECK_LIMIT_MS, formatElapsed, shouldApplyResult } from "./command-check.js";
+import { bindOutcome, unbindOutcome, OUTCOME_LEVEL, pendingKey, reconcilePending } from "./action-verify.js";
 import { STYLE } from "./styles.js";
 import {
   DIRECTION_ALL,
@@ -198,7 +201,12 @@ export class ZhaBindingMapCard extends HTMLElement {
     // whether its technical detail is expanded in one shouldn't silently
     // carry over into the other.
     this._capExpSearchExpanded = new Set();
-    this._status = null; // {level: 'info'|'error'|'success', text}
+    this._status = null; // {level: 'info'|'warning'|'error'|'success', text, action?}
+    // Binds/unbinds that were sent but couldn't be checked because the source
+    // device didn't answer the re-read (usually a battery remote that went
+    // back to sleep). In memory only: they're re-checked whenever that device
+    // is scanned, and listed above the Bindings table until then.
+    this._pendingChecks = new Map(); // pendingKey -> {kind, sourceIeee, sourceEndpoint, clusterId, target, sentAt}
     this._scanState = { running: false, done: 0, total: 0 };
     this._selectedEdgeId = null;
     this._loaded = false;
@@ -997,8 +1005,10 @@ export class ZhaBindingMapCard extends HTMLElement {
     }
   }
 
-  _setStatus(level, text, timeout = 6000) {
-    this._status = { level, text };
+  /** `action` (optional): {label, onClick} rendered as a button in the
+   *  status bar, e.g. "Check again" after an unconfirmed bind. */
+  _setStatus(level, text, timeout = 6000, action = null) {
+    this._status = { level, text, action };
     this._renderStatus();
     if (this._statusTimer) clearTimeout(this._statusTimer);
     if (timeout) {
@@ -1140,24 +1150,150 @@ export class ZhaBindingMapCard extends HTMLElement {
     return this._rawBindings().some((b) => bindingMatches(b, sourceIeee, sourceEp, clusterId, target));
   }
 
-  /** Call after the post-action rescan completes. */
-  _verifyBindOutcome(sourceIeee, sourceEp, clusterId, target) {
-    const after = this._bindingPresent(sourceIeee, sourceEp, clusterId, target);
-    return after
-      ? { ok: true, message: "Binding confirmed on the device." }
-      : { ok: false, message: "Bind failed — this binding is not on the device after rescanning." };
+  /** Plain-text "Source (ep 1) → Target (ep 2), On/Off" for messages. */
+  _describeChange(p) {
+    const src = `${this._ieeeLabel(p.sourceIeee, { plain: true })} (ep ${p.sourceEndpoint})`;
+    let dst;
+    if (p.target.isGroup) {
+      const g = this._groups.find((x) => x.group_id === p.target.groupId);
+      dst = g ? `group ${g.name}` : `group ${p.target.groupId}`;
+    } else {
+      dst = `${this._ieeeLabel(p.target.ieee, { plain: true })}${p.target.endpoint != null ? ` (ep ${p.target.endpoint})` : ""}`;
+    }
+    return `${src} → ${dst}, ${clusterName(p.clusterId)}`;
   }
 
-  /** Call after the post-action rescan completes; `before` must have been
-   *  captured (via _bindingPresent) prior to the unbind API call. */
-  _verifyUnbindOutcome(before, sourceIeee, sourceEp, clusterId, target) {
-    const after = this._bindingPresent(sourceIeee, sourceEp, clusterId, target);
-    if (!after) {
-      return before
-        ? { ok: true, message: "Binding confirmed removed." }
-        : { ok: true, message: "This binding didn't actually exist on the device — table refreshed." };
+  /**
+   * Turns a bind/unbind into one of confirmed / failed / unconfirmed (plus
+   * "absent" for an unbind of something that wasn't there), using a fresh
+   * read of the source when there was one. `scan` is what _scanBindings
+   * returned. Unconfirmed changes are remembered in _pendingChecks and
+   * re-checked the next time that device answers a scan.
+   * Returns {level, message, action} ready for _setStatus.
+   */
+  _settleChange(kind, p, scan, before = null) {
+    const sourceRead = !!(scan && scan.read && scan.read.has(normIeee(p.sourceIeee)));
+    const present = this._bindingPresent(p.sourceIeee, p.sourceEndpoint, p.clusterId, p.target);
+    const outcome =
+      kind === "bind" ? bindOutcome({ present, sourceRead }) : unbindOutcome({ before, present, sourceRead });
+    const entry = { kind, ...p, sentAt: Date.now() };
+    const key = pendingKey(entry);
+    if (outcome === "unconfirmed") this._pendingChecks.set(key, entry);
+    else this._pendingChecks.delete(key);
+    this._renderPendingBanner();
+
+    const srcName = this._ieeeLabel(p.sourceIeee, { plain: true });
+    const notRead =
+      scan && scan.ran === false
+        ? "the check couldn't run because another scan was already in progress"
+        : `${srcName} didn't answer the check`;
+    const wake = this._isBatteryDevice(this._devices.find((d) => normIeee(d.ieee) === normIeee(p.sourceIeee)) || {})
+      ? " Battery devices usually go back to sleep straight away: press a button on it, then click Check again."
+      : " Make sure it's powered and in range, then click Check again.";
+    const message = {
+      bind: {
+        confirmed: "Binding confirmed on the device.",
+        failed: `Bind failed: ${srcName} answered the check and this binding isn't on it.`,
+        unconfirmed: `Bind sent, not confirmed yet: ${notRead}.${wake}`,
+      },
+      unbind: {
+        confirmed: "Binding confirmed removed.",
+        absent: "This binding didn't actually exist on the device — table refreshed.",
+        failed: `Unbind failed: ${srcName} answered the check and this binding is still on it.`,
+        unconfirmed: `Unbind sent, not confirmed yet: ${notRead}, so the table still shows the binding.${wake}`,
+      },
+    }[kind][outcome];
+    const action =
+      outcome === "unconfirmed" ? { label: "Check again", onClick: () => this._checkPendingAgain() } : null;
+    // Earlier pending changes decided by the same rescan would otherwise be
+    // hidden by this message replacing the scan summary.
+    const earlier = this._lastSettled;
+    this._lastSettled = null;
+    let level = OUTCOME_LEVEL[outcome];
+    if (earlier && earlier.level === "error" && level === "success") level = "warning";
+    return {
+      level,
+      message: earlier && earlier.text ? `${message} Also: ${earlier.text}` : message,
+      action,
+      outcome,
+    };
+  }
+
+  /** Re-checks every pending change whose source answered `read` (a Set of
+   *  normalised IEEEs from _scanBindings). Returns {text, level} describing
+   *  what was decided, empty when nothing was. */
+  _reconcilePendingChecks(read) {
+    if (!this._pendingChecks.size) return { text: "", level: null };
+    const { pending, resolved } = reconcilePending([...this._pendingChecks.values()], {
+      isPresent: (e) => this._bindingPresent(e.sourceIeee, e.sourceEndpoint, e.clusterId, e.target),
+      wasRead: (ieee) => read.has(normIeee(ieee)),
+    });
+    this._pendingChecks = new Map(pending.map((e) => [pendingKey(e), e]));
+    this._renderPendingBanner();
+    if (!resolved.length) return { text: "", level: null };
+    const words = { confirmed: "confirmed", failed: "did NOT go through" };
+    const text = resolved
+      .map(({ entry, outcome }) => `${entry.kind === "bind" ? "Bind" : "Unbind"} ${this._describeChange(entry)}: ${words[outcome] || outcome}.`)
+      .join(" ");
+    const level = resolved.some((r) => r.outcome === "failed") ? "error" : "success";
+    return { text, level };
+  }
+
+  /** "Check again": re-reads only the devices with pending changes, using
+   *  the single-device retry count since the user has just woken them. */
+  async _checkPendingAgain() {
+    const sources = [...new Map([...this._pendingChecks.values()].map((e) => [normIeee(e.sourceIeee), e.sourceIeee])).values()];
+    if (!sources.length) return;
+    if (this._scanState.running) {
+      this._setStatus("error", "A scan is already running. Try again when it has finished.");
+      return;
     }
-    return { ok: false, message: "Unbind failed — this binding is still on the device after rescanning." };
+    this._setStatus("info", `Checking ${sources.length === 1 ? this._ieeeLabel(sources[0], { plain: true }) : `${sources.length} devices`}…`, 0);
+    const scan = await this._scanBindings(sources, { tries: this._retryCount });
+    // _scanBindings has already reported what was decided; only say more
+    // when the device still didn't answer.
+    const stillWaiting = sources.filter((s) => !scan.read.has(normIeee(s)));
+    if (scan.ran && stillWaiting.length) {
+      this._setStatus(
+        "warning",
+        `Still no answer from ${stillWaiting.map((s) => this._ieeeLabel(s, { plain: true })).join(", ")}. Press a button on it to wake it, then click Check again straight away.`,
+        0,
+        { label: "Check again", onClick: () => this._checkPendingAgain() }
+      );
+    }
+  }
+
+  _renderPendingBanner() {
+    const el = this._q("#pending-banner");
+    if (!el) return;
+    const items = [...this._pendingChecks.values()];
+    if (!items.length) {
+      el.style.display = "none";
+      el.innerHTML = "";
+      return;
+    }
+    el.style.display = "";
+    el.innerHTML = `
+      <div class="stale-row">
+        <span><strong>${items.length} change${items.length === 1 ? "" : "s"} not confirmed yet.</strong>
+        The command was sent but the device didn't answer the check, usually because a battery device went back to sleep.
+        Wake it (press a button) and click Check again.</span>
+        <button class="btn btn-small" id="btn-pending-check">Check again</button>
+        <button class="btn btn-small" id="btn-pending-dismiss" title="Stop tracking these. Nothing is sent to your devices.">Dismiss</button>
+      </div>
+      <ul class="pending-list">${items
+        .map(
+          (e) =>
+            `<li>${e.kind === "bind" ? "Bind" : "Unbind"}: ${escapeHtml(this._describeChange(e))} <span class="muted">· sent ${escapeHtml(
+              relTime(new Date(e.sentAt).toISOString())
+            )}</span></li>`
+        )
+        .join("")}</ul>`;
+    this._q("#btn-pending-check").addEventListener("click", () => this._checkPendingAgain());
+    this._q("#btn-pending-dismiss").addEventListener("click", () => {
+      this._pendingChecks.clear();
+      this._renderPendingBanner();
+    });
   }
 
   /** Coordinator unbind can target one explicit cluster or (if none is
@@ -1195,7 +1331,12 @@ export class ZhaBindingMapCard extends HTMLElement {
    *  matters most for the bulk network scan; single-device rescans just get
    *  a "batch" of 1 and behave exactly as before. */
   async _scanBindings(ieeeList, opts = {}) {
-    if (this._scanState.running) return;
+    // Returns {ran, read}: whether a scan actually ran, and the (normalised)
+    // IEEEs that answered it. Bind/unbind verification needs the second to
+    // tell "binding missing" apart from "device didn't answer the check".
+    const read = new Set();
+    this._lastSettled = null;
+    if (this._scanState.running) return { ran: false, read };
     // Without zha-toolkit every device "fails", which used to be reported
     // as sleepy devices (integration issue #2). Say what's actually wrong.
     if (!toolkitAvailable(this._hass)) {
@@ -1205,7 +1346,7 @@ export class ZhaBindingMapCard extends HTMLElement {
           "tables. Install zha-toolkit from HACS (Integrations), restart Home Assistant, then scan again.",
         0
       );
-      return;
+      return { ran: false, read };
     }
     const fullScan = !(ieeeList && ieeeList.length);
     // Claim the run before awaiting anything, so a second click can't start
@@ -1236,6 +1377,7 @@ export class ZhaBindingMapCard extends HTMLElement {
         this._recordScanOutcome(ieee, { success: true, durationMs: Date.now() - startedAt });
         this._bindings.set(ieee, bindings);
         this._scanFailures.delete(normIeee(ieee));
+        read.add(normIeee(ieee));
         if (partial) {
           this._scanPartial.set(normIeee(ieee), { retrieved: retrievedCount, total: totalCount });
           partialCount++;
@@ -1293,7 +1435,7 @@ export class ZhaBindingMapCard extends HTMLElement {
         0
       );
       this._render();
-      return;
+      return { ran: true, read };
     }
     // See scan-summary.js: separates sleepy battery devices from mains
     // devices, and recognises "nothing responded at all" as a zha-toolkit
@@ -1308,11 +1450,22 @@ export class ZhaBindingMapCard extends HTMLElement {
     // timeout: 0 — the final scan summary stays on screen until dismissed
     // (via the × button) rather than auto-hiding after a few seconds, since
     // it's easy to miss if you glance away while a larger scan is running.
-    this._setStatus(outcome.level, outcome.message, 0);
+    // Anything sent earlier that is waiting for this device to answer gets
+    // decided now (see _reconcilePendingChecks).
+    const settled = this._reconcilePendingChecks(read);
+    this._lastSettled = settled; // picked up by _settleChange, which replaces this status
+    const level =
+      settled.level === "error" || outcome.level === "error"
+        ? "error"
+        : settled.level === "warning" || outcome.level === "warning"
+        ? "warning"
+        : outcome.level;
+    this._setStatus(level, settled.text ? `${outcome.message} ${settled.text}` : outcome.message, 0);
     this._renderGraph();
     this._renderTable();
     this._renderDevicesTab();
     this._renderStatus();
+    return { ran: true, read };
   }
 
   /** Every scanned binding, unfiltered — use for counts/audits where the
@@ -1818,6 +1971,10 @@ export class ZhaBindingMapCard extends HTMLElement {
           recommendation: "Verify the device capabilities or recreate the binding.",
         };
       }
+      // Structurally fine, but unusual for a device-to-device binding (a
+      // Basic binding, or one the source can only report on).
+      const unusual = unusualDeviceBindingRule({ clusterId: b.clusterId, classification: this._classifyBinding(b) });
+      if (unusual && (dupCounts.get(this._healthDupKey(b)) || 0) <= 1) return unusual;
     }
 
     if ((dupCounts.get(this._healthDupKey(b)) || 0) > 1) {
@@ -2074,7 +2231,12 @@ export class ZhaBindingMapCard extends HTMLElement {
     }
     el.style.display = "flex";
     el.className = `status status-${this._status.level}`;
-    el.innerHTML = `<span class="status-text">${escapeHtml(this._status.text)}</span><button type="button" class="status-close" aria-label="Dismiss">×</button>`;
+    const action = this._status.action;
+    el.innerHTML = `<span class="status-text">${escapeHtml(this._status.text)}</span>${
+      action ? `<button type="button" class="btn btn-small status-action">${escapeHtml(action.label)}</button>` : ""
+    }<button type="button" class="status-close" aria-label="Dismiss">×</button>`;
+    const actionBtn = el.querySelector(".status-action");
+    if (actionBtn && action) actionBtn.addEventListener("click", () => action.onClick());
     const closeBtn = el.querySelector(".status-close");
     if (closeBtn) {
       closeBtn.addEventListener("click", () => {
@@ -2924,6 +3086,9 @@ export class ZhaBindingMapCard extends HTMLElement {
     this._qa(".ep-cmd-check").forEach((btn) => {
       btn.addEventListener("click", () => this._checkEndpointCommands(d, Number(btn.dataset.ep)));
     });
+    this._qa(".ep-cmd-stop").forEach((btn) => {
+      btn.addEventListener("click", () => this._stopCommandCheck(d, Number(btn.dataset.ep)));
+    });
     this._qa(".ep-cmd-toggle").forEach((btn) => {
       btn.addEventListener("click", () => {
         const rowKey = btn.dataset.rowKey;
@@ -3020,8 +3185,20 @@ export class ZhaBindingMapCard extends HTMLElement {
    *  useful on demand for a specific device someone's already investigating. */
   async _checkEndpointCommands(d, ep) {
     const key = this._commandScanKey(d.ieee, ep);
-    this._commandScans.set(key, { status: "loading" });
+    const token = (this._commandCheckSeq = (this._commandCheckSeq || 0) + 1);
+    const startedAt = Date.now();
+    this._commandScans.set(key, { status: "loading", token, startedAt });
     if (this._q("#dialog").classList.contains("open")) this._renderExplodedView(d);
+    this._startCommandCheckTicker();
+    // Stop waiting after COMMAND_CHECK_LIMIT_MS. The service call keeps
+    // running in HA; a late answer is still applied (shouldApplyResult).
+    setTimeout(() => {
+      const cur = this._commandScans.get(key);
+      if (cur && cur.token === token && cur.status === "loading") {
+        this._commandScans.set(key, { ...cur, status: "timeout" });
+        this._rerenderExplodedFor(d);
+      }
+    }, COMMAND_CHECK_LIMIT_MS);
     // Kick off the community index load in the background too (if it
     // hasn't already been fetched via the Capability Explorer tab), so
     // Compare My Device below has something to compare against as soon as
@@ -3030,13 +3207,48 @@ export class ZhaBindingMapCard extends HTMLElement {
     if (!this._capExpIndex && !this._capExpLoading) this._capExpLoadIndex();
     try {
       const scan = await this._api.scanDeviceCommands(d.ieee, { endpoint: ep, tries: this._retryCount });
-      this._commandScans.set(key, { status: "done", scan });
+      if (!shouldApplyResult(this._commandScans.get(key), token, true)) return;
+      this._commandScans.set(key, { status: "done", scan, token });
     } catch (err) {
-      this._commandScans.set(key, { status: "error", error: err.message || String(err) });
+      if (!shouldApplyResult(this._commandScans.get(key), token, false)) return;
+      this._commandScans.set(key, { status: "error", error: err.message || String(err), token });
     }
+    this._rerenderExplodedFor(d);
+  }
+
+  /** Re-renders the exploded view if it's still open on device `d`. */
+  _rerenderExplodedFor(d) {
     if (!this._q("#dialog").classList.contains("open")) return; // closed while scanning
+    if (this._explodedDeviceIeee && normIeee(this._explodedDeviceIeee) !== normIeee(d.ieee)) return;
     const fresh = this._devices.find((x) => x.ieee === d.ieee) || d;
     this._renderExplodedView(fresh);
+  }
+
+  /** "Stop waiting" on a running command check. Nothing is sent to the
+   *  device; the card just stops showing it as in progress. */
+  _stopCommandCheck(d, ep) {
+    const key = this._commandScanKey(d.ieee, ep);
+    const cur = this._commandScans.get(key);
+    if (!cur || cur.status !== "loading") return;
+    this._commandScans.set(key, { ...cur, status: "stopped" });
+    this._rerenderExplodedFor(d);
+  }
+
+  /** Updates the elapsed-time counters of running command checks once a
+   *  second, in place, so expanded rows and scroll position aren't reset by
+   *  a full re-render. Stops itself when nothing is running. */
+  _startCommandCheckTicker() {
+    if (this._commandCheckTicker) return;
+    this._commandCheckTicker = setInterval(() => {
+      const running = [...this._commandScans.values()].some((e) => e.status === "loading");
+      this._qa(".ep-cmd-elapsed").forEach((el) => {
+        el.textContent = formatElapsed(Date.now() - Number(el.dataset.started));
+      });
+      if (!running) {
+        clearInterval(this._commandCheckTicker);
+        this._commandCheckTicker = null;
+      }
+    }, 1000);
   }
 
   /** Renders the "Supported commands" block for one endpoint card: a
@@ -3107,8 +3319,25 @@ export class ZhaBindingMapCard extends HTMLElement {
         <button class="btn btn-small ep-cmd-check" data-ep="${ep}">Check supported commands</button>`;
     } else if (entry.status === "loading") {
       actionHtml = `
-        <p class="hint ep-cmd-status">Checking supported commands&hellip; this queries the device directly and can take a while.</p>
-        ${wakeHint}`;
+        <p class="hint ep-cmd-status">Checking supported commands&hellip; <span class="ep-cmd-elapsed" data-started="${
+          entry.startedAt || Date.now()
+        }">${formatElapsed(Date.now() - (entry.startedAt || Date.now()))}</span> elapsed. This asks the device directly, one cluster at a time; most answer within a minute. The card stops waiting after ${formatElapsed(
+          COMMAND_CHECK_LIMIT_MS
+        )}.</p>
+        ${wakeHint}
+        <button class="btn btn-small ep-cmd-stop" data-ep="${ep}">Stop waiting</button>`;
+    } else if (entry.status === "timeout" || entry.status === "stopped") {
+      const why =
+        entry.status === "timeout"
+          ? `No answer after ${formatElapsed(COMMAND_CHECK_LIMIT_MS)}, so the card stopped waiting.`
+          : "Stopped waiting.";
+      const tryHint = isBattery
+        ? `<div class="scan-wake-hint">May be asleep: press a button on it, then try again.</div>`
+        : `<div class="scan-wake-hint">Check it's powered on and in range, then try again.</div>`;
+      actionHtml = `
+        <p class="hint ep-cmd-status">${why} The request may still be running in Home Assistant; if the device answers, the results will appear here.</p>
+        ${tryHint}
+        <button class="btn btn-small ep-cmd-check" data-ep="${ep}">${isBattery ? "Wake & try again" : "Try again"}</button>`;
     } else if (entry.status === "error") {
       const errorWakeHint = isBattery
         ? `<div class="scan-wake-hint">May be asleep — press a button on it, then try again.</div>`
@@ -3754,15 +3983,19 @@ export class ZhaBindingMapCard extends HTMLElement {
         // rescan instead (see v0.8.2 diagnosis).
         console.warn("[ZHA Bindings Manager] unbind call raised, verifying against rescan anyway", err);
       } finally {
-        await this._scanBindings(rescanTargets);
-        const outcome = this._verifyUnbindOutcome(
-          before,
-          binding.sourceIeee,
-          binding.sourceEndpoint,
-          binding.clusterId,
-          bindTarget
+        const scan = await this._scanBindings(rescanTargets, { tries: this._retryCount });
+        const res = this._settleChange(
+          "unbind",
+          {
+            sourceIeee: binding.sourceIeee,
+            sourceEndpoint: binding.sourceEndpoint,
+            clusterId: binding.clusterId,
+            target: bindTarget,
+          },
+          scan,
+          before
         );
-        this._setStatus(outcome.ok ? "success" : "error", outcome.message, outcome.ok ? undefined : 0);
+        this._setStatus(res.level, res.message, res.level === "success" ? undefined : 0, res.action);
       }
     });
   }
@@ -3926,6 +4159,7 @@ export class ZhaBindingMapCard extends HTMLElement {
     const healthMap = this._computeHealthMap();
     this._renderHealthSummary(healthMap);
     this._renderStaleBanner();
+    this._renderPendingBanner();
 
     this._updateSortIndicators("#view-table", this._tableSort);
 
@@ -3983,8 +4217,13 @@ export class ZhaBindingMapCard extends HTMLElement {
     if (!rows.length) {
       const all = this._allBindings();
       const dev = filtered ? this._devices.find((d) => d.ieee === deviceIeee) : null;
+      const healthChip = this._q(`[data-health-filter="${this._tableHealthFilter}"]`);
       const state = emptyTableState({
         total: all.length,
+        rawTotal: this._rawBindings().length,
+        healthFilterLabel:
+          this._tableHealthFilter !== "all" ? (healthChip ? healthChip.textContent.trim() : this._tableHealthFilter) : null,
+        search: bySearch ? null : (this._filters.search || "").trim() || null,
         deviceFilterActive: filtered,
         deviceMatches: filtered
           ? all.filter((b) => matchesDeviceFilter(b, deviceIeee, this._tableDirection)).length
@@ -4250,7 +4489,7 @@ export class ZhaBindingMapCard extends HTMLElement {
     el.innerHTML = `
       <span class="health-summary-title">Binding Health</span>
       <span class="muted">${bindings.length} binding${bindings.length === 1 ? "" : "s"} scanned</span>
-      <span class="health-chip health-ok">${HEALTH_ICON.ok} ${counts.ok} OK</span>
+      <span class="health-chip health-ok" title="Structurally valid: the devices, endpoint and cluster all exist. It doesn't prove the binding does what you meant.">${HEALTH_ICON.ok} ${counts.ok} Valid</span>
       ${
         counts.warning
           ? `<span class="health-chip health-warning">${HEALTH_ICON.warning} ${counts.warning} Warning${
@@ -6179,9 +6418,12 @@ export class ZhaBindingMapCard extends HTMLElement {
         // Rescan regardless of outcome — see v0.8.2 diagnosis: a failure here
         // often just means the cache was already stale, so refreshing both
         // ends clears phantom entries instead of leaving a confusing error.
-        await this._scanBindings(this._impactedIeees(sourceIeee, targetIeeeForRescan));
+        const scan = await this._scanBindings(this._impactedIeees(sourceIeee, targetIeeeForRescan), {
+          tries: this._retryCount,
+        });
         this._advRenderSourceBindings();
         this._advRenderTargetBindings();
+        const sourceRead = scan.read.has(normIeee(sourceIeee));
 
         // Precise verification only makes sense when exactly one cluster and
         // a complete target (endpoint included) were specified — otherwise
@@ -6195,8 +6437,18 @@ export class ZhaBindingMapCard extends HTMLElement {
         const canVerify =
           clusters.length === 1 && opts.endpoint != null && (bindTarget.isGroup || bindTarget.endpoint != null);
         if (canVerify) {
-          const outcome = this._verifyBindOutcome(sourceIeee, opts.endpoint, clusters[0], bindTarget);
-          this._setStatus(outcome.ok ? "success" : "error", outcome.message, outcome.ok ? undefined : 0);
+          const res = this._settleChange(
+            "bind",
+            { sourceIeee, sourceEndpoint: opts.endpoint, clusterId: clusters[0], target: bindTarget },
+            scan
+          );
+          this._setStatus(res.level, res.message, res.level === "success" ? undefined : 0, res.action);
+        } else if (!callErr && !sourceRead) {
+          this._setStatus(
+            "warning",
+            `Bind command sent, but ${this._ieeeLabel(sourceIeee, { plain: true })} didn't answer the check, so the table may not show it yet. Wake the device and rescan it.`,
+            0
+          );
         } else {
           this._setStatus(
             callErr ? "error" : "success",
@@ -6268,16 +6520,31 @@ export class ZhaBindingMapCard extends HTMLElement {
         callErr = err;
         console.warn("[ZHA Bindings Manager] unbind call raised, verifying against rescan anyway", err);
       } finally {
-        await this._scanBindings(this._impactedIeees(sourceIeee, targetIeeeForRescan));
+        const scan = await this._scanBindings(this._impactedIeees(sourceIeee, targetIeeeForRescan), {
+          tries: this._retryCount,
+        });
         this._advRenderSourceBindings();
         this._advRenderTargetBindings();
 
         if (type === "coordinator") {
           const outcome = this._verifyCoordinatorUnbindOutcome(beforeCoordList, sourceIeee, opts.endpoint);
-          this._setStatus(outcome.ok ? "success" : "error", outcome.message, outcome.ok ? undefined : 0);
+          if (!outcome.ok && !scan.read.has(normIeee(sourceIeee))) {
+            this._setStatus(
+              "warning",
+              `Unbind sent, not confirmed yet: ${this._ieeeLabel(sourceIeee, { plain: true })} didn't answer the check. Wake it and rescan it to see the result.`,
+              0
+            );
+          } else {
+            this._setStatus(outcome.ok ? "success" : "error", outcome.message, outcome.ok ? undefined : 0);
+          }
         } else if (before !== null) {
-          const outcome = this._verifyUnbindOutcome(before, sourceIeee, opts.endpoint, clusters[0], bindTarget);
-          this._setStatus(outcome.ok ? "success" : "error", outcome.message, outcome.ok ? undefined : 0);
+          const res = this._settleChange(
+            "unbind",
+            { sourceIeee, sourceEndpoint: opts.endpoint, clusterId: clusters[0], target: bindTarget },
+            scan,
+            before
+          );
+          this._setStatus(res.level, res.message, res.level === "success" ? undefined : 0, res.action);
         } else {
           this._setStatus(
             callErr ? "error" : "success",

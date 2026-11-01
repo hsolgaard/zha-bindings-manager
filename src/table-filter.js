@@ -44,23 +44,51 @@ export function directionLabel(dir) {
 }
 
 /**
- * Explains an empty Bindings table. Exactly one of three cases:
+ * Explains an empty Bindings table. One of four cases:
  *  - "not-scanned": no bindings have been loaded at all.
+ *  - "coordinator-hidden": bindings were scanned, but every one of them
+ *    targets the coordinator and "Hide coordinator bindings" is on. Before
+ *    1.0.4 this read as "No bindings loaded yet" while the summary above
+ *    said "34 bindings scanned" (forum report, John_smith).
  *  - "device-filter": the device filter (and its direction toggle) matches nothing.
  *  - "other-filters": the device filter is fine, but the health chips or
- *    search box hide everything.
+ *    search box hide everything. Names which one(s) when told.
  *
  * `coordinatorHidden` is true when the filtered device is the coordinator and
  * the "Hide coordinator bindings" setting is on: that setting is the reason
  * it looks empty, so the message says so instead of implying it has none.
  *
- * `total` is every binding currently available to the table, before any
- * filtering. `deviceMatches` is how many of those pass the device filter
- * alone (ignoring health chips and search).
+ * `total` is every binding currently available to the table (after the
+ * coordinator setting, before any other filtering). `rawTotal` is every
+ * scanned binding, including ones that setting hides; it defaults to
+ * `total`. `deviceMatches` is how many of `total` pass the device filter
+ * alone (ignoring health chips and search). `healthFilterLabel` and `search`
+ * describe the other active filters, if any.
  */
-export function emptyTableState({ total, deviceFilterActive, deviceMatches, direction, deviceName, coordinatorHidden }) {
-  if (!total) {
+export function emptyTableState({
+  total,
+  rawTotal,
+  deviceFilterActive,
+  deviceMatches,
+  direction,
+  deviceName,
+  coordinatorHidden,
+  healthFilterLabel,
+  search,
+}) {
+  const scanned = rawTotal != null ? rawTotal : total;
+  if (!scanned) {
     return { kind: "not-scanned", message: 'No bindings loaded yet. Click "Scan bindings" above.' };
+  }
+  if (!total) {
+    return {
+      kind: "coordinator-hidden",
+      message: `All ${scanned} scanned binding${scanned === 1 ? "" : "s"} target${
+        scanned === 1 ? "s" : ""
+      } the coordinator, and "Hide coordinator bindings" is on in the Map filters. Untick it to see ${
+        scanned === 1 ? "it" : "them"
+      }.`,
+    };
   }
   if (deviceFilterActive && !deviceMatches) {
     const what =
@@ -80,7 +108,15 @@ export function emptyTableState({ total, deviceFilterActive, deviceMatches, dire
     }.`;
     return { kind: "device-filter", message: `${what} ${hidden}` };
   }
-  return { kind: "other-filters", message: "No bindings match the current filters." };
+  const reasons = [];
+  if (healthFilterLabel) reasons.push(`the "${healthFilterLabel}" health filter`);
+  if (search) reasons.push(`the search "${search}"`);
+  return {
+    kind: "other-filters",
+    message: reasons.length
+      ? `No bindings match ${reasons.join(" and ")}. ${total} binding${total === 1 ? " is" : "s are"} hidden.`
+      : "No bindings match the current filters.",
+  };
 }
 
 /** Lowercased text a search should match for a device by name: the name the

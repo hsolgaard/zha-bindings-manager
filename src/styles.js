@@ -143,6 +143,10 @@ a.btn { display:inline-block; text-decoration:none; }
 .edge-unknown:hover { stroke-width: 2.2; opacity: 1; }
 .stale-banner { margin-bottom:10px; padding:8px 12px; border-radius:8px; background: rgba(255,152,0,0.14); font-size:0.9em;
   display:flex; flex-direction:column; gap:6px; }
+.pending-banner { background: rgba(255,193,7,0.16); }
+.pending-list { margin:0; padding-left:20px; }
+.status-warning { background: rgba(255,152,0,0.16); color: var(--primary-text-color); }
+.status .status-action { margin-left:8px; flex:0 0 auto; }
 .stale-row { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
 .stale-row > span { flex: 1 1 260px; }
 .table-filter-info { display:flex; flex-wrap:wrap; align-items:center; gap:10px; margin-bottom:8px; padding:6px 10px;

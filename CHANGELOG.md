@@ -3,6 +3,44 @@
 All notable changes to ZHA Bindings Manager are documented here.
 
 
+## [1.0.4]
+
+Thanks to John_smith for testing 1.0.3 with an xsky dimmer and light and reporting all of these on the
+[community forum](https://community.home-assistant.io/t/zha-bindings-manager-1-0-see-diagnose-and-manage-zigbee-direct-bindings-in-zha/1030616/5).
+
+### Fixed
+
+- **Binding a battery remote no longer looks like a failure.** After every bind or unbind the card reads the source
+  device's binding table to check the result. A battery remote is usually back asleep by then, and the card used to
+  report "Bind failed" even when the bind had gone through. There are now three outcomes:
+  - **Confirmed**: the device answered and the change is there.
+  - **Not confirmed yet**: the device didn't answer the check. The status bar says so and offers **Check again**, and
+    the change is listed above the Bindings table until that device next answers a scan. Wake the device (press a
+    button) and click Check again.
+  - **Failed**: the device answered and the change isn't there.
+
+  The same applies to Unbind, both from a binding's dialog and from the Advanced tab. The check after a bind or unbind
+  now uses the single-device retry count from the ⚙ settings, so a device that is only just awake has more chances to
+  answer. Unconfirmed changes are kept until the page is reloaded; **Dismiss** stops tracking them.
+- **The Bindings table no longer says "No bindings loaded yet" when bindings were loaded.** If every scanned binding
+  targets the coordinator and "Hide coordinator bindings" is on, the table now says that's why it's empty. When the
+  health filter or search hides everything, the message names which one.
+- **"Check supported commands" no longer waits forever.** It shows how long it has been running, has a **Stop waiting**
+  button, and stops waiting by itself after 2 minutes. The request itself can't be cancelled in Home Assistant, so if
+  the device answers later, the results still appear.
+
+### Changed
+
+- **Binding Health says "Valid" instead of "OK".** It checks that the devices, endpoint and cluster exist, not that
+  the binding does what you meant, and "OK" suggested more than that. The CSV, JSON and PDF exports use the new label
+  too.
+- **Binding Health flags unusual device-to-device bindings.**
+  - A **Basic** cluster binding between two devices is now a warning. Basic only holds device information, so the
+    binding doesn't let either device control the other; it's usually a leftover or a mistake, often in the wrong
+    direction (for example from a light to its remote).
+  - A binding on a cluster the source only reports on (rather than sends commands for) is now shown as information:
+    "Reporting binding to another device, not a control binding".
+
 ## [1.0.3]
 
 ### Fixed

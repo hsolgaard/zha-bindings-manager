@@ -21,7 +21,7 @@
  * zha_toolkit MUST be installed (via HACS) and working for bind/unbind/scan
  * to function. See README.md for details.
  *
- * Version: 1.0.3
+ * Version: 1.0.4
  */
 (() => {
   // src/capexplorer-constants.js
@@ -78,7 +78,7 @@
 
   // src/constants.js
   var ZTK_DOMAIN = "zha_toolkit";
-  var CARD_VERSION = "1.0.3";
+  var CARD_VERSION = "1.0.4";
   var CHANGELOG_URL = "https://github.com/hsolgaard/zha-bindings-manager/blob/main/CHANGELOG.md";
   var DEFAULT_BINDABLE_OUT_CLUSTERS = [5, 6, 8, 258, 768];
   var MEMBERSHIP_EDGE_COLOR = "#8e24aa";
@@ -321,7 +321,7 @@
     }
   };
   var HEALTH_ICON = { ok: "\u2705", info: "\u2139", warning: "\u26A0", error: "\u274C" };
-  var HEALTH_LABEL = { ok: "OK", info: "Info", warning: "Warning", error: "Error" };
+  var HEALTH_LABEL = { ok: "Valid", info: "Info", warning: "Warning", error: "Error" };
   var HEALTH_RANK = { error: 0, warning: 1, info: 2, ok: 3 };
   var DOMAIN_LABELS = {
     light: "Light",
@@ -908,6 +908,7 @@
   <div id="view-table" class="view">
     <div id="health-summary" class="health-summary" style="display:none"></div>
     <div id="stale-banner" class="stale-banner" style="display:none"></div>
+    <div id="pending-banner" class="stale-banner pending-banner" style="display:none"></div>
     <div id="table-filter-info" class="table-filter-info" style="display:none"></div>
     <div class="table-toolbar">
       <span class="health-filters" id="health-filters">
@@ -1401,6 +1402,81 @@
     return { level, message: `Scan complete: ${parts.join(", ")}.${tail}` };
   }
 
+  // src/health-rules.js
+  var BASIC_CLUSTER = 0;
+  function unusualDeviceBindingRule({ clusterId, classification }) {
+    if (Number(clusterId) === BASIC_CLUSTER) {
+      return {
+        level: "warning",
+        code: "unusual_basic",
+        message: "Unusual binding: Basic cluster bound to another device.",
+        why: "The Basic cluster only holds device information such as the manufacturer and model. Binding it to another device doesn't let either one control the other. Bindings like this are usually left by a manufacturer's pairing routine or created by mistake, often in the wrong direction (for example from a light to its remote).",
+        recommendation: "Unless a device's manual says it needs this, it's safe to remove. To control a light from a switch, bind On/Off (and Level Control for dimming) from the switch to the light."
+      };
+    }
+    if (classification === "reporting") {
+      return {
+        level: "info",
+        code: "reporting_to_device",
+        message: "Reporting binding to another device, not a control binding.",
+        why: "The source sends its own status for this cluster to the target, rather than sending it commands. That is sometimes intended (for example a temperature sensor reporting to a thermostat), but it doesn't let the source control the target.",
+        recommendation: "If you meant the source to control the target, check the direction: the binding should start on the device that sends the commands, such as a switch or remote."
+      };
+    }
+    return null;
+  }
+
+  // src/command-check.js
+  var COMMAND_CHECK_LIMIT_MS = 12e4;
+  function formatElapsed(ms) {
+    const total = Math.max(0, Math.floor((ms || 0) / 1e3));
+    const m = Math.floor(total / 60);
+    const s = total % 60;
+    return `${m}:${String(s).padStart(2, "0")}`;
+  }
+  function shouldApplyResult(entry, token, ok) {
+    if (!entry) return false;
+    if (ok) return entry.status !== "done" || entry.token === token;
+    return entry.token === token && entry.status !== "done";
+  }
+
+  // src/action-verify.js
+  function bindOutcome({ present, sourceRead }) {
+    if (present) return "confirmed";
+    return sourceRead ? "failed" : "unconfirmed";
+  }
+  function unbindOutcome({ before, present, sourceRead }) {
+    if (sourceRead) {
+      if (present) return "failed";
+      return before === false ? "absent" : "confirmed";
+    }
+    return before === false && !present ? "absent" : "unconfirmed";
+  }
+  var OUTCOME_LEVEL = {
+    confirmed: "success",
+    absent: "success",
+    unconfirmed: "warning",
+    failed: "error"
+  };
+  function pendingKey(p) {
+    const t = p.target && p.target.isGroup ? `g:${p.target.groupId}` : `d:${String(p.target && p.target.ieee || "").toLowerCase()}:${p.target ? p.target.endpoint : ""}`;
+    return `${p.kind}|${String(p.sourceIeee).toLowerCase()}|${p.sourceEndpoint}|${p.clusterId}|${t}`;
+  }
+  function reconcilePending(entries, { isPresent, wasRead }) {
+    const pending = [];
+    const resolved = [];
+    for (const entry of entries || []) {
+      if (!wasRead(entry.sourceIeee)) {
+        pending.push(entry);
+        continue;
+      }
+      const present = !!isPresent(entry);
+      const outcome = entry.kind === "unbind" ? unbindOutcome({ before: true, present, sourceRead: true }) : bindOutcome({ present, sourceRead: true });
+      resolved.push({ entry, outcome });
+    }
+    return { pending, resolved };
+  }
+
   // src/styles.js
   var STYLE = `
 :host { display:block; max-width:100%; }
@@ -1547,6 +1623,10 @@ a.btn { display:inline-block; text-decoration:none; }
 .edge-unknown:hover { stroke-width: 2.2; opacity: 1; }
 .stale-banner { margin-bottom:10px; padding:8px 12px; border-radius:8px; background: rgba(255,152,0,0.14); font-size:0.9em;
   display:flex; flex-direction:column; gap:6px; }
+.pending-banner { background: rgba(255,193,7,0.16); }
+.pending-list { margin:0; padding-left:20px; }
+.status-warning { background: rgba(255,152,0,0.16); color: var(--primary-text-color); }
+.status .status-action { margin-left:8px; flex:0 0 auto; }
 .stale-row { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
 .stale-row > span { flex: 1 1 260px; }
 .table-filter-info { display:flex; flex-wrap:wrap; align-items:center; gap:10px; margin-bottom:8px; padding:6px 10px;
@@ -1835,9 +1915,26 @@ a.btn { display:inline-block; text-decoration:none; }
   function directionLabel(dir) {
     return dir === DIRECTION_OUTBOUND ? "\u2192 Outbound" : dir === DIRECTION_INBOUND ? "\u2190 Inbound" : "";
   }
-  function emptyTableState({ total, deviceFilterActive, deviceMatches, direction, deviceName, coordinatorHidden }) {
-    if (!total) {
+  function emptyTableState({
+    total,
+    rawTotal,
+    deviceFilterActive,
+    deviceMatches,
+    direction,
+    deviceName,
+    coordinatorHidden,
+    healthFilterLabel,
+    search
+  }) {
+    const scanned = rawTotal != null ? rawTotal : total;
+    if (!scanned) {
       return { kind: "not-scanned", message: 'No bindings loaded yet. Click "Scan bindings" above.' };
+    }
+    if (!total) {
+      return {
+        kind: "coordinator-hidden",
+        message: `All ${scanned} scanned binding${scanned === 1 ? "" : "s"} target${scanned === 1 ? "s" : ""} the coordinator, and "Hide coordinator bindings" is on in the Map filters. Untick it to see ${scanned === 1 ? "it" : "them"}.`
+      };
     }
     if (deviceFilterActive && !deviceMatches) {
       const what = direction === DIRECTION_OUTBOUND ? `No outbound bindings from ${deviceName}.` : direction === DIRECTION_INBOUND ? `No inbound bindings to ${deviceName}.` : `No bindings involve ${deviceName}.`;
@@ -1850,7 +1947,13 @@ a.btn { display:inline-block; text-decoration:none; }
       const hidden = `The filter is hiding ${total} other binding${total === 1 ? "" : "s"}. Clear the filter to see ${total === 1 ? "it" : "them"}.`;
       return { kind: "device-filter", message: `${what} ${hidden}` };
     }
-    return { kind: "other-filters", message: "No bindings match the current filters." };
+    const reasons = [];
+    if (healthFilterLabel) reasons.push(`the "${healthFilterLabel}" health filter`);
+    if (search) reasons.push(`the search "${search}"`);
+    return {
+      kind: "other-filters",
+      message: reasons.length ? `No bindings match ${reasons.join(" and ")}. ${total} binding${total === 1 ? " is" : "s are"} hidden.` : "No bindings match the current filters."
+    };
   }
   function deviceNameText(d) {
     if (!d) return "";
@@ -2459,6 +2562,7 @@ a.btn { display:inline-block; text-decoration:none; }
       this._capExpExpanded = /* @__PURE__ */ new Set();
       this._capExpSearchExpanded = /* @__PURE__ */ new Set();
       this._status = null;
+      this._pendingChecks = /* @__PURE__ */ new Map();
       this._scanState = { running: false, done: 0, total: 0 };
       this._selectedEdgeId = null;
       this._loaded = false;
@@ -3134,8 +3238,10 @@ a.btn { display:inline-block; text-decoration:none; }
       } catch (e) {
       }
     }
-    _setStatus(level, text, timeout = 6e3) {
-      this._status = { level, text };
+    /** `action` (optional): {label, onClick} rendered as a button in the
+     *  status bar, e.g. "Check again" after an unconfirmed bind. */
+    _setStatus(level, text, timeout = 6e3, action = null) {
+      this._status = { level, text, action };
       this._renderStatus();
       if (this._statusTimer) clearTimeout(this._statusTimer);
       if (timeout) {
@@ -3254,19 +3360,129 @@ a.btn { display:inline-block; text-decoration:none; }
     _bindingPresent(sourceIeee, sourceEp, clusterId, target) {
       return this._rawBindings().some((b) => bindingMatches(b, sourceIeee, sourceEp, clusterId, target));
     }
-    /** Call after the post-action rescan completes. */
-    _verifyBindOutcome(sourceIeee, sourceEp, clusterId, target) {
-      const after = this._bindingPresent(sourceIeee, sourceEp, clusterId, target);
-      return after ? { ok: true, message: "Binding confirmed on the device." } : { ok: false, message: "Bind failed \u2014 this binding is not on the device after rescanning." };
-    }
-    /** Call after the post-action rescan completes; `before` must have been
-     *  captured (via _bindingPresent) prior to the unbind API call. */
-    _verifyUnbindOutcome(before, sourceIeee, sourceEp, clusterId, target) {
-      const after = this._bindingPresent(sourceIeee, sourceEp, clusterId, target);
-      if (!after) {
-        return before ? { ok: true, message: "Binding confirmed removed." } : { ok: true, message: "This binding didn't actually exist on the device \u2014 table refreshed." };
+    /** Plain-text "Source (ep 1) → Target (ep 2), On/Off" for messages. */
+    _describeChange(p) {
+      const src = `${this._ieeeLabel(p.sourceIeee, { plain: true })} (ep ${p.sourceEndpoint})`;
+      let dst;
+      if (p.target.isGroup) {
+        const g = this._groups.find((x) => x.group_id === p.target.groupId);
+        dst = g ? `group ${g.name}` : `group ${p.target.groupId}`;
+      } else {
+        dst = `${this._ieeeLabel(p.target.ieee, { plain: true })}${p.target.endpoint != null ? ` (ep ${p.target.endpoint})` : ""}`;
       }
-      return { ok: false, message: "Unbind failed \u2014 this binding is still on the device after rescanning." };
+      return `${src} \u2192 ${dst}, ${clusterName(p.clusterId)}`;
+    }
+    /**
+     * Turns a bind/unbind into one of confirmed / failed / unconfirmed (plus
+     * "absent" for an unbind of something that wasn't there), using a fresh
+     * read of the source when there was one. `scan` is what _scanBindings
+     * returned. Unconfirmed changes are remembered in _pendingChecks and
+     * re-checked the next time that device answers a scan.
+     * Returns {level, message, action} ready for _setStatus.
+     */
+    _settleChange(kind, p, scan, before = null) {
+      const sourceRead = !!(scan && scan.read && scan.read.has(normIeee(p.sourceIeee)));
+      const present = this._bindingPresent(p.sourceIeee, p.sourceEndpoint, p.clusterId, p.target);
+      const outcome = kind === "bind" ? bindOutcome({ present, sourceRead }) : unbindOutcome({ before, present, sourceRead });
+      const entry = { kind, ...p, sentAt: Date.now() };
+      const key = pendingKey(entry);
+      if (outcome === "unconfirmed") this._pendingChecks.set(key, entry);
+      else this._pendingChecks.delete(key);
+      this._renderPendingBanner();
+      const srcName = this._ieeeLabel(p.sourceIeee, { plain: true });
+      const notRead = scan && scan.ran === false ? "the check couldn't run because another scan was already in progress" : `${srcName} didn't answer the check`;
+      const wake = this._isBatteryDevice(this._devices.find((d) => normIeee(d.ieee) === normIeee(p.sourceIeee)) || {}) ? " Battery devices usually go back to sleep straight away: press a button on it, then click Check again." : " Make sure it's powered and in range, then click Check again.";
+      const message = {
+        bind: {
+          confirmed: "Binding confirmed on the device.",
+          failed: `Bind failed: ${srcName} answered the check and this binding isn't on it.`,
+          unconfirmed: `Bind sent, not confirmed yet: ${notRead}.${wake}`
+        },
+        unbind: {
+          confirmed: "Binding confirmed removed.",
+          absent: "This binding didn't actually exist on the device \u2014 table refreshed.",
+          failed: `Unbind failed: ${srcName} answered the check and this binding is still on it.`,
+          unconfirmed: `Unbind sent, not confirmed yet: ${notRead}, so the table still shows the binding.${wake}`
+        }
+      }[kind][outcome];
+      const action = outcome === "unconfirmed" ? { label: "Check again", onClick: () => this._checkPendingAgain() } : null;
+      const earlier = this._lastSettled;
+      this._lastSettled = null;
+      let level = OUTCOME_LEVEL[outcome];
+      if (earlier && earlier.level === "error" && level === "success") level = "warning";
+      return {
+        level,
+        message: earlier && earlier.text ? `${message} Also: ${earlier.text}` : message,
+        action,
+        outcome
+      };
+    }
+    /** Re-checks every pending change whose source answered `read` (a Set of
+     *  normalised IEEEs from _scanBindings). Returns {text, level} describing
+     *  what was decided, empty when nothing was. */
+    _reconcilePendingChecks(read) {
+      if (!this._pendingChecks.size) return { text: "", level: null };
+      const { pending, resolved } = reconcilePending([...this._pendingChecks.values()], {
+        isPresent: (e) => this._bindingPresent(e.sourceIeee, e.sourceEndpoint, e.clusterId, e.target),
+        wasRead: (ieee) => read.has(normIeee(ieee))
+      });
+      this._pendingChecks = new Map(pending.map((e) => [pendingKey(e), e]));
+      this._renderPendingBanner();
+      if (!resolved.length) return { text: "", level: null };
+      const words = { confirmed: "confirmed", failed: "did NOT go through" };
+      const text = resolved.map(({ entry, outcome }) => `${entry.kind === "bind" ? "Bind" : "Unbind"} ${this._describeChange(entry)}: ${words[outcome] || outcome}.`).join(" ");
+      const level = resolved.some((r) => r.outcome === "failed") ? "error" : "success";
+      return { text, level };
+    }
+    /** "Check again": re-reads only the devices with pending changes, using
+     *  the single-device retry count since the user has just woken them. */
+    async _checkPendingAgain() {
+      const sources = [...new Map([...this._pendingChecks.values()].map((e) => [normIeee(e.sourceIeee), e.sourceIeee])).values()];
+      if (!sources.length) return;
+      if (this._scanState.running) {
+        this._setStatus("error", "A scan is already running. Try again when it has finished.");
+        return;
+      }
+      this._setStatus("info", `Checking ${sources.length === 1 ? this._ieeeLabel(sources[0], { plain: true }) : `${sources.length} devices`}\u2026`, 0);
+      const scan = await this._scanBindings(sources, { tries: this._retryCount });
+      const stillWaiting = sources.filter((s) => !scan.read.has(normIeee(s)));
+      if (scan.ran && stillWaiting.length) {
+        this._setStatus(
+          "warning",
+          `Still no answer from ${stillWaiting.map((s) => this._ieeeLabel(s, { plain: true })).join(", ")}. Press a button on it to wake it, then click Check again straight away.`,
+          0,
+          { label: "Check again", onClick: () => this._checkPendingAgain() }
+        );
+      }
+    }
+    _renderPendingBanner() {
+      const el = this._q("#pending-banner");
+      if (!el) return;
+      const items = [...this._pendingChecks.values()];
+      if (!items.length) {
+        el.style.display = "none";
+        el.innerHTML = "";
+        return;
+      }
+      el.style.display = "";
+      el.innerHTML = `
+      <div class="stale-row">
+        <span><strong>${items.length} change${items.length === 1 ? "" : "s"} not confirmed yet.</strong>
+        The command was sent but the device didn't answer the check, usually because a battery device went back to sleep.
+        Wake it (press a button) and click Check again.</span>
+        <button class="btn btn-small" id="btn-pending-check">Check again</button>
+        <button class="btn btn-small" id="btn-pending-dismiss" title="Stop tracking these. Nothing is sent to your devices.">Dismiss</button>
+      </div>
+      <ul class="pending-list">${items.map(
+        (e) => `<li>${e.kind === "bind" ? "Bind" : "Unbind"}: ${escapeHtml(this._describeChange(e))} <span class="muted">\xB7 sent ${escapeHtml(
+          relTime(new Date(e.sentAt).toISOString())
+        )}</span></li>`
+      ).join("")}</ul>`;
+      this._q("#btn-pending-check").addEventListener("click", () => this._checkPendingAgain());
+      this._q("#btn-pending-dismiss").addEventListener("click", () => {
+        this._pendingChecks.clear();
+        this._renderPendingBanner();
+      });
     }
     /** Coordinator unbind can target one explicit cluster or (if none is
      *  selected) every coordinator binding currently cached for this source
@@ -3302,14 +3518,16 @@ a.btn { display:inline-block; text-decoration:none; }
      *  matters most for the bulk network scan; single-device rescans just get
      *  a "batch" of 1 and behave exactly as before. */
     async _scanBindings(ieeeList, opts = {}) {
-      if (this._scanState.running) return;
+      const read = /* @__PURE__ */ new Set();
+      this._lastSettled = null;
+      if (this._scanState.running) return { ran: false, read };
       if (!toolkitAvailable(this._hass)) {
         this._setStatus(
           "error",
           "Can't scan: zha-toolkit isn't installed or isn't loaded, and ZHA Bindings Manager uses it to read binding tables. Install zha-toolkit from HACS (Integrations), restart Home Assistant, then scan again.",
           0
         );
-        return;
+        return { ran: false, read };
       }
       const fullScan = !(ieeeList && ieeeList.length);
       this._scanState = { running: true, done: 0, total: 0 };
@@ -3333,6 +3551,7 @@ a.btn { display:inline-block; text-decoration:none; }
           this._recordScanOutcome(ieee, { success: true, durationMs: Date.now() - startedAt });
           this._bindings.set(ieee, bindings);
           this._scanFailures.delete(normIeee(ieee));
+          read.add(normIeee(ieee));
           if (partial) {
             this._scanPartial.set(normIeee(ieee), { retrieved: retrievedCount, total: totalCount });
             partialCount++;
@@ -3375,7 +3594,7 @@ a.btn { display:inline-block; text-decoration:none; }
           0
         );
         this._render();
-        return;
+        return { ran: true, read };
       }
       const outcome = summarizeScan({
         okCount,
@@ -3384,11 +3603,15 @@ a.btn { display:inline-block; text-decoration:none; }
         skippedNames: notInZha.map((ieee) => this._ieeeLabel(ieee, { plain: true })),
         prunedCount: pruned.length
       });
-      this._setStatus(outcome.level, outcome.message, 0);
+      const settled = this._reconcilePendingChecks(read);
+      this._lastSettled = settled;
+      const level = settled.level === "error" || outcome.level === "error" ? "error" : settled.level === "warning" || outcome.level === "warning" ? "warning" : outcome.level;
+      this._setStatus(level, settled.text ? `${outcome.message} ${settled.text}` : outcome.message, 0);
       this._renderGraph();
       this._renderTable();
       this._renderDevicesTab();
       this._renderStatus();
+      return { ran: true, read };
     }
     /** Every scanned binding, unfiltered — use for counts/audits where the
      *  "hide coordinator bindings" display preference shouldn't hide data. */
@@ -3824,6 +4047,8 @@ a.btn { display:inline-block; text-decoration:none; }
             recommendation: "Verify the device capabilities or recreate the binding."
           };
         }
+        const unusual = unusualDeviceBindingRule({ clusterId: b.clusterId, classification: this._classifyBinding(b) });
+        if (unusual && (dupCounts.get(this._healthDupKey(b)) || 0) <= 1) return unusual;
       }
       if ((dupCounts.get(this._healthDupKey(b)) || 0) > 1) {
         return {
@@ -4052,7 +4277,10 @@ a.btn { display:inline-block; text-decoration:none; }
       }
       el.style.display = "flex";
       el.className = `status status-${this._status.level}`;
-      el.innerHTML = `<span class="status-text">${escapeHtml(this._status.text)}</span><button type="button" class="status-close" aria-label="Dismiss">\xD7</button>`;
+      const action = this._status.action;
+      el.innerHTML = `<span class="status-text">${escapeHtml(this._status.text)}</span>${action ? `<button type="button" class="btn btn-small status-action">${escapeHtml(action.label)}</button>` : ""}<button type="button" class="status-close" aria-label="Dismiss">\xD7</button>`;
+      const actionBtn = el.querySelector(".status-action");
+      if (actionBtn && action) actionBtn.addEventListener("click", () => action.onClick());
       const closeBtn = el.querySelector(".status-close");
       if (closeBtn) {
         closeBtn.addEventListener("click", () => {
@@ -4784,6 +5012,9 @@ a.btn { display:inline-block; text-decoration:none; }
       this._qa(".ep-cmd-check").forEach((btn) => {
         btn.addEventListener("click", () => this._checkEndpointCommands(d, Number(btn.dataset.ep)));
       });
+      this._qa(".ep-cmd-stop").forEach((btn) => {
+        btn.addEventListener("click", () => this._stopCommandCheck(d, Number(btn.dataset.ep)));
+      });
       this._qa(".ep-cmd-toggle").forEach((btn) => {
         btn.addEventListener("click", () => {
           const rowKey = btn.dataset.rowKey;
@@ -4870,18 +5101,60 @@ a.btn { display:inline-block; text-decoration:none; }
      *  useful on demand for a specific device someone's already investigating. */
     async _checkEndpointCommands(d, ep) {
       const key = this._commandScanKey(d.ieee, ep);
-      this._commandScans.set(key, { status: "loading" });
+      const token = this._commandCheckSeq = (this._commandCheckSeq || 0) + 1;
+      const startedAt = Date.now();
+      this._commandScans.set(key, { status: "loading", token, startedAt });
       if (this._q("#dialog").classList.contains("open")) this._renderExplodedView(d);
+      this._startCommandCheckTicker();
+      setTimeout(() => {
+        const cur = this._commandScans.get(key);
+        if (cur && cur.token === token && cur.status === "loading") {
+          this._commandScans.set(key, { ...cur, status: "timeout" });
+          this._rerenderExplodedFor(d);
+        }
+      }, COMMAND_CHECK_LIMIT_MS);
       if (!this._capExpIndex && !this._capExpLoading) this._capExpLoadIndex();
       try {
         const scan = await this._api.scanDeviceCommands(d.ieee, { endpoint: ep, tries: this._retryCount });
-        this._commandScans.set(key, { status: "done", scan });
+        if (!shouldApplyResult(this._commandScans.get(key), token, true)) return;
+        this._commandScans.set(key, { status: "done", scan, token });
       } catch (err) {
-        this._commandScans.set(key, { status: "error", error: err.message || String(err) });
+        if (!shouldApplyResult(this._commandScans.get(key), token, false)) return;
+        this._commandScans.set(key, { status: "error", error: err.message || String(err), token });
       }
+      this._rerenderExplodedFor(d);
+    }
+    /** Re-renders the exploded view if it's still open on device `d`. */
+    _rerenderExplodedFor(d) {
       if (!this._q("#dialog").classList.contains("open")) return;
+      if (this._explodedDeviceIeee && normIeee(this._explodedDeviceIeee) !== normIeee(d.ieee)) return;
       const fresh = this._devices.find((x) => x.ieee === d.ieee) || d;
       this._renderExplodedView(fresh);
+    }
+    /** "Stop waiting" on a running command check. Nothing is sent to the
+     *  device; the card just stops showing it as in progress. */
+    _stopCommandCheck(d, ep) {
+      const key = this._commandScanKey(d.ieee, ep);
+      const cur = this._commandScans.get(key);
+      if (!cur || cur.status !== "loading") return;
+      this._commandScans.set(key, { ...cur, status: "stopped" });
+      this._rerenderExplodedFor(d);
+    }
+    /** Updates the elapsed-time counters of running command checks once a
+     *  second, in place, so expanded rows and scroll position aren't reset by
+     *  a full re-render. Stops itself when nothing is running. */
+    _startCommandCheckTicker() {
+      if (this._commandCheckTicker) return;
+      this._commandCheckTicker = setInterval(() => {
+        const running = [...this._commandScans.values()].some((e) => e.status === "loading");
+        this._qa(".ep-cmd-elapsed").forEach((el) => {
+          el.textContent = formatElapsed(Date.now() - Number(el.dataset.started));
+        });
+        if (!running) {
+          clearInterval(this._commandCheckTicker);
+          this._commandCheckTicker = null;
+        }
+      }, 1e3);
     }
     /** Renders the "Supported commands" block for one endpoint card: a
      *  collapsed row per cluster this endpoint actually declares (via the
@@ -4929,8 +5202,18 @@ a.btn { display:inline-block; text-decoration:none; }
         <button class="btn btn-small ep-cmd-check" data-ep="${ep}">Check supported commands</button>`;
       } else if (entry.status === "loading") {
         actionHtml = `
-        <p class="hint ep-cmd-status">Checking supported commands&hellip; this queries the device directly and can take a while.</p>
-        ${wakeHint}`;
+        <p class="hint ep-cmd-status">Checking supported commands&hellip; <span class="ep-cmd-elapsed" data-started="${entry.startedAt || Date.now()}">${formatElapsed(Date.now() - (entry.startedAt || Date.now()))}</span> elapsed. This asks the device directly, one cluster at a time; most answer within a minute. The card stops waiting after ${formatElapsed(
+          COMMAND_CHECK_LIMIT_MS
+        )}.</p>
+        ${wakeHint}
+        <button class="btn btn-small ep-cmd-stop" data-ep="${ep}">Stop waiting</button>`;
+      } else if (entry.status === "timeout" || entry.status === "stopped") {
+        const why = entry.status === "timeout" ? `No answer after ${formatElapsed(COMMAND_CHECK_LIMIT_MS)}, so the card stopped waiting.` : "Stopped waiting.";
+        const tryHint = isBattery ? `<div class="scan-wake-hint">May be asleep: press a button on it, then try again.</div>` : `<div class="scan-wake-hint">Check it's powered on and in range, then try again.</div>`;
+        actionHtml = `
+        <p class="hint ep-cmd-status">${why} The request may still be running in Home Assistant; if the device answers, the results will appear here.</p>
+        ${tryHint}
+        <button class="btn btn-small ep-cmd-check" data-ep="${ep}">${isBattery ? "Wake & try again" : "Try again"}</button>`;
       } else if (entry.status === "error") {
         const errorWakeHint = isBattery ? `<div class="scan-wake-hint">May be asleep \u2014 press a button on it, then try again.</div>` : `<div class="scan-wake-hint">Not responding \u2014 check it's powered on and in range, then try again.</div>`;
         actionHtml = `
@@ -5443,15 +5726,19 @@ a.btn { display:inline-block; text-decoration:none; }
         } catch (err) {
           console.warn("[ZHA Bindings Manager] unbind call raised, verifying against rescan anyway", err);
         } finally {
-          await this._scanBindings(rescanTargets);
-          const outcome = this._verifyUnbindOutcome(
-            before,
-            binding.sourceIeee,
-            binding.sourceEndpoint,
-            binding.clusterId,
-            bindTarget
+          const scan = await this._scanBindings(rescanTargets, { tries: this._retryCount });
+          const res = this._settleChange(
+            "unbind",
+            {
+              sourceIeee: binding.sourceIeee,
+              sourceEndpoint: binding.sourceEndpoint,
+              clusterId: binding.clusterId,
+              target: bindTarget
+            },
+            scan,
+            before
           );
-          this._setStatus(outcome.ok ? "success" : "error", outcome.message, outcome.ok ? void 0 : 0);
+          this._setStatus(res.level, res.message, res.level === "success" ? void 0 : 0, res.action);
         }
       });
     }
@@ -5570,6 +5857,7 @@ a.btn { display:inline-block; text-decoration:none; }
       const healthMap = this._computeHealthMap();
       this._renderHealthSummary(healthMap);
       this._renderStaleBanner();
+      this._renderPendingBanner();
       this._updateSortIndicators("#view-table", this._tableSort);
       let rows = this._filteredBindingRows(healthMap).map((b) => {
         const source = this._devices.find((d) => d.ieee === b.sourceIeee);
@@ -5611,8 +5899,12 @@ a.btn { display:inline-block; text-decoration:none; }
       if (!rows.length) {
         const all = this._allBindings();
         const dev = filtered ? this._devices.find((d) => d.ieee === deviceIeee) : null;
+        const healthChip = this._q(`[data-health-filter="${this._tableHealthFilter}"]`);
         const state = emptyTableState({
           total: all.length,
+          rawTotal: this._rawBindings().length,
+          healthFilterLabel: this._tableHealthFilter !== "all" ? healthChip ? healthChip.textContent.trim() : this._tableHealthFilter : null,
+          search: bySearch ? null : (this._filters.search || "").trim() || null,
           deviceFilterActive: filtered,
           deviceMatches: filtered ? all.filter((b) => matchesDeviceFilter(b, deviceIeee, this._tableDirection)).length : all.length,
           direction: this._tableDirection,
@@ -5844,7 +6136,7 @@ a.btn { display:inline-block; text-decoration:none; }
       el.innerHTML = `
       <span class="health-summary-title">Binding Health</span>
       <span class="muted">${bindings.length} binding${bindings.length === 1 ? "" : "s"} scanned</span>
-      <span class="health-chip health-ok">${HEALTH_ICON.ok} ${counts.ok} OK</span>
+      <span class="health-chip health-ok" title="Structurally valid: the devices, endpoint and cluster all exist. It doesn't prove the binding does what you meant.">${HEALTH_ICON.ok} ${counts.ok} Valid</span>
       ${counts.warning ? `<span class="health-chip health-warning">${HEALTH_ICON.warning} ${counts.warning} Warning${counts.warning === 1 ? "" : "s"}</span>` : ""}
       ${counts.error ? `<span class="health-chip health-error">${HEALTH_ICON.error} ${counts.error} Error${counts.error === 1 ? "" : "s"}</span>` : ""}
       ${counts.info ? `<span class="health-chip health-info">${HEALTH_ICON.info} ${counts.info} Info</span>` : ""}
@@ -7400,14 +7692,27 @@ a.btn { display:inline-block; text-decoration:none; }
           callErr = err;
           console.warn("[ZHA Bindings Manager] bind call raised, verifying against rescan anyway", err);
         } finally {
-          await this._scanBindings(this._impactedIeees(sourceIeee, targetIeeeForRescan));
+          const scan = await this._scanBindings(this._impactedIeees(sourceIeee, targetIeeeForRescan), {
+            tries: this._retryCount
+          });
           this._advRenderSourceBindings();
           this._advRenderTargetBindings();
+          const sourceRead = scan.read.has(normIeee(sourceIeee));
           const bindTarget = type === "group" ? { isGroup: true, groupId: Number(this._q("#adv-target-group").value) } : { isGroup: false, ieee: targetIeeeForRescan, endpoint: opts.dstEndpoint };
           const canVerify = clusters.length === 1 && opts.endpoint != null && (bindTarget.isGroup || bindTarget.endpoint != null);
           if (canVerify) {
-            const outcome = this._verifyBindOutcome(sourceIeee, opts.endpoint, clusters[0], bindTarget);
-            this._setStatus(outcome.ok ? "success" : "error", outcome.message, outcome.ok ? void 0 : 0);
+            const res = this._settleChange(
+              "bind",
+              { sourceIeee, sourceEndpoint: opts.endpoint, clusterId: clusters[0], target: bindTarget },
+              scan
+            );
+            this._setStatus(res.level, res.message, res.level === "success" ? void 0 : 0, res.action);
+          } else if (!callErr && !sourceRead) {
+            this._setStatus(
+              "warning",
+              `Bind command sent, but ${this._ieeeLabel(sourceIeee, { plain: true })} didn't answer the check, so the table may not show it yet. Wake the device and rescan it.`,
+              0
+            );
           } else {
             this._setStatus(
               callErr ? "error" : "success",
@@ -7452,15 +7757,30 @@ a.btn { display:inline-block; text-decoration:none; }
           callErr = err;
           console.warn("[ZHA Bindings Manager] unbind call raised, verifying against rescan anyway", err);
         } finally {
-          await this._scanBindings(this._impactedIeees(sourceIeee, targetIeeeForRescan));
+          const scan = await this._scanBindings(this._impactedIeees(sourceIeee, targetIeeeForRescan), {
+            tries: this._retryCount
+          });
           this._advRenderSourceBindings();
           this._advRenderTargetBindings();
           if (type === "coordinator") {
             const outcome = this._verifyCoordinatorUnbindOutcome(beforeCoordList, sourceIeee, opts.endpoint);
-            this._setStatus(outcome.ok ? "success" : "error", outcome.message, outcome.ok ? void 0 : 0);
+            if (!outcome.ok && !scan.read.has(normIeee(sourceIeee))) {
+              this._setStatus(
+                "warning",
+                `Unbind sent, not confirmed yet: ${this._ieeeLabel(sourceIeee, { plain: true })} didn't answer the check. Wake it and rescan it to see the result.`,
+                0
+              );
+            } else {
+              this._setStatus(outcome.ok ? "success" : "error", outcome.message, outcome.ok ? void 0 : 0);
+            }
           } else if (before !== null) {
-            const outcome = this._verifyUnbindOutcome(before, sourceIeee, opts.endpoint, clusters[0], bindTarget);
-            this._setStatus(outcome.ok ? "success" : "error", outcome.message, outcome.ok ? void 0 : 0);
+            const res = this._settleChange(
+              "unbind",
+              { sourceIeee, sourceEndpoint: opts.endpoint, clusterId: clusters[0], target: bindTarget },
+              scan,
+              before
+            );
+            this._setStatus(res.level, res.message, res.level === "success" ? void 0 : 0, res.action);
           } else {
             this._setStatus(
               callErr ? "error" : "success",

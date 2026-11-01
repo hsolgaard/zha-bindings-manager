@@ -3,6 +3,13 @@
 All notable changes to ZHA Bindings Manager are documented here.
 
 
+## [1.3.0]
+
+No card changes. This release keeps the card's version in step with the
+[ZHA Bindings Manager integration 1.3.0](https://github.com/hsolgaard/zha-bindings-manager-integration/releases/tag/v1.3.0),
+which can check bindings every night and raise a Repairs issue, with a button to put them back, when a binding
+disappears from a device.
+
 ## [1.2.0]
 
 No card changes. This release keeps the card's version in step with the

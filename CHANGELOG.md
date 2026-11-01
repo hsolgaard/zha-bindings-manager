@@ -3,6 +3,33 @@
 All notable changes to ZHA Bindings Manager are documented here.
 
 
+## [1.1.0]
+
+### Added
+
+- **"Control lights with this…": a guided way to make a remote control several lights.** Open a remote's device
+  view and click **Control lights with this…**, or drop a remote onto a group on the Map. Then:
+  1. **Choose lights.** Every light the remote can control is listed, or start from an existing group.
+  2. **Review.** The card shows what other users found when they tried this remote (from the community database),
+     explains what to expect (not every remote supports group bindings, "stored" isn't the same as "working",
+     battery remotes need to be awake), and lists which clusters it will bind and which lights support each one.
+     Clusters none of the lights support are left out. You can choose one group binding (recommended) or, for up to
+     four lights, a binding to each light.
+  3. **Set up.** The card reuses a group with exactly those lights or creates one, adds the lights and checks ZHA
+     lists them, asks you to wake a battery remote, binds each cluster, and checks the remote stored them. If the
+     remote didn't answer the check, you can wake it and check again.
+  4. **Test.** Press the remote's buttons and say whether all, some or none of the lights responded.
+  5. **Result:** works, works for some lights, stored but ignored, or rejected, with what to do next. If a remote
+     rejects or ignores group bindings, the card offers to bind each light directly instead.
+- **Share what you found.** The result page offers to share it with the community database as a prefilled GitHub
+  issue (model, firmware, clusters, number of lights and result only: no names or addresses), so the next person
+  with that remote knows what to expect. If the remote isn't in the database yet, it also suggests sharing a scan.
+
+### Changed
+
+- Dropping a remote onto a group on the Map now opens the guided flow instead of the Advanced tab. Dropping onto a
+  device, or dropping a device that isn't a remote, still opens the Advanced tab, and the flow has a link to it.
+
 ## [1.0.5]
 
 ### Added

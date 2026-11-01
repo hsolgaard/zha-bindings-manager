@@ -83,6 +83,40 @@ export async function fetchCapabilityIndex({ force = false } = {}) {
   return index;
 }
 
+// Community behaviour reports (data/behaviour.json), e.g. whether a remote
+// accepts and uses group bindings. Keyed "<manufacturer_slug>/<model_slug>".
+// Same caching as the index. A missing file (before the first report) is
+// treated as "nothing reported yet", not an error.
+const BEHAVIOUR_URL = `https://raw.githubusercontent.com/${CAPABILITY_DB_REPO}/main/data/behaviour.json`;
+const BEHAVIOUR_CACHE_KEY = "zha-capability-explorer:behaviour-cache";
+let _behaviourMemory = null;
+
+export async function fetchBehaviourDoc({ force = false } = {}) {
+  if (!force && _behaviourMemory) return _behaviourMemory;
+  if (!force) {
+    try {
+      const raw = JSON.parse(localStorage.getItem(BEHAVIOUR_CACHE_KEY) || "null");
+      if (raw && raw.doc && typeof raw.fetchedAt === "number" && Date.now() - raw.fetchedAt < CACHE_TTL_MS) {
+        _behaviourMemory = raw.doc;
+        return raw.doc;
+      }
+    } catch (e) {
+      /* fall through to a fetch */
+    }
+  }
+  const res = await fetch(BEHAVIOUR_URL, { cache: "no-store" });
+  if (res.status === 404) return (_behaviourMemory = {});
+  if (!res.ok) throw new Error(`Failed to fetch community behaviour reports (HTTP ${res.status})`);
+  const doc = await res.json();
+  _behaviourMemory = doc && typeof doc === "object" && !Array.isArray(doc) ? doc : {};
+  try {
+    localStorage.setItem(BEHAVIOUR_CACHE_KEY, JSON.stringify({ doc: _behaviourMemory, fetchedAt: Date.now() }));
+  } catch (e) {
+    /* cache is optional */
+  }
+  return _behaviourMemory;
+}
+
 // Groups the flat index by manufacturer_slug+model_slug — most of the UI
 // needs "everything known about this device" rather than one endpoint+
 // firmware row at a time.

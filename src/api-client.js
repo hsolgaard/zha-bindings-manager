@@ -218,6 +218,26 @@ export class ZhaApi {
     return this.callToolkit("bind_group", data);
   }
 
+  /** Creates a ZHA group, optionally with members, using ZHA's own
+   *  websocket API (what Home Assistant's Groups page uses). Members are
+   *  [{ieee, endpoint}]. Returns ZHA's group record when it sends one. */
+  async createGroup(name, members = []) {
+    return this.hass.callWS({
+      type: "zha/group/add",
+      group_name: name,
+      members: members.map((m) => ({ ieee: m.ieee, endpoint_id: Number(m.endpoint) })),
+    });
+  }
+
+  /** Adds [{ieee, endpoint}] to an existing ZHA group. */
+  async addGroupMembers(groupId, members) {
+    return this.hass.callWS({
+      type: "zha/group/members/add",
+      group_id: Number(groupId),
+      members: members.map((m) => ({ ieee: m.ieee, endpoint_id: Number(m.endpoint) })),
+    });
+  }
+
   async unbindGroup(sourceIeee, groupId, clusterIds, opts = {}) {
     const data = { ieee: sourceIeee, command_data: groupId };
     if (clusterIds && clusterIds.length === 1) data.cluster = clusterIds[0];

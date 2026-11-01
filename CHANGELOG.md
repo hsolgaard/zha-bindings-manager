@@ -3,6 +3,20 @@
 All notable changes to ZHA Bindings Manager are documented here.
 
 
+## [1.0.5]
+
+### Added
+
+- **Group bindings: does anything in the group support that cluster?** When you bind to a group on the Advanced tab,
+  a line under the Cluster field now says how many devices in the group can act on the selected cluster, and names
+  the ones that can't. For example: "No device in Test group supports Level Control (Sonoff light). The binding can
+  still be made, but nothing in the group will act on these commands." If a group binding is confirmed but nothing in
+  the group can use it, the status message says so too. Binding is still allowed, because you might add a suitable
+  device to the group later. The coordinator is left out of the count.
+- **Binding Health checks group members.** A group binding where no member supports the cluster is now a warning
+  (it does nothing, and uses one of the source's binding-table slots). One where only some members support it is
+  shown as information, listing which ones. A binding to a group with no members is a warning.
+
 ## [1.0.4]
 
 Thanks to John_smith for testing 1.0.3 with an xsky dimmer and light and reporting all of these on the

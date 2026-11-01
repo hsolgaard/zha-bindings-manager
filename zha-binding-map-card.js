@@ -21,7 +21,7 @@
  * zha_toolkit MUST be installed (via HACS) and working for bind/unbind/scan
  * to function. See README.md for details.
  *
- * Version: 1.0.4
+ * Version: 1.0.5
  */
 (() => {
   // src/capexplorer-constants.js
@@ -78,7 +78,7 @@
 
   // src/constants.js
   var ZTK_DOMAIN = "zha_toolkit";
-  var CARD_VERSION = "1.0.4";
+  var CARD_VERSION = "1.0.5";
   var CHANGELOG_URL = "https://github.com/hsolgaard/zha-bindings-manager/blob/main/CHANGELOG.md";
   var DEFAULT_BINDABLE_OUT_CLUSTERS = [5, 6, 8, 258, 768];
   var MEMBERSHIP_EDGE_COLOR = "#8e24aa";
@@ -1271,17 +1271,17 @@
   function removedSources(bindingsMap, devices) {
     const known = knownIeees(devices);
     const out = [];
-    for (const [ieee, list] of bindingsMap || []) {
-      if (!known.has(normIeee(ieee))) out.push({ ieee, count: (list || []).length });
+    for (const [ieee, list2] of bindingsMap || []) {
+      if (!known.has(normIeee(ieee))) out.push({ ieee, count: (list2 || []).length });
     }
     return out;
   }
   function deadTargetBindings(bindingsMap, devices) {
     const known = knownIeees(devices);
     const out = [];
-    for (const [ieee, list] of bindingsMap || []) {
+    for (const [ieee, list2] of bindingsMap || []) {
       if (!known.has(normIeee(ieee))) continue;
-      for (const b of list || []) {
+      for (const b of list2 || []) {
         if (!b.isGroup && b.targetIeee && !known.has(normIeee(b.targetIeee))) out.push(b);
       }
     }
@@ -1329,9 +1329,9 @@
   }
   function knownDevicesToSave(known, devices, bindingsMap) {
     const keep = knownIeees(devices);
-    for (const [ieee, list] of bindingsMap || []) {
+    for (const [ieee, list2] of bindingsMap || []) {
       keep.add(normIeee(ieee));
-      for (const b of list || []) if (b.targetIeee) keep.add(normIeee(b.targetIeee));
+      for (const b of list2 || []) if (b.targetIeee) keep.add(normIeee(b.targetIeee));
     }
     const out = {};
     [...(known || /* @__PURE__ */ new Map()).keys()].filter((ieee) => keep.has(ieee)).sort().forEach((ieee) => out[ieee] = known.get(ieee));
@@ -1424,6 +1424,88 @@
       };
     }
     return null;
+  }
+
+  // src/group-support.js
+  function groupClusterSupport({ members, clusterId, clustersFor }) {
+    const out = { total: 0, supported: [], unsupported: [], unknown: [] };
+    for (const m of members || []) {
+      if (m.isCoordinator) continue;
+      out.total++;
+      const clusters = clustersFor(m.ieee);
+      if (!clusters) {
+        out.unknown.push(m.name);
+        continue;
+      }
+      const has = clusters.some(
+        (c) => c.type === "in" && Number(c.endpoint_id) === Number(m.endpoint) && Number(c.id) === Number(clusterId)
+      );
+      (has ? out.supported : out.unsupported).push(m.name);
+    }
+    return out;
+  }
+  var plural = (n, one, many) => `${n} ${n === 1 ? one : many}`;
+  var list = (names) => names.join(", ");
+  function groupSupportSummary(res, clusterLabel, groupName) {
+    if (!res.total) {
+      return {
+        level: "empty",
+        text: `${groupName} has no members yet, so nothing will act on ${clusterLabel} commands sent to it.`
+      };
+    }
+    const known = res.supported.length + res.unsupported.length;
+    const unknownNote = res.unknown.length ? ` Not checked yet: ${list(res.unknown)}.` : "";
+    if (!known) {
+      return { level: "unknown", text: `Checking which devices in ${groupName} support ${clusterLabel}\u2026` };
+    }
+    if (!res.unsupported.length) {
+      return {
+        level: "ok",
+        text: `${res.supported.length === res.total ? res.total === 1 ? "The device" : `All ${res.total} devices` : plural(res.supported.length, "device", "devices")} in ${groupName} support${res.supported.length === 1 ? "s" : ""} ${clusterLabel}.${unknownNote}`
+      };
+    }
+    if (!res.supported.length) {
+      return {
+        level: "warning",
+        text: `No device in ${groupName} supports ${clusterLabel} (${list(res.unsupported)}). The binding can still be made, but nothing in the group will act on these commands.${unknownNote}`
+      };
+    }
+    return {
+      level: "info",
+      text: `${res.supported.length} of ${res.total} devices in ${groupName} support ${clusterLabel} (${list(
+        res.supported
+      )}). Not supported: ${list(res.unsupported)}, which will ignore these commands.${unknownNote}`
+    };
+  }
+  function groupSupportHealth(res, clusterLabel, groupName) {
+    if (!res.total) {
+      return {
+        level: "warning",
+        code: "group_empty",
+        message: `${groupName} has no members.`,
+        why: "Commands sent to an empty group reach nothing. This often happens when the lights in a group were removed or re-paired.",
+        recommendation: "Add devices to the group in ZHA, or remove this binding."
+      };
+    }
+    if (!res.unsupported.length) return null;
+    if (!res.supported.length) {
+      return {
+        level: "warning",
+        code: "group_cluster_unsupported",
+        message: `No device in ${groupName} supports ${clusterLabel}.`,
+        why: `The source sends ${clusterLabel} commands to the group, but none of its members (${list(
+          res.unsupported
+        )}) can act on them. The binding is valid but does nothing, and it uses one of the source's binding-table slots.`,
+        recommendation: `Remove this binding, or add a device that supports ${clusterLabel} to the group.`
+      };
+    }
+    return {
+      level: "info",
+      code: "group_cluster_partial",
+      message: `${res.supported.length} of ${res.total} devices in ${groupName} support ${clusterLabel}.`,
+      why: `Not supported: ${list(res.unsupported)}. Those devices ignore these commands, while the others act on them.`,
+      recommendation: null
+    };
   }
 
   // src/command-check.js
@@ -1624,6 +1706,11 @@ a.btn { display:inline-block; text-decoration:none; }
 .stale-banner { margin-bottom:10px; padding:8px 12px; border-radius:8px; background: rgba(255,152,0,0.14); font-size:0.9em;
   display:flex; flex-direction:column; gap:6px; }
 .pending-banner { background: rgba(255,193,7,0.16); }
+.adv-group-support { margin:4px 0 8px; padding:6px 10px; border-radius:6px; font-style:normal; }
+.adv-group-support-ok { background: rgba(76,175,80,0.12); }
+.adv-group-support-info { background: rgba(3,169,244,0.12); }
+.adv-group-support-warning, .adv-group-support-empty { background: rgba(255,152,0,0.18); }
+.adv-group-support-unknown { opacity: 0.8; }
 .pending-list { margin:0; padding-left:20px; }
 .status-warning { background: rgba(255,152,0,0.16); color: var(--primary-text-color); }
 .status .status-action { margin-left:8px; flex:0 0 auto; }
@@ -2296,11 +2383,11 @@ a.btn { display:inline-block; text-decoration:none; }
     });
     return tags;
   }
-  function joinPhrases(list, conj = "and") {
-    if (!list.length) return "";
-    if (list.length === 1) return list[0];
-    if (list.length === 2) return `${list[0]} ${conj} ${list[1]}`;
-    return `${list.slice(0, -1).join(", ")}, ${conj} ${list[list.length - 1]}`;
+  function joinPhrases(list2, conj = "and") {
+    if (!list2.length) return "";
+    if (list2.length === 1) return list2[0];
+    if (list2.length === 2) return `${list2[0]} ${conj} ${list2[1]}`;
+    return `${list2.slice(0, -1).join(", ")}, ${conj} ${list2[list2.length - 1]}`;
   }
   function directControlSummary(entries) {
     const control = controlUseCases(entries);
@@ -3293,7 +3380,7 @@ a.btn { display:inline-block; text-decoration:none; }
       }
       const next = devices.filter((d) => !!d.ieee).map((d) => ({ ...d, ieee: normIeee(d.ieee) }));
       const vanished = initial ? [] : vanishedDevices(this._devices, next);
-      const fingerprint = (list) => list.map((d) => `${d.ieee}|${this._deviceLabel(d)}|${d.area_id || ""}`).join(";");
+      const fingerprint = (list2) => list2.map((d) => `${d.ieee}|${this._deviceLabel(d)}|${d.area_id || ""}`).join(";");
       const changed = initial || fingerprint(this._devices) !== fingerprint(next) || this._groups.length !== groups.length;
       rememberDevices(this._knownDevices, next, (d) => this._deviceLabel(d));
       this._devices = next;
@@ -3617,7 +3704,7 @@ a.btn { display:inline-block; text-decoration:none; }
      *  "hide coordinator bindings" display preference shouldn't hide data. */
     _rawBindings() {
       const out = [];
-      for (const list of this._bindings.values()) out.push(...list);
+      for (const list2 of this._bindings.values()) out.push(...list2);
       return out;
     }
     /** Bindings as they should be displayed (respects the coordinator-hide toggle). */
@@ -3920,6 +4007,11 @@ a.btn { display:inline-block; text-decoration:none; }
         if (!b.isGroup && b.targetIeee && this._devices.some((d) => d.ieee === b.targetIeee)) {
           ieees.add(b.targetIeee);
         }
+        if (b.isGroup) {
+          this._groupMembers(b.groupId).forEach((m) => {
+            if (!m.isCoordinator && this._devices.some((d) => d.ieee === m.ieee)) ieees.add(m.ieee);
+          });
+        }
       });
       const toFetch = [...ieees].filter((ieee) => !this._clusterCache.has(ieee));
       if (!toFetch.length) return;
@@ -3929,6 +4021,35 @@ a.btn { display:inline-block; text-decoration:none; }
       if (this._view === "table") this._renderTable();
       if (this._view === "graph") this._renderGraph();
       if (this._view === "floorplan") this._renderFloorplan();
+    }
+    /** A ZHA group's members as {ieee, endpoint, name, isCoordinator}, from
+     *  zha/groups (already loaded into this._groups). */
+    _groupMembers(groupId) {
+      const g = (this._groups || []).find((x) => Number(x.group_id) === Number(groupId));
+      if (!g) return [];
+      const coord = normIeee(this._coordinatorIeee() || "");
+      return (g.members || []).filter((m) => m.device && m.device.ieee).map((m) => {
+        const ieee = normIeee(m.device.ieee);
+        const d = this._devices.find((x) => normIeee(x.ieee) === ieee);
+        return {
+          ieee: d ? d.ieee : ieee,
+          endpoint: m.endpoint_id,
+          name: d ? this._deviceLabel(d) : m.device.user_given_name || m.device.name || ieee,
+          isCoordinator: ieee === coord || !!(d && (d.device_type === "Coordinator" || d.active_coordinator))
+        };
+      });
+    }
+    /** Which members of a group support `clusterId`, from cached cluster lists. */
+    _groupSupport(groupId, clusterId) {
+      return groupClusterSupport({
+        members: this._groupMembers(groupId),
+        clusterId,
+        clustersFor: (ieee) => this._clusterCache.get(ieee)
+      });
+    }
+    _groupName(groupId) {
+      const g = (this._groups || []).find((x) => Number(x.group_id) === Number(groupId));
+      return g ? g.name : `group ${groupId}`;
     }
     /** Health for every currently-scanned binding, keyed by binding id. Computed
      *  fresh each call (cheap — O(n) over already-loaded data) rather than
@@ -3994,6 +4115,13 @@ a.btn { display:inline-block; text-decoration:none; }
             recommendation: "Recreate the group or remove the binding."
           };
         }
+        const support = groupSupportHealth(
+          this._groupSupport(b.groupId, b.clusterId),
+          clusterName(b.clusterId),
+          this._groupName(b.groupId)
+        );
+        if (support && support.level !== "info") return support;
+        if (support && (dupCounts.get(this._healthDupKey(b)) || 0) <= 1) return support;
       } else {
         const targetIeeeN = normIeee(b.targetIeee);
         if (coord && targetIeeeN === normIeee(coord)) {
@@ -6015,7 +6143,7 @@ a.btn { display:inline-block; text-decoration:none; }
     }
     _confirmForgetSources(ieees) {
       const total = ieees.reduce((n, ieee) => {
-        for (const [k, list] of this._bindings) if (normIeee(k) === normIeee(ieee)) n += (list || []).length;
+        for (const [k, list2] of this._bindings) if (normIeee(k) === normIeee(ieee)) n += (list2 || []).length;
         return n;
       }, 0);
       this._q("#dialog-title").textContent = "Forget leftover data";
@@ -6575,20 +6703,20 @@ a.btn { display:inline-block; text-decoration:none; }
       });
     }
     _renderFpUnplacedList() {
-      const list = this._q("#fp-unplaced-list");
-      if (!list) return;
+      const list2 = this._q("#fp-unplaced-list");
+      if (!list2) return;
       if (!this._loaded) {
-        list.innerHTML = `<span class="muted">Loading devices\u2026</span>`;
+        list2.innerHTML = `<span class="muted">Loading devices\u2026</span>`;
         return;
       }
       const placed = new Set(Object.keys(this._fpPositions));
       const unplaced = this._devices.filter((d) => !placed.has(d.ieee));
       if (!unplaced.length) {
-        list.innerHTML = `<span class="muted">All devices placed.</span>`;
+        list2.innerHTML = `<span class="muted">All devices placed.</span>`;
         return;
       }
-      list.innerHTML = unplaced.map((d) => `<div class="fp-chip" data-ieee="${escapeHtml(d.ieee)}">${escapeHtml(this._deviceLabel(d))}</div>`).join("");
-      list.querySelectorAll(".fp-chip").forEach((el) => {
+      list2.innerHTML = unplaced.map((d) => `<div class="fp-chip" data-ieee="${escapeHtml(d.ieee)}">${escapeHtml(this._deviceLabel(d))}</div>`).join("");
+      list2.querySelectorAll(".fp-chip").forEach((el) => {
         el.addEventListener("pointerdown", (e) => this._onFpListPointerDown(e, el.dataset.ieee));
       });
     }
@@ -7620,6 +7748,7 @@ a.btn { display:inline-block; text-decoration:none; }
           <label>Cluster
             <select id="adv-cluster"><option value="">\u2014 zha-toolkit default \u2014</option></select>
           </label>
+          <p id="adv-group-support" class="hint adv-group-support" style="display:none"></p>
           <label id="adv-cluster-custom-wrap" style="display:none">Custom cluster ID
             <input type="text" id="adv-cluster-custom" placeholder="e.g. 0x0000 or 0">
           </label>
@@ -7654,6 +7783,7 @@ a.btn { display:inline-block; text-decoration:none; }
       this._q("#adv-target-device").addEventListener("change", () => this._advPopulateTargetEndpoints());
       this._q("#adv-dst-ep").addEventListener("change", () => this._advRenderTargetBindings());
       this._q("#adv-cluster").addEventListener("change", () => this._advUpdateCustomClusterState());
+      this._q("#adv-target-group").addEventListener("change", () => this._advRenderGroupSupport());
       this._q("#adv-cluster-custom").addEventListener("input", () => this._advUpdateCustomClusterState());
       const getClusterIds = () => {
         const v = this._q("#adv-cluster").value;
@@ -7706,6 +7836,17 @@ a.btn { display:inline-block; text-decoration:none; }
               { sourceIeee, sourceEndpoint: opts.endpoint, clusterId: clusters[0], target: bindTarget },
               scan
             );
+            if (bindTarget.isGroup && res.outcome !== "failed") {
+              const sup = groupSupportSummary(
+                this._groupSupport(bindTarget.groupId, clusters[0]),
+                clusterName(clusters[0]),
+                this._groupName(bindTarget.groupId)
+              );
+              if (sup.level === "warning" || sup.level === "empty") {
+                res.message = `${res.message} But: ${sup.text}`;
+                if (res.level === "success") res.level = "warning";
+              }
+            }
             this._setStatus(res.level, res.message, res.level === "success" ? void 0 : 0, res.action);
           } else if (!callErr && !sourceRead) {
             this._setStatus(
@@ -7817,6 +7958,7 @@ a.btn { display:inline-block; text-decoration:none; }
       this._q("#adv-target-ep-wrap").style.display = type === "device" ? "" : "none";
       this._q("#adv-target-panel-wrap").style.display = type === "device" ? "" : "none";
       if (type === "device") this._advPopulateTargetEndpoints();
+      this._advRenderGroupSupport();
     }
     /** Unique endpoint ids present on a device, from its cluster list (source of truth: zha/devices/clusters). */
     async _advDeviceEndpoints(ieee) {
@@ -7912,6 +8054,47 @@ a.btn { display:inline-block; text-decoration:none; }
       const unbindBtn = this._q("#adv-unbind");
       if (bindBtn) bindBtn.disabled = !valid;
       if (unbindBtn) unbindBtn.disabled = !valid;
+      this._advRenderGroupSupport();
+    }
+    /** The cluster the Advanced tab currently has selected, or null for
+     *  "zha-toolkit default" / an invalid custom id. */
+    _advSelectedClusterId() {
+      const sel = this._q("#adv-cluster");
+      if (!sel) return null;
+      if (sel.value === "__custom__") return parseClusterIdInput(this._q("#adv-cluster-custom").value);
+      return sel.value === "" ? null : Number(sel.value);
+    }
+    /** Under the Cluster field, when the target is a group: how many of its
+     *  members can act on the selected cluster. Reads members' cluster lists
+     *  (cheap local zha/devices/clusters calls) if they aren't cached yet. */
+    async _advRenderGroupSupport() {
+      const el = this._q("#adv-group-support");
+      if (!el) return;
+      const type = this._q("#adv-target-type") && this._q("#adv-target-type").value;
+      const clusterId = this._advSelectedClusterId();
+      const groupId = this._q("#adv-target-group") && this._q("#adv-target-group").value;
+      if (type !== "group" || clusterId == null || groupId === "" || groupId == null) {
+        el.style.display = "none";
+        return;
+      }
+      const reqId = this._advGroupSupportReq = (this._advGroupSupportReq || 0) + 1;
+      const draw = () => {
+        const summary = groupSupportSummary(
+          this._groupSupport(Number(groupId), clusterId),
+          clusterName(clusterId),
+          this._groupName(Number(groupId))
+        );
+        el.className = `hint adv-group-support adv-group-support-${summary.level}`;
+        el.textContent = summary.text;
+        el.style.display = "";
+        return summary;
+      };
+      const first = draw();
+      if (first.level !== "unknown" && !this._groupSupport(Number(groupId), clusterId).unknown.length) return;
+      const toRead = this._groupMembers(Number(groupId)).filter((m) => !m.isCoordinator && !this._clusterCache.has(m.ieee));
+      await Promise.all(toRead.map((m) => this._ensureClusters(m.ieee).catch(() => {
+      })));
+      if (reqId === this._advGroupSupportReq) draw();
     }
     _advRenderSourceBindings() {
       const wrap = this._q("#adv-source-bindings");
@@ -7997,6 +8180,7 @@ a.btn { display:inline-block; text-decoration:none; }
       } else if (target && target.kind === "group") {
         this._advApplyTargetType("group");
         this._q("#adv-target-group").value = target.group.group_id;
+        this._advRenderGroupSupport();
         this._setStatus("info", "Pick the source endpoint and cluster, then click Bind.");
       } else {
         this._setStatus("info", `Source set to ${this._deviceLabel(sourceDevice)} \u2014 pick a target below.`);

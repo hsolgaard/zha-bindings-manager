@@ -21,7 +21,7 @@
  * zha_toolkit MUST be installed (via HACS) and working for bind/unbind/scan
  * to function. See README.md for details.
  *
- * Version: 1.0.5
+ * Version: 1.1.0
  */
 (() => {
   // src/capexplorer-constants.js
@@ -78,7 +78,7 @@
 
   // src/constants.js
   var ZTK_DOMAIN = "zha_toolkit";
-  var CARD_VERSION = "1.0.5";
+  var CARD_VERSION = "1.1.0";
   var CHANGELOG_URL = "https://github.com/hsolgaard/zha-bindings-manager/blob/main/CHANGELOG.md";
   var DEFAULT_BINDABLE_OUT_CLUSTERS = [5, 6, 8, 258, 768];
   var MEMBERSHIP_EDGE_COLOR = "#8e24aa";
@@ -792,6 +792,24 @@
       if (clusterIds && clusterIds.length === 1) data.cluster = clusterIds[0];
       if (opts.endpoint != null) data.endpoint = opts.endpoint;
       return this.callToolkit("bind_group", data);
+    }
+    /** Creates a ZHA group, optionally with members, using ZHA's own
+     *  websocket API (what Home Assistant's Groups page uses). Members are
+     *  [{ieee, endpoint}]. Returns ZHA's group record when it sends one. */
+    async createGroup(name, members = []) {
+      return this.hass.callWS({
+        type: "zha/group/add",
+        group_name: name,
+        members: members.map((m) => ({ ieee: m.ieee, endpoint_id: Number(m.endpoint) }))
+      });
+    }
+    /** Adds [{ieee, endpoint}] to an existing ZHA group. */
+    async addGroupMembers(groupId, members) {
+      return this.hass.callWS({
+        type: "zha/group/members/add",
+        group_id: Number(groupId),
+        members: members.map((m) => ({ ieee: m.ieee, endpoint_id: Number(m.endpoint) }))
+      });
     }
     async unbindGroup(sourceIeee, groupId, clusterIds, opts = {}) {
       const data = { ieee: sourceIeee, command_data: groupId };
@@ -1508,6 +1526,140 @@
     };
   }
 
+  // src/group-flow.js
+  var FLOW_CLUSTERS = [6, 8, 768];
+  var DIRECT_BINDING_MAX_LIGHTS = 4;
+  var RESULTS = ["works", "partial", "stored_ignored", "rejected"];
+  function controllerEndpoints(clusters) {
+    const byEp = /* @__PURE__ */ new Map();
+    for (const c of clusters || []) {
+      if (c.type !== "out" || !FLOW_CLUSTERS.includes(Number(c.id))) continue;
+      const ep = Number(c.endpoint_id);
+      if (!byEp.has(ep)) byEp.set(ep, /* @__PURE__ */ new Set());
+      byEp.get(ep).add(Number(c.id));
+    }
+    return [...byEp.entries()].sort((a, b) => a[0] - b[0]).map(([endpoint, set]) => ({ endpoint, clusters: [...set].sort((a, b) => a - b) }));
+  }
+  function candidateTargets({ devices, clustersFor, sourceIeee, clusterIds }) {
+    const out = [];
+    for (const d of devices || []) {
+      if (d.isCoordinator || String(d.ieee).toLowerCase() === String(sourceIeee).toLowerCase()) continue;
+      const clusters = clustersFor(d.ieee);
+      if (!clusters) continue;
+      const byEp = /* @__PURE__ */ new Map();
+      for (const c of clusters) {
+        if (c.type !== "in" || !clusterIds.includes(Number(c.id))) continue;
+        const ep = Number(c.endpoint_id);
+        if (!byEp.has(ep)) byEp.set(ep, /* @__PURE__ */ new Set());
+        byEp.get(ep).add(Number(c.id));
+      }
+      const multi = byEp.size > 1;
+      for (const [endpoint, set] of byEp) {
+        out.push({
+          ieee: d.ieee,
+          endpoint,
+          name: multi ? `${d.name} (ep ${endpoint})` : d.name,
+          clusters: [...set].sort((a, b) => a - b)
+        });
+      }
+    }
+    return out.sort((a, b) => a.name.localeCompare(b.name, void 0, { sensitivity: "base" }));
+  }
+  var targetKey = (t) => `${String(t.ieee).toLowerCase()}:${Number(t.endpoint)}`;
+  function findMatchingGroup(groups, targets, coordinatorIeee) {
+    const want = new Set(targets.map(targetKey));
+    const coord = String(coordinatorIeee || "").toLowerCase();
+    return (groups || []).find((g) => {
+      const have = (g.members || []).filter((m) => m.device && String(m.device.ieee).toLowerCase() !== coord).map((m) => targetKey({ ieee: m.device.ieee, endpoint: m.endpoint_id }));
+      return have.length === want.size && have.every((k) => want.has(k));
+    }) || null;
+  }
+  function missingMembers(group, targets) {
+    const have = new Set(
+      (group && group.members || []).filter((m) => m.device).map((m) => targetKey({ ieee: m.device.ieee, endpoint: m.endpoint_id }))
+    );
+    return targets.filter((t) => !have.has(targetKey(t)));
+  }
+  function planClusters(sourceClusters, targets, clustersFor) {
+    return (sourceClusters || []).map((clusterId) => {
+      const support = groupClusterSupport({
+        members: targets.map((t) => ({ ieee: t.ieee, endpoint: t.endpoint, name: t.name })),
+        clusterId,
+        clustersFor
+      });
+      return { clusterId, support, include: support.supported.length > 0 };
+    });
+  }
+  function flowResult(bindOutcomes, testAnswer) {
+    const outs = bindOutcomes || [];
+    if (outs.length && outs.every((o) => o === "failed")) return "rejected";
+    if (outs.some((o) => o === "unconfirmed")) return "unconfirmed";
+    if (!testAnswer) return "pending_test";
+    if (testAnswer === "all") return outs.some((o) => o === "failed") ? "partial" : "works";
+    if (testAnswer === "some") return "partial";
+    return "stored_ignored";
+  }
+  var hex = (id) => `0x${Number(id).toString(16).padStart(4, "0")}`;
+  function buildBehaviourReport({ manufacturer, model, firmware, mode, endpoint, clusters, targetCount, result, cardVersion, now }) {
+    return {
+      kind: "behaviour_report",
+      schema: 1,
+      behaviour: mode === "direct" ? "direct_binding" : "group_binding",
+      manufacturer: manufacturer || null,
+      model: model || null,
+      firmware: {
+        sw_build_id: firmware && firmware.sw_build_id || null,
+        registry_sw_version: firmware && firmware.registry_sw_version || null
+      },
+      endpoint,
+      clusters: (clusters || []).map(hex),
+      target_count: targetCount,
+      result,
+      card_version: cardVersion,
+      provenance: { submitted_at: (now || /* @__PURE__ */ new Date()).toISOString() }
+    };
+  }
+  var RESULT_TEXT = {
+    works: "works",
+    partial: "works for some lights",
+    stored_ignored: "stored but ignored",
+    rejected: "rejected"
+  };
+  function firmwareKey(fw) {
+    return fw && (fw.sw_build_id || fw.registry_sw_version) || "unknown";
+  }
+  function knownBehaviour(doc, slugKey, behaviour, firmware) {
+    const entry = doc && doc[slugKey] && doc[slugKey][behaviour];
+    if (!entry || !entry.counts) {
+      return {
+        state: "unknown",
+        total: 0,
+        text: "Nobody has reported how this remote handles this yet. The card will test it, and you can share the result."
+      };
+    }
+    const fwKey = firmwareKey(firmware);
+    const fwCounts = entry.by_firmware && entry.by_firmware[fwKey];
+    const counts = fwCounts || entry.counts;
+    const total = RESULTS.reduce((n, r) => n + (counts[r] || 0), 0);
+    const good = (counts.works || 0) + (counts.partial || 0);
+    const bad = (counts.stored_ignored || 0) + (counts.rejected || 0);
+    const state = !total ? "unknown" : bad === 0 ? "works" : good === 0 ? "problems" : "mixed";
+    const parts = RESULTS.filter((r) => counts[r]).map((r) => `${counts[r]} ${RESULT_TEXT[r]}`);
+    const scope = fwCounts ? fwKey === "unknown" ? "" : ` on firmware ${fwKey}` : ` (on other firmware than yours${fwKey === "unknown" ? "" : `, ${fwKey}`})`;
+    const lead = state === "works" ? "Reported to work" : state === "problems" ? "Other users found this doesn't work" : "Reports are mixed";
+    return {
+      state,
+      total,
+      counts,
+      firmwareMatched: !!fwCounts,
+      text: `${lead}${scope}: ${parts.join(", ")} (${total} report${total === 1 ? "" : "s"}).`
+    };
+  }
+  function suggestGroupName(areaName, remoteName) {
+    const base = areaName && areaName !== "No area" ? areaName : remoteName || "Remote";
+    return `${base} lights`;
+  }
+
   // src/command-check.js
   var COMMAND_CHECK_LIMIT_MS = 12e4;
   function formatElapsed(ms) {
@@ -1706,6 +1858,27 @@ a.btn { display:inline-block; text-decoration:none; }
 .stale-banner { margin-bottom:10px; padding:8px 12px; border-radius:8px; background: rgba(255,152,0,0.14); font-size:0.9em;
   display:flex; flex-direction:column; gap:6px; }
 .pending-banner { background: rgba(255,193,7,0.16); }
+.flow-steps { display:flex; flex-wrap:wrap; gap:6px 14px; list-style:none; padding:0; margin:0 0 12px; font-size:0.85em; color: var(--secondary-text-color); }
+.flow-steps li.active { color: var(--primary-text-color); font-weight:600; }
+.flow label { display:block; margin:8px 0; }
+.flow-targets { max-height: 320px; overflow:auto; border:1px solid var(--divider-color, rgba(127,127,127,0.3)); border-radius:8px; padding:4px 8px; }
+.flow .flow-target { display:flex; align-items:center; gap:8px; margin:4px 0; }
+.flow .flow-target .muted { margin-left:auto; font-size:0.85em; }
+.flow-known, .flow-result, .flow-share, .flow-callout { padding:8px 12px; border-radius:8px; margin:8px 0; }
+.flow-known-unknown { background: rgba(127,127,127,0.12); }
+.flow-known-works, .flow-result-success { background: rgba(76,175,80,0.14); }
+.flow-known-mixed, .flow-result-info { background: rgba(3,169,244,0.12); }
+.flow-known-problems, .flow-result-warning { background: rgba(255,152,0,0.18); }
+.flow-share, .flow-callout { background: rgba(3,169,244,0.10); }
+.flow-pitfalls { margin:8px 0; }
+.flow-pitfalls summary { cursor:pointer; font-weight:600; }
+.flow-pitfalls ul, .flow-clusters, .flow-log { margin:6px 0; padding-left:20px; }
+.flow-mode { border:none; padding:0; margin:8px 0; }
+.flow-mode legend { font-weight:600; padding:0; }
+.flow-support { display:block; font-size:0.85em; margin:0 0 6px 24px; }
+.flow-support-warning { color: var(--warning-color, #c77700); }
+.flow-log { list-style:none; padding-left:0; }
+.flow-log li { margin:3px 0; }
 .adv-group-support { margin:4px 0 8px; padding:6px 10px; border-radius:6px; font-style:normal; }
 .adv-group-support-ok { background: rgba(76,175,80,0.12); }
 .adv-group-support-info { background: rgba(3,169,244,0.12); }
@@ -2098,6 +2271,32 @@ a.btn { display:inline-block; text-decoration:none; }
     _memoryCache = index;
     saveToLocalStorage(index);
     return index;
+  }
+  var BEHAVIOUR_URL = `https://raw.githubusercontent.com/${CAPABILITY_DB_REPO}/main/data/behaviour.json`;
+  var BEHAVIOUR_CACHE_KEY = "zha-capability-explorer:behaviour-cache";
+  var _behaviourMemory = null;
+  async function fetchBehaviourDoc({ force = false } = {}) {
+    if (!force && _behaviourMemory) return _behaviourMemory;
+    if (!force) {
+      try {
+        const raw = JSON.parse(localStorage.getItem(BEHAVIOUR_CACHE_KEY) || "null");
+        if (raw && raw.doc && typeof raw.fetchedAt === "number" && Date.now() - raw.fetchedAt < CACHE_TTL_MS) {
+          _behaviourMemory = raw.doc;
+          return raw.doc;
+        }
+      } catch (e) {
+      }
+    }
+    const res = await fetch(BEHAVIOUR_URL, { cache: "no-store" });
+    if (res.status === 404) return _behaviourMemory = {};
+    if (!res.ok) throw new Error(`Failed to fetch community behaviour reports (HTTP ${res.status})`);
+    const doc = await res.json();
+    _behaviourMemory = doc && typeof doc === "object" && !Array.isArray(doc) ? doc : {};
+    try {
+      localStorage.setItem(BEHAVIOUR_CACHE_KEY, JSON.stringify({ doc: _behaviourMemory, fetchedAt: Date.now() }));
+    } catch (e) {
+    }
+    return _behaviourMemory;
   }
   function groupByDevice(index) {
     const map = /* @__PURE__ */ new Map();
@@ -5024,6 +5223,10 @@ a.btn { display:inline-block; text-decoration:none; }
           this._setStatus("error", "You can only bind from a device (not a group).");
           return;
         }
+        if (ctx.dropTarget.kind === "group" && controllerEndpoints(this._clusterCache.get(ctx.node.device.ieee)).length) {
+          this._openGroupFlow(ctx.node.device, { groupId: ctx.dropTarget.group.group_id });
+          return;
+        }
         const target = ctx.dropTarget.kind === "group" ? { kind: "group", group: ctx.dropTarget.group } : { kind: "device", device: ctx.dropTarget.device };
         this._jumpToAdvancedBind(ctx.node.device, target);
       }
@@ -5065,7 +5268,540 @@ a.btn { display:inline-block; text-decoration:none; }
       this._q("#dialog").classList.add("open");
       this._q("#unbind-cancel").addEventListener("click", () => this._closeDialog());
     }
+    // -------------------------------------------------------------------
+    // "Control lights with this remote" flow (1.1.0). Pure logic lives in
+    // src/group-flow.js; see the project PRD "Group-Based Binding Setup".
+    // Whether a remote accepts and uses group bindings can't be detected in
+    // advance, so the flow shows what others reported, explains the
+    // pitfalls, tests by asking the user to press a button, and asks them to
+    // share the result.
+    // -------------------------------------------------------------------
+    async _openGroupFlow(source, { groupId = null } = {}) {
+      const clusters = await this._ensureClusters(source.ieee).catch(() => []);
+      const eps = controllerEndpoints(clusters);
+      if (!eps.length) {
+        this._setStatus("error", `${this._deviceLabel(source)} doesn't send On/Off, Level Control or Colour Control, so it can't control lights.`);
+        return;
+      }
+      this._flow = {
+        step: "pick",
+        sourceIeee: source.ieee,
+        endpoints: eps,
+        endpoint: eps[0].endpoint,
+        selected: /* @__PURE__ */ new Set(),
+        startGroupId: groupId != null ? Number(groupId) : null,
+        candidates: null,
+        mode: "group",
+        groupName: suggestGroupName(this._areaName(source.area_id), this._deviceLabel(source)),
+        clustersChosen: null,
+        known: null,
+        log: [],
+        items: [],
+        test: null,
+        result: null,
+        groupId: null,
+        busy: false
+      };
+      const panel = this._q(".dialog-panel");
+      if (panel) panel.classList.add("wide");
+      this._q("#dialog").classList.add("open");
+      this._explodedDeviceIeee = null;
+      this._renderGroupFlow();
+      await Promise.all(this._devices.map((d) => this._ensureClusters(d.ieee).catch(() => {
+      })));
+      if (!this._flow) return;
+      this._flowRefreshCandidates();
+      if (this._flow.startGroupId != null) this._flowSelectGroup(this._flow.startGroupId);
+      this._renderGroupFlow();
+    }
+    _flowSource() {
+      return this._devices.find((d) => normIeee(d.ieee) === normIeee(this._flow.sourceIeee)) || { ieee: this._flow.sourceIeee };
+    }
+    _flowSourceClusters() {
+      const ep = this._flow.endpoints.find((e) => e.endpoint === Number(this._flow.endpoint));
+      return ep ? ep.clusters : [];
+    }
+    _flowRefreshCandidates() {
+      const coord = normIeee(this._coordinatorIeee() || "");
+      this._flow.candidates = candidateTargets({
+        devices: this._devices.map((d) => ({
+          ieee: d.ieee,
+          name: this._deviceLabel(d),
+          isCoordinator: normIeee(d.ieee) === coord || d.device_type === "Coordinator"
+        })),
+        clustersFor: (ieee) => this._clusterCache.get(ieee),
+        sourceIeee: this._flow.sourceIeee,
+        clusterIds: this._flowSourceClusters()
+      });
+      const valid = new Set(this._flow.candidates.map(targetKey));
+      this._flow.selected = new Set([...this._flow.selected].filter((k) => valid.has(k)));
+    }
+    _flowSelectGroup(groupId) {
+      const g = this._groups.find((x) => Number(x.group_id) === Number(groupId));
+      this._flow.startGroupId = g ? Number(g.group_id) : null;
+      if (!g) return;
+      const valid = new Set((this._flow.candidates || []).map(targetKey));
+      this._flow.selected = new Set(
+        (g.members || []).filter((m) => m.device).map((m) => targetKey({ ieee: m.device.ieee, endpoint: m.endpoint_id })).filter((k) => valid.has(k))
+      );
+    }
+    _flowTargets() {
+      return (this._flow.candidates || []).filter((t) => this._flow.selected.has(targetKey(t)));
+    }
+    _flowFirmware() {
+      const src = this._flowSource();
+      let sw = null;
+      const prefix = `${normIeee(src.ieee)}:`;
+      for (const [key, entry] of this._commandScans.entries()) {
+        if (key.startsWith(prefix) && entry.status === "done" && entry.scan) {
+          const epScan = (entry.scan.endpoints || []).find((e) => Number(e.id) === Number(key.slice(prefix.length)));
+          const id = epScan && this._extractIdentity(epScan);
+          if (id && id.sw_build_id) sw = id.sw_build_id;
+        }
+      }
+      const reg = this._haDeviceRegistryEntry(src.ieee);
+      return { sw_build_id: sw, registry_sw_version: reg && reg.sw_version || null };
+    }
+    _flowSlugKey() {
+      const src = this._flowSource();
+      return `${slugify(src.manufacturer)}/${slugify(src.model)}`;
+    }
+    _flowBehaviour() {
+      return this._flow.mode === "direct" ? "direct_binding" : "group_binding";
+    }
+    async _flowLoadKnown() {
+      let doc = null;
+      try {
+        doc = await fetchBehaviourDoc();
+      } catch (e) {
+        this._flow.knownError = e.message || String(e);
+      }
+      if (!this._flow) return;
+      this._flow.known = knownBehaviour(doc, this._flowSlugKey(), "group_binding", this._flowFirmware());
+      if (this._flow.known.state === "problems" && this._flowTargets().length <= DIRECT_BINDING_MAX_LIGHTS) {
+        this._flow.mode = "direct";
+      }
+      this._renderGroupFlow();
+    }
+    _flowPitfallsHtml(open) {
+      return `<details class="flow-pitfalls" ${open ? "open" : ""}>
+      <summary>Group bindings: what to expect</summary>
+      <ul>
+        <li><strong>Not every remote supports them.</strong> Some only bind to individual lights, some only to a single group. There's no way to ask a device in advance, so the card tries it and checks.</li>
+        <li><strong>"Stored" isn't the same as "working".</strong> A few remotes accept a group binding but never send to it. That's why you'll be asked to press a button at the end.</li>
+        <li><strong>Battery remotes need to be awake.</strong> Press a button on the remote just before binding, and again if the card says "not confirmed yet".</li>
+        <li><strong>Lights hold the group membership.</strong> If a light is replaced or re-paired, add it to the group again.</li>
+        <li><strong>Firmware matters.</strong> The same model can behave differently on different firmware.</li>
+      </ul>
+    </details>`;
+    }
+    _renderGroupFlow() {
+      const f = this._flow;
+      if (!f) return;
+      const src = this._flowSource();
+      const srcName = this._deviceLabel(src);
+      this._q("#dialog-title").textContent = `Control lights with ${srcName}`;
+      const body = this._q("#dialog-body");
+      const stepNames = { pick: "1. Choose lights", plan: "2. Review", run: "3. Set up", test: "4. Test", done: "5. Result" };
+      const steps = `<ol class="flow-steps">${Object.entries(stepNames).map(([k, v]) => `<li class="${k === f.step || f.step === "stopped" && k === "run" ? "active" : ""}">${v}</li>`).join("")}</ol>`;
+      let html = "";
+      if (f.step === "pick") {
+        const epSel = f.endpoints.length > 1 ? `<label>Button (endpoint)
+              <select id="flow-ep">${f.endpoints.map((e) => `<option value="${e.endpoint}" ${e.endpoint === Number(f.endpoint) ? "selected" : ""}>Endpoint ${e.endpoint}: ${escapeHtml(e.clusters.map(clusterName).join(", "))}</option>`).join("")}</select></label>` : `<p class="muted">Sends ${escapeHtml(f.endpoints[0].clusters.map(clusterName).join(", "))} from endpoint ${f.endpoints[0].endpoint}.</p>`;
+        const groupSel = `<label>Start from an existing group (optional)
+          <select id="flow-start-group"><option value="">\u2014 choose lights below \u2014</option>${[...this._groups].sort((a, b) => (a.name || "").localeCompare(b.name || "")).map((g) => `<option value="${g.group_id}" ${Number(g.group_id) === f.startGroupId ? "selected" : ""}>${escapeHtml(g.name)}</option>`).join("")}</select></label>`;
+        const list2 = f.candidates == null ? `<p class="muted">Finding lights this remote can control\u2026</p>` : !f.candidates.length ? `<p class="muted">No devices accept ${escapeHtml(this._flowSourceClusters().map(clusterName).join(" or "))}.</p>` : `<div class="flow-targets">${f.candidates.map((t) => {
+          const k = targetKey(t);
+          return `<label class="flow-target"><input type="checkbox" data-flow-target="${escapeHtml(k)}" ${f.selected.has(k) ? "checked" : ""}>
+                  <span>${escapeHtml(t.name)}</span><span class="muted">${escapeHtml(t.clusters.map(clusterName).join(", "))}</span></label>`;
+        }).join("")}</div>`;
+        html = `${epSel}${groupSel}<p><strong>Lights to control</strong> (<span id="flow-count">${f.selected.size}</span> selected)</p>${list2}
+        <div class="dialog-actions">
+          <button class="btn btn-primary" id="flow-next" ${f.selected.size ? "" : "disabled"}>Next: review</button>
+          <button class="btn" id="flow-advanced">Use the Advanced tab instead</button>
+          <button class="btn" id="flow-cancel">Cancel</button>
+        </div>`;
+      }
+      if (f.step === "plan") {
+        const targets = this._flowTargets();
+        const plan = planClusters(this._flowSourceClusters(), targets, (ieee) => this._clusterCache.get(ieee));
+        if (!f.clustersChosen) f.clustersChosen = new Set(plan.filter((p) => p.include).map((p) => p.clusterId));
+        const known = f.known ? `<div class="flow-known flow-known-${f.known.state}"><strong>What other users found:</strong> ${escapeHtml(f.known.text)}</div>` : `<div class="flow-known flow-known-unknown">Checking what other users have reported\u2026</div>`;
+        let seen = false;
+        try {
+          seen = localStorage.getItem("zbm:flow-pitfalls-seen") === "1";
+        } catch (e) {
+        }
+        const directOk = targets.length <= DIRECT_BINDING_MAX_LIGHTS;
+        const mode = `<fieldset class="flow-mode"><legend>How to bind</legend>
+          <label><input type="radio" name="flow-mode" value="group" ${f.mode === "group" ? "checked" : ""}> One group binding <span class="muted">(recommended: one binding-table slot per cluster, lights switch together)</span></label>
+          <label class="${directOk ? "" : "muted"}"><input type="radio" name="flow-mode" value="direct" ${f.mode === "direct" ? "checked" : ""} ${directOk ? "" : "disabled"}> Bind to each light directly <span class="muted">(${directOk ? `uses ${targets.length} slot${targets.length === 1 ? "" : "s"} per cluster on the remote; lights may not switch exactly together` : `only offered for up to ${DIRECT_BINDING_MAX_LIGHTS} lights`})</span></label>
+        </fieldset>`;
+        let groupLine = "";
+        if (f.mode === "group") {
+          const match = findMatchingGroup(this._groups, targets, this._coordinatorIeee());
+          const start = f.startGroupId != null ? this._groups.find((g) => Number(g.group_id) === f.startGroupId) : null;
+          if (match) groupLine = `<p>Group: reuse <strong>${escapeHtml(match.name)}</strong>, which already has exactly these lights.</p>`;
+          else if (start) {
+            const add = missingMembers(start, targets);
+            groupLine = `<p>Group: use <strong>${escapeHtml(start.name)}</strong>${add.length ? ` and add ${escapeHtml(add.map((t) => t.name).join(", "))}` : ""}. Lights already in it that you didn't select stay in it.</p>`;
+          } else {
+            groupLine = `<label>New group name <input type="text" id="flow-group-name" value="${escapeHtml(f.groupName)}"></label>`;
+          }
+        }
+        const clusterRows = plan.map((p) => {
+          const sum = groupSupportSummary(p.support, clusterName(p.clusterId), f.mode === "group" ? "the selected lights" : "the selected lights");
+          if (!p.include) return `<li class="muted">Not bound: ${escapeHtml(clusterName(p.clusterId))}. None of the selected lights support it.</li>`;
+          return `<li><label><input type="checkbox" data-flow-cluster="${p.clusterId}" ${f.clustersChosen.has(p.clusterId) ? "checked" : ""}> ${escapeHtml(clusterName(p.clusterId))}</label>
+            <span class="flow-support flow-support-${sum.level}">${escapeHtml(sum.text.replace(/ in the selected lights/, " selected"))}</span></li>`;
+        }).join("");
+        const battery = this._isBatteryDevice(src);
+        html = `${known}${this._flowPitfallsHtml(!seen && f.mode === "group")}${mode}${groupLine}
+        <p><strong>Clusters</strong></p><ul class="flow-clusters">${clusterRows}</ul>
+        ${battery ? `<p class="hint">${escapeHtml(srcName)} runs on battery. You'll be asked to wake it just before binding.</p>` : ""}
+        <div class="dialog-actions">
+          <button class="btn btn-primary" id="flow-run" ${f.clustersChosen.size ? "" : "disabled"}>Set it up</button>
+          <button class="btn" id="flow-back">Back</button>
+          <button class="btn" id="flow-cancel">Cancel</button>
+        </div>`;
+      }
+      if (f.step === "run" || f.step === "test" || f.step === "done" || f.step === "stopped") {
+        const icon = { ok: "\u2705", fail: "\u274C", warn: "\u26A0", wait: "\u2026", info: "\u2139" };
+        const log = `<ul class="flow-log">${f.log.map((l) => `<li class="flow-log-${l.state}">${icon[l.state] || ""} ${escapeHtml(l.text)}</li>`).join("")}</ul>`;
+        let tail = "";
+        if (f.step === "run" && f.awaitWake) {
+          tail = `<p class="flow-callout">Press a button on <strong>${escapeHtml(srcName)}</strong> to wake it, then click Bind straight away.</p>
+          <div class="dialog-actions"><button class="btn btn-primary" id="flow-bind-now">Bind now</button><button class="btn" id="flow-cancel">Cancel</button></div>`;
+        } else if (f.step === "run" && f.unconfirmed) {
+          tail = `<p class="flow-callout">${escapeHtml(srcName)} didn't answer the check, so the bindings aren't confirmed yet. Press a button on it, then click Check again.</p>
+          <div class="dialog-actions"><button class="btn btn-primary" id="flow-check">Check again</button><button class="btn" id="flow-cancel">Close</button></div>`;
+        } else if (f.step === "test") {
+          const dims = [...f.clustersChosen].includes(8);
+          tail = `<p class="flow-callout"><strong>Now test it.</strong> Press on/off on ${escapeHtml(srcName)}${dims ? ", then hold to dim" : ""}. Did the lights respond?</p>
+          <div class="dialog-actions">
+            <button class="btn btn-primary" data-flow-test="all">All of them</button>
+            <button class="btn" data-flow-test="some">Some of them</button>
+            <button class="btn" data-flow-test="none">None</button>
+          </div>`;
+        } else if (f.step === "done") {
+          tail = this._flowDoneHtml();
+        } else if (f.step === "stopped") {
+          tail = `<div class="dialog-actions"><button class="btn" id="flow-cancel">Close</button></div>`;
+        }
+        html = log + tail;
+      }
+      body.innerHTML = steps + `<div class="flow">${html}</div>`;
+      this._flowWire();
+    }
+    _flowDoneHtml() {
+      const f = this._flow;
+      const groupName = f.groupId != null ? this._groupName(f.groupId) : "the lights";
+      const advice = {
+        works: `Done. ${f.mode === "group" ? `The remote controls ${groupName}.` : "The remote controls each light directly."}`,
+        partial: `The binding works, but not every light responded. ${f.mode === "group" ? "The lights that didn't respond may not have joined the group: check them in ZHA's group page, or remove and re-add them." : "Check that the lights that didn't respond are powered and in range."}`,
+        stored_ignored: "The remote stored the binding but nothing responded. Either it doesn't send to this kind of binding, or the lights didn't take the commands.",
+        rejected: f.mode === "group" ? "The remote didn't accept the group binding." : "The remote didn't accept the bindings."
+      }[f.result];
+      const level = f.result === "works" ? "success" : f.result === "partial" ? "info" : "warning";
+      const fallback = f.mode === "group" && (f.result === "rejected" || f.result === "stored_ignored") && this._flowTargets().length <= DIRECT_BINDING_MAX_LIGHTS ? `<button class="btn" id="flow-direct">Bind to each light directly instead</button>` : f.mode === "group" && (f.result === "rejected" || f.result === "stored_ignored") ? `<p class="hint">Binding to each light directly is only offered for up to ${DIRECT_BINDING_MAX_LIGHTS} lights, because each light uses binding-table slots on the remote.</p>` : "";
+      let shared = false;
+      try {
+        shared = localStorage.getItem(this._flowShareKey()) === "1";
+      } catch (e) {
+      }
+      const report = this._flowReport();
+      const shareUrl = this._flowShareUrl(report);
+      const share = shared ? `<p class="muted">You've shared a result for this remote and firmware before. Thanks! <a href="${escapeHtml(shareUrl)}" target="_blank" rel="noopener" id="flow-share">Share this one too</a></p>` : `<div class="flow-share"><strong>Help other users: share this result.</strong>
+          Nobody can tell in advance how a remote handles ${f.mode === "group" ? "group" : "direct"} bindings. Your result tells the next person with this remote what to expect.
+          It opens a prefilled GitHub issue on the community database with the model, firmware, clusters and result only (no names or addresses).
+          <div class="dialog-actions"><a class="btn btn-primary" id="flow-share" href="${escapeHtml(shareUrl)}" target="_blank" rel="noopener">Share result</a></div>
+          ${f.notInDb ? `<p class="hint">This remote isn't in the community database yet. Sharing a capability scan helps too: open the remote's device view, run "Check supported commands", then "Share scan".</p>` : ""}
+        </div>`;
+      return `<div class="flow-result flow-result-${level}"><strong>Result: ${escapeHtml(RESULT_TEXT[f.result] || f.result)}.</strong> ${escapeHtml(advice)}</div>
+      ${share}
+      <div class="dialog-actions">${fallback}<button class="btn" id="flow-cancel">Close</button></div>`;
+    }
+    _flowReport() {
+      const f = this._flow;
+      const src = this._flowSource();
+      return buildBehaviourReport({
+        manufacturer: src.manufacturer,
+        model: src.model,
+        firmware: this._flowFirmware(),
+        mode: f.mode,
+        endpoint: Number(f.endpoint),
+        clusters: [...f.clustersChosen],
+        targetCount: this._flowTargets().length,
+        result: f.result,
+        cardVersion: CARD_VERSION
+      });
+    }
+    _flowShareKey() {
+      return `zbm:flow-shared:${this._flowSlugKey()}|${firmwareKey(this._flowFirmware())}|${this._flowBehaviour()}`;
+    }
+    _flowShareUrl(report) {
+      const title = `[Behaviour Report] ${report.manufacturer || "Unknown"} ${report.model || "Unknown"}: ${report.behaviour === "group_binding" ? "group binding" : "direct binding"} ${RESULT_TEXT[report.result] || report.result}`;
+      const body = 'Shared from ZHA Bindings Manager\'s "Control lights with this remote" flow.\n\n```json\n' + JSON.stringify(report, null, 2) + "\n```";
+      return `https://github.com/${CAPABILITY_DB_REPO}/issues/new?title=${encodeURIComponent(title)}&body=${encodeURIComponent(body)}&labels=${encodeURIComponent("behaviour-report")}`;
+    }
+    _flowWire() {
+      const f = this._flow;
+      const on = (sel, ev, fn) => {
+        const el = this._q(sel);
+        if (el) el.addEventListener(ev, fn);
+      };
+      this._qa("#flow-cancel").forEach((b) => b.addEventListener("click", () => {
+        this._flow = null;
+        this._closeDialog();
+      }));
+      on("#flow-advanced", "click", () => {
+        const src = this._flowSource();
+        const g = f.startGroupId != null ? this._groups.find((x) => Number(x.group_id) === f.startGroupId) : null;
+        this._flow = null;
+        this._closeDialog();
+        this._jumpToAdvancedBind(src, g ? { kind: "group", group: g } : null);
+      });
+      on("#flow-ep", "change", (e) => {
+        f.endpoint = Number(e.target.value);
+        this._flowRefreshCandidates();
+        this._renderGroupFlow();
+      });
+      on("#flow-start-group", "change", (e) => {
+        if (e.target.value === "") f.startGroupId = null;
+        else this._flowSelectGroup(e.target.value);
+        this._renderGroupFlow();
+      });
+      this._qa("[data-flow-target]").forEach(
+        (cb) => cb.addEventListener("change", () => {
+          if (cb.checked) f.selected.add(cb.dataset.flowTarget);
+          else f.selected.delete(cb.dataset.flowTarget);
+          const btn = this._q("#flow-next");
+          if (btn) btn.disabled = !f.selected.size;
+          const count = this._q("#flow-count");
+          if (count) count.textContent = String(f.selected.size);
+        })
+      );
+      on("#flow-next", "click", () => {
+        f.step = "plan";
+        f.clustersChosen = null;
+        f.known = null;
+        this._renderGroupFlow();
+        this._flowLoadKnown();
+      });
+      on("#flow-back", "click", () => {
+        f.step = "pick";
+        this._renderGroupFlow();
+      });
+      this._qa('input[name="flow-mode"]').forEach(
+        (r) => r.addEventListener("change", () => {
+          f.mode = r.value;
+          this._renderGroupFlow();
+        })
+      );
+      on("#flow-group-name", "input", (e) => f.groupName = e.target.value);
+      this._qa("[data-flow-cluster]").forEach(
+        (cb) => cb.addEventListener("change", () => {
+          const id = Number(cb.dataset.flowCluster);
+          if (cb.checked) f.clustersChosen.add(id);
+          else f.clustersChosen.delete(id);
+          const btn = this._q("#flow-run");
+          if (btn) btn.disabled = !f.clustersChosen.size;
+        })
+      );
+      const pit = this._q(".flow-pitfalls");
+      if (pit) pit.addEventListener("toggle", () => {
+        try {
+          localStorage.setItem("zbm:flow-pitfalls-seen", "1");
+        } catch (e) {
+        }
+      });
+      on("#flow-run", "click", () => this._flowRun());
+      on("#flow-bind-now", "click", () => this._flowBind());
+      on("#flow-check", "click", () => this._flowCheckAgain());
+      this._qa("[data-flow-test]").forEach((b) => b.addEventListener("click", () => this._flowAnswerTest(b.dataset.flowTest)));
+      on("#flow-direct", "click", () => {
+        f.mode = "direct";
+        f.result = null;
+        f.test = null;
+        f.items = [];
+        f.log.push({ state: "info", text: "Switching to binding each light directly." });
+        f.step = "run";
+        this._flowStartBinds();
+      });
+      on("#flow-share", "click", () => {
+        try {
+          localStorage.setItem(this._flowShareKey(), "1");
+        } catch (e) {
+        }
+      });
+    }
+    _flowLog(state, text) {
+      this._flow.log.push({ state, text });
+      this._renderGroupFlow();
+    }
+    async _flowRun() {
+      const f = this._flow;
+      f.step = "run";
+      f.log = [];
+      f.items = [];
+      const targets = this._flowTargets();
+      if (f.mode === "group") {
+        const ok = await this._flowEnsureGroup(targets);
+        if (!ok) {
+          f.log.push({ state: "fail", text: "Stopped. Nothing was bound." });
+          f.step = "stopped";
+          this._renderGroupFlow();
+          return;
+        }
+      }
+      this._flowStartBinds();
+    }
+    /** Creates or reuses the group and makes sure the lights are in it.
+     *  Returns false (after logging why) if that didn't work. */
+    async _flowEnsureGroup(targets) {
+      const f = this._flow;
+      const match = findMatchingGroup(this._groups, targets, this._coordinatorIeee());
+      try {
+        if (match) {
+          f.groupId = Number(match.group_id);
+          this._flowLog("ok", `Using group ${match.name}, which already has these lights.`);
+          return true;
+        }
+        const start = f.startGroupId != null ? this._groups.find((g) => Number(g.group_id) === f.startGroupId) : null;
+        if (start) {
+          f.groupId = Number(start.group_id);
+          const add = missingMembers(start, targets);
+          if (add.length) {
+            this._flowLog("wait", `Adding ${add.map((t) => t.name).join(", ")} to ${start.name}\u2026`);
+            await this._api.addGroupMembers(f.groupId, add);
+          }
+        } else {
+          const name = (f.groupName || "").trim() || suggestGroupName(null, this._deviceLabel(this._flowSource()));
+          this._flowLog("wait", `Creating group ${name} with ${targets.length} light${targets.length === 1 ? "" : "s"}\u2026`);
+          const res = await this._api.createGroup(name, targets);
+          f.groupId = res && res.group_id != null ? Number(res.group_id) : null;
+          f.createdName = name;
+        }
+      } catch (err) {
+        f.log = f.log.filter((l) => l.state !== "wait");
+        this._flowLog("fail", `ZHA refused the group change: ${err.message || err.code || String(err)}`);
+        return false;
+      }
+      await this._reloadDevices({ quiet: true });
+      if (f.groupId == null && f.createdName) {
+        const g = [...this._groups].reverse().find((x) => x.name === f.createdName);
+        f.groupId = g ? Number(g.group_id) : null;
+      }
+      const group = this._groups.find((g) => Number(g.group_id) === f.groupId);
+      f.log = f.log.filter((l) => l.state !== "wait");
+      if (!group) {
+        this._flowLog("fail", "The group was requested, but ZHA doesn't list it.");
+        return false;
+      }
+      const stillMissing = missingMembers(group, targets);
+      if (stillMissing.length) {
+        this._flowLog("warn", `${group.name} is ready, but ZHA doesn't list ${stillMissing.map((t) => t.name).join(", ")} as a member. Those lights won't respond.`);
+      } else {
+        this._flowLog("ok", `${group.name} has all ${targets.length} light${targets.length === 1 ? "" : "s"} (ID ${group.group_id}).`);
+      }
+      return true;
+    }
+    _flowStartBinds() {
+      const f = this._flow;
+      if (this._isBatteryDevice(this._flowSource())) {
+        f.awaitWake = true;
+        this._renderGroupFlow();
+      } else {
+        this._flowBind();
+      }
+    }
+    /** Binds every chosen cluster (to the group, or to each light), then reads
+     *  the remote's binding table once to check them all. */
+    async _flowBind() {
+      const f = this._flow;
+      f.awaitWake = false;
+      const src = this._flowSource();
+      const ep = Number(f.endpoint);
+      const targets = this._flowTargets();
+      const clusters = [...f.clustersChosen];
+      f.items = [];
+      for (const c of clusters) {
+        if (f.mode === "group") {
+          f.items.push({ clusterId: c, target: { isGroup: true, groupId: f.groupId }, label: `${clusterName(c)} \u2192 ${this._groupName(f.groupId)}` });
+        } else {
+          targets.filter((t) => t.clusters.includes(c)).forEach(
+            (t) => f.items.push({ clusterId: c, target: { isGroup: false, ieee: t.ieee, endpoint: t.endpoint }, label: `${clusterName(c)} \u2192 ${t.name}` })
+          );
+        }
+      }
+      this._flowLog("wait", `Binding ${f.items.length} item${f.items.length === 1 ? "" : "s"}\u2026`);
+      for (const item of f.items) {
+        try {
+          if (item.target.isGroup) await this._api.bindGroup(src.ieee, item.target.groupId, [item.clusterId], { endpoint: ep });
+          else await this._api.bindIeee(src.ieee, item.target.ieee, [item.clusterId], { endpoint: ep, dstEndpoint: item.target.endpoint });
+        } catch (err) {
+          console.warn("[ZHA Bindings Manager] bind call raised, verifying against rescan anyway", err);
+        }
+      }
+      await this._flowVerify();
+    }
+    async _flowVerify() {
+      const f = this._flow;
+      const src = this._flowSource();
+      const scan = await this._scanBindings([src.ieee], { tries: this._retryCount });
+      if (!this._flow) return;
+      f.items.forEach((item) => {
+        const res = this._settleChange(
+          "bind",
+          { sourceIeee: src.ieee, sourceEndpoint: Number(f.endpoint), clusterId: item.clusterId, target: item.target },
+          scan
+        );
+        item.outcome = res.outcome;
+      });
+      f.log = f.log.filter((l) => l.state !== "wait");
+      const word = { confirmed: ["ok", "confirmed"], unconfirmed: ["warn", "not confirmed yet"], failed: ["fail", "not accepted"] };
+      f.items.forEach((item) => {
+        const [state, text] = word[item.outcome];
+        f.log.push({ state, text: `${item.label}: ${text}` });
+      });
+      const outcome = flowResult(f.items.map((i) => i.outcome), null);
+      f.unconfirmed = outcome === "unconfirmed";
+      if (outcome === "rejected") {
+        f.result = "rejected";
+        f.step = "done";
+        await this._flowCheckDb();
+      } else if (outcome === "pending_test") {
+        f.step = "test";
+      }
+      this._renderGroupFlow();
+    }
+    async _flowCheckAgain() {
+      const f = this._flow;
+      this._flowLog("wait", "Checking again\u2026");
+      f.log = f.log.filter((l) => !/: (confirmed|not confirmed yet|not accepted)$/.test(l.text));
+      await this._flowVerify();
+    }
+    async _flowAnswerTest(answer) {
+      const f = this._flow;
+      f.test = answer;
+      f.result = flowResult(f.items.map((i) => i.outcome), answer);
+      f.log.push({ state: "info", text: `Button test: ${answer === "all" ? "all lights responded" : answer === "some" ? "some lights responded" : "no lights responded"}.` });
+      f.step = "done";
+      await this._flowCheckDb();
+      this._renderGroupFlow();
+    }
+    /** Whether the remote's model is in the capability database at all, so
+     *  the result page can also ask for a scan. */
+    async _flowCheckDb() {
+      try {
+        const index = await fetchCapabilityIndex();
+        this._flow.notInDb = !matchLocalDevices([this._flowSource()], index).length;
+      } catch (e) {
+        this._flow.notInDb = false;
+      }
+    }
     _closeDialog() {
+      this._flow = null;
       this._q("#dialog").classList.remove("open");
       const panel = this._q(".dialog-panel");
       if (panel) panel.classList.remove("wide");
@@ -5125,9 +5861,12 @@ a.btn { display:inline-block; text-decoration:none; }
         ${deviceHaUrl(d) ? `<a class="btn" id="explode-open-ha" href="${escapeHtml(
         deviceHaUrl(d)
       )}" target="_blank" rel="noopener" title="Opens this device's page in Home Assistant, in a new tab">Open in Home Assistant</a>` : ""}
+        ${controllerEndpoints(this._clusterCache.get(d.ieee)).length ? `<button class="btn btn-primary" id="explode-control-lights" title="Pick lights for this remote or switch to control; the card creates a group if needed, binds it and checks it works">Control lights with this\u2026</button>` : ""}
         <button class="btn" id="explode-close">Close</button>
       </div>`;
       this._q("#explode-close").addEventListener("click", () => this._closeDialog());
+      const ctl = this._q("#explode-control-lights");
+      if (ctl) ctl.addEventListener("click", () => this._openGroupFlow(d));
       this._q("#ep-show-photos").addEventListener("change", (e) => {
         this._saveShowDevicePhotos(e.target.checked);
         this._renderExplodedView(d);

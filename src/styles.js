@@ -144,6 +144,27 @@ a.btn { display:inline-block; text-decoration:none; }
 .stale-banner { margin-bottom:10px; padding:8px 12px; border-radius:8px; background: rgba(255,152,0,0.14); font-size:0.9em;
   display:flex; flex-direction:column; gap:6px; }
 .pending-banner { background: rgba(255,193,7,0.16); }
+.flow-steps { display:flex; flex-wrap:wrap; gap:6px 14px; list-style:none; padding:0; margin:0 0 12px; font-size:0.85em; color: var(--secondary-text-color); }
+.flow-steps li.active { color: var(--primary-text-color); font-weight:600; }
+.flow label { display:block; margin:8px 0; }
+.flow-targets { max-height: 320px; overflow:auto; border:1px solid var(--divider-color, rgba(127,127,127,0.3)); border-radius:8px; padding:4px 8px; }
+.flow .flow-target { display:flex; align-items:center; gap:8px; margin:4px 0; }
+.flow .flow-target .muted { margin-left:auto; font-size:0.85em; }
+.flow-known, .flow-result, .flow-share, .flow-callout { padding:8px 12px; border-radius:8px; margin:8px 0; }
+.flow-known-unknown { background: rgba(127,127,127,0.12); }
+.flow-known-works, .flow-result-success { background: rgba(76,175,80,0.14); }
+.flow-known-mixed, .flow-result-info { background: rgba(3,169,244,0.12); }
+.flow-known-problems, .flow-result-warning { background: rgba(255,152,0,0.18); }
+.flow-share, .flow-callout { background: rgba(3,169,244,0.10); }
+.flow-pitfalls { margin:8px 0; }
+.flow-pitfalls summary { cursor:pointer; font-weight:600; }
+.flow-pitfalls ul, .flow-clusters, .flow-log { margin:6px 0; padding-left:20px; }
+.flow-mode { border:none; padding:0; margin:8px 0; }
+.flow-mode legend { font-weight:600; padding:0; }
+.flow-support { display:block; font-size:0.85em; margin:0 0 6px 24px; }
+.flow-support-warning { color: var(--warning-color, #c77700); }
+.flow-log { list-style:none; padding-left:0; }
+.flow-log li { margin:3px 0; }
 .adv-group-support { margin:4px 0 8px; padding:6px 10px; border-radius:6px; font-style:normal; }
 .adv-group-support-ok { background: rgba(76,175,80,0.12); }
 .adv-group-support-info { background: rgba(3,169,244,0.12); }

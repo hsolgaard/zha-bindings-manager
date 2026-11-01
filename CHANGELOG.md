@@ -3,6 +3,13 @@
 All notable changes to ZHA Bindings Manager are documented here.
 
 
+## [1.2.0]
+
+No card changes. This release keeps the card's version in step with the
+[ZHA Bindings Manager integration 1.2.0](https://github.com/hsolgaard/zha-bindings-manager-integration/releases/tag/v1.2.0),
+which adds a **Bindings** sensor and a **Rescan bindings** button to the Home Assistant device page of every ZHA
+device that controls, or is controlled by, another device or a group.
+
 ## [1.1.0]
 
 ### Added

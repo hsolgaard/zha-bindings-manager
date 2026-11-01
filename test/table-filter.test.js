@@ -90,6 +90,29 @@ describe("direction display helpers", () => {
 });
 
 describe("emptyTableState", () => {
+  it("doesn't say 'nothing loaded' when every scanned binding is a hidden coordinator binding", () => {
+    const s = emptyTableState({ total: 0, rawTotal: 34, deviceFilterActive: false, deviceMatches: 0, direction: DIRECTION_ALL });
+    expect(s.kind).toBe("coordinator-hidden");
+    expect(s.message).toContain("All 34 scanned bindings");
+    expect(s.message).toContain("Hide coordinator bindings");
+    expect(s.message).not.toContain("No bindings loaded");
+  });
+  it("names the health filter and search that hide everything", () => {
+    const s = emptyTableState({
+      total: 5,
+      rawTotal: 5,
+      deviceFilterActive: false,
+      deviceMatches: 5,
+      direction: DIRECTION_ALL,
+      healthFilterLabel: "Warnings",
+      search: "porch",
+    });
+    expect(s.kind).toBe("other-filters");
+    expect(s.message).toBe('No bindings match the "Warnings" health filter and the search "porch". 5 bindings are hidden.');
+  });
+  it("still says nothing is loaded when nothing was scanned, even with rawTotal given", () => {
+    expect(emptyTableState({ total: 0, rawTotal: 0, deviceFilterActive: false, deviceMatches: 0 }).kind).toBe("not-scanned");
+  });
   it("reports nothing scanned when there are no bindings at all", () => {
     const s = emptyTableState({ total: 0, deviceFilterActive: false, deviceMatches: 0, direction: DIRECTION_ALL });
     expect(s.kind).toBe("not-scanned");

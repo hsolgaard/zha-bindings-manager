@@ -14,7 +14,7 @@ export const ZTK_DOMAIN = "zha_toolkit";
 // provenance, so a community-database record can be judged against what the
 // scanning card actually knew how to verify at the time. Keep in sync with
 // package.json's "version" when cutting a release.
-export const CARD_VERSION = "1.0.3";
+export const CARD_VERSION = "1.0.4";
 
 // Where the toolbar version label and the ⚙ panel's About line link to.
 export const CHANGELOG_URL = "https://github.com/hsolgaard/zha-bindings-manager/blob/main/CHANGELOG.md";
@@ -357,7 +357,7 @@ export const CLUSTER_COMMANDS = {
 // Binding Health: icon/label per status level, used by the Bindings-table
 // Health column, its detail popover, and the summary card.
 export const HEALTH_ICON = { ok: "✅", info: "ℹ", warning: "⚠", error: "❌" };
-export const HEALTH_LABEL = { ok: "OK", info: "Info", warning: "Warning", error: "Error" };
+export const HEALTH_LABEL = { ok: "Valid", info: "Info", warning: "Warning", error: "Error" };
 export const HEALTH_RANK = { error: 0, warning: 1, info: 2, ok: 3 };
 
 // Friendly labels for the HA entity-domain "types" we classify devices by

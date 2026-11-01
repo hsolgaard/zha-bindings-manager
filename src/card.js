@@ -53,6 +53,7 @@ import {
 import { aboutIntegrationText } from "./about.js";
 import { summarizeScan, toolkitAvailable } from "./scan-summary.js";
 import { unusualDeviceBindingRule } from "./health-rules.js";
+import { deepLinkIeee, withoutDeviceParam } from "./deep-link.js";
 import { groupClusterSupport, groupSupportSummary, groupSupportHealth } from "./group-support.js";
 import {
   FLOW_CLUSTERS,
@@ -1068,6 +1069,34 @@ export class ZhaBindingMapCard extends HTMLElement {
     if (this._fpImageUrl) this._loadFpImage(this._fpImageUrl);
     this._setStatus("info", "Loading ZHA devices…", 0);
     await this._reloadDevices({ initial: true });
+    this._openDeepLinkedDevice();
+  }
+
+  /** /zha-bindings-manager?device=<ieee> (linked from the integration's
+   *  device-page Bindings sensor and Repairs issues) opens that device's
+   *  view once devices are loaded. The parameter is then removed, so a
+   *  reload doesn't open it again. */
+  _openDeepLinkedDevice() {
+    let search = "";
+    try {
+      search = window.location.search;
+    } catch (e) {
+      return;
+    }
+    const ieee = deepLinkIeee(search);
+    if (!ieee) return;
+    try {
+      const url = window.location.pathname + withoutDeviceParam(search) + window.location.hash;
+      window.history.replaceState(window.history.state, "", url);
+    } catch (e) {
+      /* not essential */
+    }
+    const d = this._devices.find((x) => normIeee(x.ieee) === ieee);
+    if (!d) {
+      this._setStatus("error", `The linked device (${ieee}) isn't in ZHA any more.`);
+      return;
+    }
+    this._openDeviceExplodedView(d);
   }
 
   /** Fetches ZHA's current device and group lists. Used on first load, by

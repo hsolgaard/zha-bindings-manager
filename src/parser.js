@@ -152,3 +152,73 @@ export function extractBindingsFromReplies(sourceIeee, replies) {
   }
   return { entries: out, total };
 }
+
+// -----------------------------------------------------------------------
+// Stored bindings (1.4.1). Saved scan data comes back from storage (the
+// browser, or the integration's shared storage), so it's treated as
+// untrusted: every binding is rebuilt from strictly typed fields, and
+// anything malformed is dropped. After this, every field is an integer, a
+// boolean, a colon-hex IEEE address or an id made only from those, so
+// nothing stored can carry markup into the page.
+// -----------------------------------------------------------------------
+const IEEE_RE = /^[0-9a-f]{2}(:[0-9a-f]{2}){7}$/;
+const SAFE_ID_RE = /^[0-9A-Za-z:|]{1,120}$/;
+
+export function isIeee(value) {
+  return typeof value === "string" && IEEE_RE.test(value.toLowerCase());
+}
+
+function intIn(value, max) {
+  const n = typeof value === "string" && /^0x[0-9a-f]+$/i.test(value) ? parseInt(value, 16) : Number(value);
+  return Number.isInteger(n) && n >= 0 && n <= max ? n : null;
+}
+
+/** One stored binding rebuilt from its fields, or null if it's malformed. */
+export function sanitizeStoredBinding(b, sourceKey) {
+  if (!b || typeof b !== "object") return null;
+  const sourceIeee = normIeee(typeof b.sourceIeee === "string" ? b.sourceIeee : sourceKey);
+  if (!isIeee(sourceIeee)) return null;
+  const sourceEndpoint = intIn(b.sourceEndpoint, 255);
+  const clusterId = intIn(b.clusterId, 0xffff);
+  if (sourceEndpoint == null || clusterId == null) return null;
+  const isGroup = b.isGroup === true;
+  let targetIeee = null;
+  let targetEndpoint = null;
+  let groupId = null;
+  if (isGroup) {
+    groupId = intIn(b.groupId, 0xffff);
+    if (groupId == null) return null;
+  } else {
+    targetIeee = normIeee(typeof b.targetIeee === "string" ? b.targetIeee : "");
+    targetEndpoint = intIn(b.targetEndpoint, 255);
+    if (!isIeee(targetIeee) || targetEndpoint == null) return null;
+  }
+  const rebuilt = `${sourceIeee}|${sourceEndpoint}|${clusterId}|${isGroup ? "g" + groupId : `${targetIeee}:${targetEndpoint}`}`;
+  // Keep the stored id when it's harmless, so anything keyed by it (health
+  // details, pending checks) still matches; otherwise use the rebuilt one.
+  const id = typeof b.id === "string" && SAFE_ID_RE.test(b.id) ? b.id : rebuilt;
+  return { id, sourceIeee, sourceEndpoint, clusterId, isGroup, targetIeee, targetEndpoint, groupId };
+}
+
+/** {ieee: [binding]} from storage → Map of sanitized lists. Malformed
+ *  devices and bindings are dropped; `dropped` says how many. */
+export function sanitizeStoredBindings(raw) {
+  const out = new Map();
+  let dropped = 0;
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return { bindings: out, dropped };
+  for (const [key, list] of Object.entries(raw)) {
+    const ieee = normIeee(key);
+    if (!isIeee(ieee) || !Array.isArray(list)) {
+      dropped += Array.isArray(list) ? list.length : 1;
+      continue;
+    }
+    const clean = [];
+    for (const b of list) {
+      const s = sanitizeStoredBinding(b, ieee);
+      if (s) clean.push(s);
+      else dropped++;
+    }
+    out.set(ieee, clean);
+  }
+  return { bindings: out, dropped };
+}

@@ -106,9 +106,10 @@ No other configuration is required.
 3. Explore the **Map**, **Bindings** and **Devices** views.
 4. Select a map connection to inspect or remove it.
 5. Drag a controller device onto a target device to start creating a binding.
-6. Select a device node, or **Explode** in the Devices view, for an endpoint-by-endpoint breakdown.
-7. In an endpoint card, select **Check supported commands** when you need to verify what that device firmware actually implements.
-8. Open the **Zigbee Capability Explorer** view to see what your own devices — or a device you're considering buying — are confirmed to support, based on scans shared by the community.
+6. Click any device (a Map node, a name in the Devices or Bindings view) to open its side panel: what it controls, what controls it, and its actions. **Show endpoints…** there gives the endpoint-by-endpoint breakdown.
+7. To make a remote control some lights, click **Control lights with a remote…** in the toolbar and follow the steps.
+8. **Check and share capabilities…** in a device's side panel checks which commands its firmware actually implements, and lets you share the result with the community database.
+9. Open the **Zigbee Capability Explorer** view to see what your own devices — or a device you're considering buying — are confirmed to support, based on scans shared by the community.
 
 Reading binding tables is a real Zigbee operation. Battery-powered buttons and remotes may need to be woken before they respond. When one device fails, wake it and use its individual **Rescan** action rather than scanning the entire network again.
 
@@ -128,7 +129,7 @@ Supported-command discovery is a separate, on-demand live-device scan. It is int
 ### Diagnose bindings
 
 - Search and sort every discovered binding in a flat table.
-- Click a device name (in the Devices tab, or the Source or Target column) to see every binding that device is involved in: the ones it controls (Outbound) and the ones where another device controls it (Inbound). A Direction column and an All / Outbound / Inbound toggle appear while a device is selected.
+- Click a device (in the Devices tab, the Source or Target column, or on the Map) to open its side panel. **Show its bindings** there filters the table to every binding that device is involved in: the ones it controls (Outbound) and the ones where another device controls it (Inbound). A Direction column and an All / Outbound / Inbound toggle appear while a device is selected.
 - Typing a name into the search box that matches exactly one device (at least three characters) does the same thing, and a "Clear search" button in the banner empties the box. A term that matches several devices stays an ordinary text search.
 - Detect missing devices, targets, endpoints or clusters.
 - Flag duplicates and bindings to groups that no longer exist.
@@ -140,7 +141,7 @@ Binding Health is a **structural check**. It verifies that the objects reference
 
 ### Inspect devices endpoint by endpoint
 
-The exploded device view is built from a live scan rather than assumptions. It shows:
+Click a device anywhere in the card to open its side panel, then **Show endpoints…**. The Endpoints and clusters view is built from a live scan rather than assumptions. It shows:
 
 - each endpoint's input and output clusters;
 - self-bindings, outgoing control, incoming control and group relationships;
@@ -171,17 +172,18 @@ The **Zigbee Capability Explorer** view answers what a device can actually do, u
 - A **Good for** row on each device card turns confirmed evidence into short use-case tags — *Switch things on/off*, *Detect motion / occupancy*, *Act as a remote / controller* — so you don't need to know what a cluster or command is to answer "would this device do what I want." The evidence bar is the same model on any firmware in the dataset, not necessarily your device's exact firmware version; a tag backed only by evidence from a different firmware is marked with a small caveat rather than presented as fully verified for your unit. The same tags appear in the standalone site's search results, for deciding whether to buy a device you don't own yet.
 - **Find a device** (formerly "Search database") answers "which device should I buy or use for X?" first, and still gives experts full precision when they need it. A dozen Quick Search chips — grouped under Lighting, Sensors and Networking — cover the most common questions (on/off control, dimming, scene control, color control, motion/occupancy sensing, temperature/humidity/energy monitoring, security/contact sensing, group control, OTA support) without requiring any Zigbee vocabulary. The exact manufacturer/model/cluster/command/attribute/firmware dropdowns are unchanged and still available, collapsed by default behind an "Advanced filters" disclosure. Results are device cards — the same Community confidence panel, Good for tags, and "View capabilities" disclosure used in Explore my devices — grouped and ranked by community confidence, then recency, then firmware coverage, then name, rather than one row per firmware record. A search with no matches explains that a gap isn't proof a device lacks a capability, with a direct link to contribute a scan.
 - Each matched device and search result opens with a plain-English **device overview**: what the device can be commanded to do, what it senses or reports, and whether it can directly control another Zigbee device over a bind without Home Assistant in the loop. A device that can be commanded but has no declared way to control another device gets an explicit "Cannot ... directly" statement rather than silence. Each capability group also carries an **Input**, **Output** or **Both** badge, with a legend above the list. Output means the device declares that capability itself. That is accurate for the large majority of devices, but it is a declaration and has not been independently tested.
-- Device cards show a product photo (the same **Show device photo** setting as the exploded view), links to the device's Blakadder and manufacturer pages where they are known, and a **View on website** link to the full record on the public [zigbee-capabilities](https://hsolgaard.github.io/zigbee-capabilities/) site.
+- Device cards show a product photo (the same **Show device photo** setting as the Endpoints and clusters view), links to the device's Blakadder and manufacturer pages where they are known, and a **View on website** link to the full record on the public [zigbee-capabilities](https://hsolgaard.github.io/zigbee-capabilities/) site.
 - Devices that report a raw Tuya manufacturer code such as `_TZ3000_46t1rvdu` are grouped and filterable as **Generic Tuya**. The raw string is still shown alongside the label.
 - **Compare firmware** shows exactly what changed between two firmware versions of the same model, command by command.
 - If the community has confirmed a newer firmware than the one your device reports, this is flagged directly against your device — the card only ever states what has been *observed*, never what a manufacturer calls "latest."
-- From the exploded device view, **Check supported commands** followed by the **Compare My Device** panel runs the same firmware comparison against your own live scan, without leaving that dialog.
+- From the Endpoints and clusters view, **Check supported commands** followed by the **Compare My Device** panel runs the same firmware comparison against your own live scan, without leaving that dialog.
 - A **Community heartbeat** panel frames the dataset as what it is — entirely community-built, with every scan contributing real evidence for someone else — and then highlights a small number of factual observations underneath: the most-confirmed device, a device whose capabilities genuinely differ by firmware version, the newest contribution, and how much activity the dataset has seen recently. It deliberately excludes manufacturer-level comparisons or percentages; the dataset isn't yet large enough to support that kind of claim reliably. When a highlight is about a device you're currently looking at, that device's own card says so directly rather than leaving the connection to you.
 
 Coverage is limited to devices someone has scanned and shared. A missing or empty result means no submission exists yet, not that a device is incapable of something.
 
 ### Create and remove bindings
 
+- **Control lights with a remote…** (toolbar, or **Control lights with this…** in a remote's side panel) does it step by step: pick the remote, pick the lights, choose a new or existing ZHA group, and the card creates or updates the group, binds the remote to it, checks the binding was stored and asks you to test it.
 - Drag a source device onto a target device to pre-select a likely binding.
 - Choose the exact source endpoint, target endpoint and cluster before committing.
 - Remove bindings directly from the map or table.
@@ -236,11 +238,11 @@ All ZHA devices with manufacturer, model, binding count and scan status.
 
 ![Devices view](https://github.com/user-attachments/assets/08965127-62c4-4859-a3dc-f3460457b5ed)
 
-### Exploded device view
+### Endpoints and clusters view
 
 A live, per-endpoint view of the device's roles and relationships.
 
-![Exploded device view](https://github.com/user-attachments/assets/96cc4e6c-7d0e-41ff-be4f-0d7dbb62b1ff)
+![Endpoints and clusters view](https://github.com/user-attachments/assets/96cc4e6c-7d0e-41ff-be4f-0d7dbb62b1ff)
 
 </details>
 
@@ -309,7 +311,7 @@ When necessary, add and increment a version query to the resource URL:
 - A device with a large binding table may return only a partial result. Partial data is retained and clearly marked.
 - Higher scan concurrency is not always better. On a real network of roughly 64 devices, values much above 10–12 caused intermittent response failures.
 - Suggested clusters are based on compatible source output and target input clusters. They are suggestions, not guarantees of device behaviour.
-- The controller badge on a combined actuator/controller device is a device-level heuristic. Use the exploded view for endpoint-level evidence.
+- The controller badge on a combined actuator/controller device is a device-level heuristic. Use the Endpoints and clusters view for endpoint-level evidence.
 - Binding Health checks structure, not radio reachability or real-world operation.
 - **Check supported commands** is a separate live-device query and may take several seconds. It is not part of the normal binding-table scan.
 - Some devices do not respond to Zigbee command-discovery requests. An empty response is therefore reported as inconclusive rather than treated as proof that the device supports no commands.
@@ -380,7 +382,7 @@ Built on:
 - [`zha-toolkit`](https://github.com/mdeweerd/zha-toolkit) by mdeweerd and contributors
 - [Zigbee2MQTT](https://www.zigbee2mqtt.io/)'s device-image database for optional product images
 
-Zigbee2MQTT is an independent, unaffiliated project. Disable **Show device photo** in the exploded device view to prevent those image requests and use the local diagram fallback instead.
+Zigbee2MQTT is an independent, unaffiliated project. Disable **Show device photo** in the Endpoints and clusters view to prevent those image requests and use the local diagram fallback instead.
 
 ## Licence
 

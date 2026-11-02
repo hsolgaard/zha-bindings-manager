@@ -21,7 +21,7 @@
  * zha_toolkit MUST be installed (via HACS) and working for bind/unbind/scan
  * to function. See README.md for details.
  *
- * Version: 1.3.2
+ * Version: 1.4.0
  */
 (() => {
   // src/capexplorer-constants.js
@@ -78,7 +78,7 @@
 
   // src/constants.js
   var ZTK_DOMAIN = "zha_toolkit";
-  var CARD_VERSION = "1.3.2";
+  var CARD_VERSION = "1.4.0";
   var CHANGELOG_URL = "https://github.com/hsolgaard/zha-bindings-manager/blob/main/CHANGELOG.md";
   var DEFAULT_BINDABLE_OUT_CLUSTERS = [5, 6, 8, 258, 768];
   var MEMBERSHIP_EDGE_COLOR = "#8e24aa";
@@ -833,6 +833,7 @@
     </div>
     <input id="search" class="search" placeholder="Search devices\u2026">
     <span id="storage-mode-badge" class="storage-mode-badge muted"></span>
+    <button class="btn" id="btn-control-lights" title="Guided setup: pick a remote and the lights it should control. The card makes or reuses a ZHA group, binds the remote to it and checks it works.">Control lights with a remote\u2026</button>
     <button class="btn" id="btn-refresh-devices" title="Reload device list">\u27F3 Devices</button>
     <button class="btn btn-primary" id="btn-scan" title="Read current bindings from your Zigbee devices">Scan bindings</button>
     <button class="btn btn-small" id="btn-rescan-settings" title="Scan settings">\u2699</button>
@@ -920,7 +921,7 @@
       <div id="graph-empty" class="graph-empty"></div>
     </div>
     <p class="hint">Drag a device onto another device (or onto a group) to create a binding. Click a line to inspect / remove it.</p>
-    <p id="graph-role-legend" class="hint" style="display:none">\u{1F579} badge = this device also has its own Light/Switch/Cover/Fan role, in addition to what's shown by the edges here (e.g. a wired/local load alongside a Zigbee-bound one) \u2014 click the device to see the full per-endpoint breakdown.</p>
+    <p id="graph-role-legend" class="hint" style="display:none">\u{1F579} badge = this device also has its own Light/Switch/Cover/Fan role, in addition to what's shown by the edges here (e.g. a wired/local load alongside a Zigbee-bound one) \u2014 click the device, then Show endpoints\u2026, to see the per-endpoint breakdown.</p>
   </div>
 
   <div id="view-table" class="view">
@@ -971,7 +972,6 @@
         <th data-sort="power">Power</th>
         <th data-sort="count">Bindings</th>
         <th data-sort="scanRank">Last scan</th>
-        <th>Endpoints</th>
       </tr></thead>
       <tbody id="devices-table-body"></tbody>
     </table>
@@ -1003,12 +1003,20 @@
       </div>
     </div>
     <p class="hint">Drop an image into your <code>www/</code> folder (e.g. <code>config/www/floorplan.png</code>) and reference it above as <code>/local/floorplan.png</code>. Drag a device from the list onto its spot on the plan to place it; drag a placed device to move it; click a placed device (without dragging) to send it back to the list.</p>
-    <p id="fp-role-legend" class="hint" style="display:none">\u{1F579} badge = this device also has its own Light/Switch/Cover/Fan role, in addition to what's shown by the edges here (e.g. a wired/local load alongside a Zigbee-bound one) \u2014 click the device to see the full per-endpoint breakdown.</p>
+    <p id="fp-role-legend" class="hint" style="display:none">\u{1F579} badge = this device also has its own Light/Switch/Cover/Fan role, in addition to what's shown by the edges here (e.g. a wired/local load alongside a Zigbee-bound one) \u2014 click the device, then Show endpoints\u2026, to see the per-endpoint breakdown.</p>
   </div>
 
   <div id="view-capexplorer" class="view"></div>
 
   <div id="view-advanced" class="view"></div>
+
+  <div id="drawer" class="drawer" aria-hidden="true">
+    <div class="drawer-header">
+      <span id="drawer-title"></span>
+      <button id="drawer-close" class="btn btn-small" title="Close">\u2715</button>
+    </div>
+    <div id="drawer-body" class="drawer-body"></div>
+  </div>
 
   <div id="dialog" class="dialog">
     <div id="dialog-backdrop" class="dialog-backdrop"></div>
@@ -1960,6 +1968,41 @@ a.btn { display:inline-block; text-decoration:none; }
 .row { display:flex; align-items:center; gap:6px; font-size:0.92em; }
 .dialog-actions { display:flex; gap:8px; margin-top:14px; }
 .detail-table td { padding: 4px 8px; font-size: 0.9em; }
+
+/* Device drawer (1.4.0): side panel opened by clicking a device anywhere. */
+.drawer { position: fixed; top:0; right:0; bottom:0; width: min(400px, 100vw); z-index: 15;
+  background: var(--card-background-color, #fff); color: var(--primary-text-color);
+  box-shadow: -6px 0 24px rgba(0,0,0,0.25); transform: translateX(105%); transition: transform 0.18s ease-out;
+  display:flex; flex-direction:column; }
+.drawer.open { transform: none; }
+.drawer-header { display:flex; align-items:center; justify-content:space-between; gap:8px; font-weight:600;
+  padding: 14px 16px 10px; border-bottom: 1px solid var(--divider-color, rgba(0,0,0,0.12)); }
+.drawer-body { overflow-y:auto; padding: 12px 16px 24px; font-size: 0.92em; }
+.drawer-head { display:flex; gap:12px; align-items:flex-start; }
+.drawer-photo { width: 84px; height: 84px; object-fit: contain; flex: 0 0 auto; border-radius: 8px;
+  background: var(--secondary-background-color, #f5f5f5); }
+.drawer-tags { display:flex; flex-wrap:wrap; gap:4px; margin-bottom:4px; }
+.drawer-tags .chip { cursor: default; }
+.drawer-facts td:first-child { color: var(--secondary-text-color); white-space: nowrap; }
+.drawer-facts .scan-cell { display:block; }
+.drawer-section { margin-top: 16px; }
+.drawer-section-title { font-weight: 600; margin-bottom: 6px; }
+.drawer-rel { list-style:none; padding:0; margin:0; display:flex; flex-direction:column; gap:6px; }
+.drawer-rel li { display:flex; flex-wrap:wrap; gap:4px 8px; align-items:baseline; }
+.drawer-clusters { font-size: 0.85em; }
+.drawer-empty { margin: 0; }
+.drawer-problems ul { margin: 0 0 6px; padding-left: 18px; }
+.drawer-problems .health-error { color: var(--error-color, #db4437); }
+.drawer-problems .health-warning { color: var(--warning-color, #f4b400); }
+.drawer-actions { display:flex; flex-direction:column; align-items:stretch; gap:8px; }
+.drawer-actions .btn { text-align:center; text-decoration:none; }
+.drawer-share { border: 1px solid var(--divider-color, rgba(0,0,0,0.12)); border-radius: 8px; padding: 8px 12px; }
+.drawer-share ol { padding-left: 18px; margin: 6px 0; }
+.drawer-share li { margin-bottom: 4px; }
+.ep-check-all { display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin-bottom:8px; }
+.flow-group-choice label { display:flex; align-items:center; gap:6px; flex-wrap:wrap; }
+.flow-group-choice input[type="text"], .flow-group-choice select { flex: 1 1 180px; min-width: 0; }
+.adv-guided-hint { display:flex; align-items:center; gap:6px; flex-wrap:wrap; }
 
 /* Exploded device view \u2014 per-endpoint cards inside the (widened) dialog. */
 .ep-photo-toggle { font-size:0.82em; color: var(--secondary-text-color); margin-bottom:10px; }
@@ -3639,7 +3682,7 @@ a.btn { display:inline-block; text-decoration:none; }
         this._setStatus("error", `The linked device (${ieee}) isn't in ZHA any more.`);
         return;
       }
-      this._openDeviceExplodedView(d);
+      this._openDeviceDrawer(d);
     }
     /** Fetches ZHA's current device and group lists. Used on first load, by
      *  the device-registry listener, and at the start of every scan, so health
@@ -4173,6 +4216,7 @@ a.btn { display:inline-block; text-decoration:none; }
           if (d) this._renderExplodedView(d);
         }
         if (this._q("#capexp-body")) this._renderCapExpBody();
+        this._refreshDrawer();
       }).catch((err) => {
         console.warn("[ZHA Bindings Manager] Zigbee2MQTT model map unavailable", err);
       });
@@ -4517,6 +4561,7 @@ a.btn { display:inline-block; text-decoration:none; }
       if (this._view === "floorplan") this._renderFloorplan();
       if (this._view === "devices") this._renderDevicesTab();
       if (this._view === "capexplorer") this._renderCapabilityExplorer();
+      this._refreshDrawer();
     }
     _q(sel) {
       return this.shadowRoot.querySelector(sel);
@@ -4537,6 +4582,8 @@ a.btn { display:inline-block; text-decoration:none; }
         btn.addEventListener("click", () => this._switchView(btn.dataset.view));
       });
       this._q("#btn-scan").addEventListener("click", () => this._scanBindings());
+      this._q("#btn-control-lights").addEventListener("click", () => this._openGroupFlowPickRemote());
+      this._q("#drawer-close").addEventListener("click", () => this._closeDrawer());
       this._q("#btn-refresh-devices").addEventListener("click", () => this._loadAll());
       this._q("#btn-rescan-settings").addEventListener("click", () => {
         this._q("#rescan-settings-panel").classList.toggle("open");
@@ -5190,7 +5237,7 @@ a.btn { display:inline-block; text-decoration:none; }
       icon.textContent = "\u{1F579}";
       badge.appendChild(icon);
       const title = this._svgEl("title");
-      title.textContent = "This device also has its own Light/Switch/Cover/Fan role, in addition to what's shown by the edges here \u2014 click to see the per-endpoint breakdown.";
+      title.textContent = "This device also has its own Light/Switch/Cover/Fan role, in addition to what's shown by the edges here \u2014 click it, then Show endpoints\u2026, for the per-endpoint breakdown.";
       badge.appendChild(title);
       return badge;
     }
@@ -5317,7 +5364,7 @@ a.btn { display:inline-block; text-decoration:none; }
       this._nodeEls.forEach((el) => el.classList.remove("drop-target"));
       if (!ctx) return;
       if (!ctx.moved) {
-        if (ctx.node.kind === "device") this._openDeviceExplodedView(ctx.node.device);
+        if (ctx.node.kind === "device") this._openDeviceDrawer(ctx.node.device);
         return;
       }
       this._savePositions();
@@ -5379,7 +5426,24 @@ a.btn { display:inline-block; text-decoration:none; }
     // pitfalls, tests by asking the user to press a button, and asks them to
     // share the result.
     // -------------------------------------------------------------------
-    async _openGroupFlow(source, { groupId = null } = {}) {
+    /** Toolbar entry (1.4.0): the flow starts by picking the remote. */
+    async _openGroupFlowPickRemote() {
+      this._closeDrawer();
+      this._flow = { step: "remote", fromToolbar: true, remotes: null, sourceIeee: null };
+      const panel = this._q(".dialog-panel");
+      if (panel) panel.classList.add("wide");
+      this._q("#dialog").classList.add("open");
+      this._explodedDeviceIeee = null;
+      this._renderGroupFlow();
+      await Promise.all(this._devices.map((d) => this._ensureClusters(d.ieee).catch(() => {
+      })));
+      if (!this._flow || this._flow.step !== "remote") return;
+      const coord = normIeee(this._coordinatorIeee() || "");
+      this._flow.remotes = this._devices.filter((d) => normIeee(d.ieee) !== coord && d.device_type !== "Coordinator" && !this._isRemovedDevice(d.ieee)).filter((d) => controllerEndpoints(this._clusterCache.get(d.ieee)).length).map((d) => ({ ieee: d.ieee, name: this._deviceLabel(d), area: d.area_id ? this._areaName(d.area_id) : "", model: [d.manufacturer, d.model].filter(Boolean).join(" "), battery: this._isBatteryDevice(d) })).sort((a, b) => a.name.localeCompare(b.name));
+      this._renderGroupFlow();
+    }
+    async _openGroupFlow(source, { groupId = null, fromToolbar = false } = {}) {
+      this._closeDrawer();
       const clusters = await this._ensureClusters(source.ieee).catch(() => []);
       const eps = controllerEndpoints(clusters);
       if (!eps.length) {
@@ -5388,10 +5452,12 @@ a.btn { display:inline-block; text-decoration:none; }
       }
       this._flow = {
         step: "pick",
+        fromToolbar,
         sourceIeee: source.ieee,
         endpoints: eps,
         endpoint: eps[0].endpoint,
         selected: /* @__PURE__ */ new Set(),
+        groupChoice: groupId != null ? "existing" : "new",
         startGroupId: groupId != null ? Number(groupId) : null,
         candidates: null,
         mode: "group",
@@ -5448,6 +5514,26 @@ a.btn { display:inline-block; text-decoration:none; }
         (g.members || []).filter((m) => m.device).map((m) => targetKey({ ieee: m.device.ieee, endpoint: m.endpoint_id })).filter((k) => valid.has(k))
       );
     }
+    _flowCanReview() {
+      const f = this._flow;
+      return !!(f && f.selected.size && !(f.groupChoice === "existing" && f.startGroupId == null));
+    }
+    /** One line under the group choice saying what will happen to the group. */
+    _flowGroupNote() {
+      const f = this._flow;
+      if (!f) return "";
+      const targets = this._flowTargets();
+      if (f.groupChoice === "existing") {
+        const g = f.startGroupId != null ? this._groups.find((x) => Number(x.group_id) === f.startGroupId) : null;
+        if (!g) return "Pick a group: its lights are ticked below, and you can tick more to add them to it.";
+        const add = missingMembers(g, targets);
+        return add.length ? `${add.length} ticked light${add.length === 1 ? " isn't" : "s aren't"} in ${g.name} yet and will be added.` : `Uses ${g.name} as it is.`;
+      }
+      if (!targets.length) return "Tick the lights below. The card creates this group in ZHA and adds them to it.";
+      const match = findMatchingGroup(this._groups, targets, this._coordinatorIeee());
+      if (match) return `These lights are already the group ${match.name}, so that group will be reused instead.`;
+      return `The card creates this group in ZHA with the ${targets.length} ticked light${targets.length === 1 ? "" : "s"}.`;
+    }
     _flowTargets() {
       return (this._flow.candidates || []).filter((t) => this._flow.selected.has(targetKey(t)));
     }
@@ -5501,18 +5587,61 @@ a.btn { display:inline-block; text-decoration:none; }
     _renderGroupFlow() {
       const f = this._flow;
       if (!f) return;
+      const body = this._q("#dialog-body");
+      const names = f.fromToolbar ? ["remote", "Choose remote", "pick", "Choose lights", "plan", "Review", "run", "Set up", "test", "Test", "done", "Result"] : ["pick", "Choose lights", "plan", "Review", "run", "Set up", "test", "Test", "done", "Result"];
+      const stepList = [];
+      for (let i = 0; i < names.length; i += 2) stepList.push([names[i], `${i / 2 + 1}. ${names[i + 1]}`]);
+      const steps = `<ol class="flow-steps">${stepList.map(([k, v]) => `<li class="${k === f.step || f.step === "stopped" && k === "run" ? "active" : ""}">${v}</li>`).join("")}</ol>`;
+      let html = "";
+      if (f.step === "remote") {
+        this._q("#dialog-title").textContent = "Control lights with a remote";
+        const list2 = f.remotes == null ? `<p class="muted">Finding remotes and switches\u2026</p>` : !f.remotes.length ? `<p class="muted">No device sends On/Off, Level Control or Colour Control commands, so there's nothing that can control lights. If you've just paired a remote, click \u27F3 Devices and try again.</p>` : `<div class="flow-targets">${f.remotes.map(
+          (r) => `<label class="flow-target"><input type="radio" name="flow-remote" value="${escapeHtml(r.ieee)}" ${r.ieee === f.sourceIeee ? "checked" : ""}>
+                  <span>${escapeHtml(r.name)}${r.battery ? ' <span class="muted" title="Battery">\u{1F50B}</span>' : ""}</span><span class="muted">${escapeHtml([r.area, r.model].filter(Boolean).join(" \xB7 "))}</span></label>`
+        ).join("")}</div>`;
+        body.innerHTML = `${steps}<div class="flow">
+        <p>Pick the remote or wireless switch that should control your lights. The card then helps you choose the lights,
+          puts them in a ZHA group (creating one if needed), binds the remote to it and checks that it works.
+          The lights switch even when Home Assistant is down.</p>
+        <p><strong>Remotes and switches</strong></p>${list2}
+        <div class="dialog-actions">
+          <button class="btn btn-primary" id="flow-remote-next" ${f.sourceIeee ? "" : "disabled"}>Next: choose lights</button>
+          <button class="btn" id="flow-cancel">Cancel</button>
+        </div></div>`;
+        this._qa('input[name="flow-remote"]').forEach(
+          (r) => r.addEventListener("change", () => {
+            f.sourceIeee = r.value;
+            const btn = this._q("#flow-remote-next");
+            if (btn) btn.disabled = false;
+          })
+        );
+        const next = this._q("#flow-remote-next");
+        if (next)
+          next.addEventListener("click", () => {
+            const d = this._devices.find((x) => x.ieee === f.sourceIeee);
+            if (d) this._openGroupFlow(d, { fromToolbar: true });
+          });
+        this._qa("#flow-cancel").forEach((b) => b.addEventListener("click", () => {
+          this._flow = null;
+          this._closeDialog();
+        }));
+        return;
+      }
       const src = this._flowSource();
       const srcName = this._deviceLabel(src);
       this._q("#dialog-title").textContent = `Control lights with ${srcName}`;
-      const body = this._q("#dialog-body");
-      const stepNames = { pick: "1. Choose lights", plan: "2. Review", run: "3. Set up", test: "4. Test", done: "5. Result" };
-      const steps = `<ol class="flow-steps">${Object.entries(stepNames).map(([k, v]) => `<li class="${k === f.step || f.step === "stopped" && k === "run" ? "active" : ""}">${v}</li>`).join("")}</ol>`;
-      let html = "";
       if (f.step === "pick") {
         const epSel = f.endpoints.length > 1 ? `<label>Button (endpoint)
               <select id="flow-ep">${f.endpoints.map((e) => `<option value="${e.endpoint}" ${e.endpoint === Number(f.endpoint) ? "selected" : ""}>Endpoint ${e.endpoint}: ${escapeHtml(e.clusters.map(clusterName).join(", "))}</option>`).join("")}</select></label>` : `<p class="muted">Sends ${escapeHtml(f.endpoints[0].clusters.map(clusterName).join(", "))} from endpoint ${f.endpoints[0].endpoint}.</p>`;
-        const groupSel = `<label>Start from an existing group (optional)
-          <select id="flow-start-group"><option value="">\u2014 choose lights below \u2014</option>${[...this._groups].sort((a, b) => (a.name || "").localeCompare(b.name || "")).map((g) => `<option value="${g.group_id}" ${Number(g.group_id) === f.startGroupId ? "selected" : ""}>${escapeHtml(g.name)}</option>`).join("")}</select></label>`;
+        const sortedGroups = [...this._groups].sort((a, b) => (a.name || "").localeCompare(b.name || ""));
+        const existing = f.groupChoice === "existing";
+        const groupSel = `<fieldset class="flow-mode flow-group-choice"><legend>Group</legend>
+          <label><input type="radio" name="flow-group-choice" value="new" ${existing ? "" : "checked"}> New group
+            <input type="text" id="flow-group-name" value="${escapeHtml(f.groupName)}" ${existing ? "disabled" : ""} aria-label="New group name"></label>
+          <label class="${sortedGroups.length ? "" : "muted"}"><input type="radio" name="flow-group-choice" value="existing" ${existing ? "checked" : ""} ${sortedGroups.length ? "" : "disabled"}> Existing group
+            <select id="flow-start-group" ${existing ? "" : "disabled"}><option value="">\u2014 pick a group \u2014</option>${sortedGroups.map((g) => `<option value="${g.group_id}" ${Number(g.group_id) === f.startGroupId ? "selected" : ""}>${escapeHtml(g.name)}</option>`).join("")}</select></label>
+          <p class="hint" id="flow-group-note">${escapeHtml(this._flowGroupNote())}</p>
+        </fieldset>`;
         const list2 = f.candidates == null ? `<p class="muted">Finding lights this remote can control\u2026</p>` : !f.candidates.length ? `<p class="muted">No devices accept ${escapeHtml(this._flowSourceClusters().map(clusterName).join(" or "))}.</p>` : `<div class="flow-targets">${f.candidates.map((t) => {
           const k = targetKey(t);
           return `<label class="flow-target"><input type="checkbox" data-flow-target="${escapeHtml(k)}" ${f.selected.has(k) ? "checked" : ""}>
@@ -5520,7 +5649,8 @@ a.btn { display:inline-block; text-decoration:none; }
         }).join("")}</div>`;
         html = `${epSel}${groupSel}<p><strong>Lights to control</strong> (<span id="flow-count">${f.selected.size}</span> selected)</p>${list2}
         <div class="dialog-actions">
-          <button class="btn btn-primary" id="flow-next" ${f.selected.size ? "" : "disabled"}>Next: review</button>
+          <button class="btn btn-primary" id="flow-next" ${this._flowCanReview() ? "" : "disabled"}>Next: review</button>
+          ${f.fromToolbar ? `<button class="btn" id="flow-back-remote">Back</button>` : ""}
           <button class="btn" id="flow-advanced">Use the Advanced tab instead</button>
           <button class="btn" id="flow-cancel">Cancel</button>
         </div>`;
@@ -5542,14 +5672,15 @@ a.btn { display:inline-block; text-decoration:none; }
         </fieldset>`;
         let groupLine = "";
         if (f.mode === "group") {
-          const match = findMatchingGroup(this._groups, targets, this._coordinatorIeee());
           const start = f.startGroupId != null ? this._groups.find((g) => Number(g.group_id) === f.startGroupId) : null;
+          const match = start ? null : findMatchingGroup(this._groups, targets, this._coordinatorIeee());
           if (match) groupLine = `<p>Group: reuse <strong>${escapeHtml(match.name)}</strong>, which already has exactly these lights.</p>`;
           else if (start) {
             const add = missingMembers(start, targets);
             groupLine = `<p>Group: use <strong>${escapeHtml(start.name)}</strong>${add.length ? ` and add ${escapeHtml(add.map((t) => t.name).join(", "))}` : ""}. Lights already in it that you didn't select stay in it.</p>`;
           } else {
-            groupLine = `<label>New group name <input type="text" id="flow-group-name" value="${escapeHtml(f.groupName)}"></label>`;
+            const name = (f.groupName || "").trim() || suggestGroupName(null, srcName);
+            groupLine = `<p>Group: create <strong>${escapeHtml(name)}</strong> with ${targets.length} light${targets.length === 1 ? "" : "s"}.</p>`;
           }
         }
         const clusterRows = plan.map((p) => {
@@ -5618,7 +5749,7 @@ a.btn { display:inline-block; text-decoration:none; }
           Nobody can tell in advance how a remote handles ${f.mode === "group" ? "group" : "direct"} bindings. Your result tells the next person with this remote what to expect.
           It opens a prefilled GitHub issue on the community database with the model, firmware, clusters and result only (no names or addresses).
           <div class="dialog-actions"><a class="btn btn-primary" id="flow-share" href="${escapeHtml(shareUrl)}" target="_blank" rel="noopener">Share result</a></div>
-          ${f.notInDb ? `<p class="hint">This remote isn't in the community database yet. Sharing a capability scan helps too: open the remote's device view, run "Check supported commands", then "Share scan".</p>` : ""}
+          ${f.notInDb ? `<p class="hint">This remote isn't in the community database yet. Sharing a capability scan helps too: click the remote anywhere in the card, then <strong>Check and share capabilities\u2026</strong>.</p>` : ""}
         </div>`;
       return `<div class="flow-result flow-result-${level}"><strong>Result: ${escapeHtml(RESULT_TEXT[f.result] || f.result)}.</strong> ${escapeHtml(advice)}</div>
       ${share}
@@ -5674,14 +5805,23 @@ a.btn { display:inline-block; text-decoration:none; }
         else this._flowSelectGroup(e.target.value);
         this._renderGroupFlow();
       });
+      this._qa('input[name="flow-group-choice"]').forEach(
+        (r) => r.addEventListener("change", () => {
+          f.groupChoice = r.value;
+          if (r.value === "new") f.startGroupId = null;
+          this._renderGroupFlow();
+        })
+      );
       this._qa("[data-flow-target]").forEach(
         (cb) => cb.addEventListener("change", () => {
           if (cb.checked) f.selected.add(cb.dataset.flowTarget);
           else f.selected.delete(cb.dataset.flowTarget);
           const btn = this._q("#flow-next");
-          if (btn) btn.disabled = !f.selected.size;
+          if (btn) btn.disabled = !this._flowCanReview();
           const count = this._q("#flow-count");
           if (count) count.textContent = String(f.selected.size);
+          const note = this._q("#flow-group-note");
+          if (note) note.textContent = this._flowGroupNote();
         })
       );
       on("#flow-next", "click", () => {
@@ -5690,6 +5830,15 @@ a.btn { display:inline-block; text-decoration:none; }
         f.known = null;
         this._renderGroupFlow();
         this._flowLoadKnown();
+      });
+      on("#flow-back-remote", "click", () => {
+        const ieee = f.sourceIeee;
+        this._openGroupFlowPickRemote().then(() => {
+          if (this._flow && this._flow.step === "remote") {
+            this._flow.sourceIeee = ieee;
+            this._renderGroupFlow();
+          }
+        });
       });
       on("#flow-back", "click", () => {
         f.step = "pick";
@@ -5701,7 +5850,11 @@ a.btn { display:inline-block; text-decoration:none; }
           this._renderGroupFlow();
         })
       );
-      on("#flow-group-name", "input", (e) => f.groupName = e.target.value);
+      on("#flow-group-name", "input", (e) => {
+        f.groupName = e.target.value;
+        const note = this._q("#flow-group-note");
+        if (note) note.textContent = this._flowGroupNote();
+      });
       this._qa("[data-flow-cluster]").forEach(
         (cb) => cb.addEventListener("change", () => {
           const id = Number(cb.dataset.flowCluster);
@@ -5763,7 +5916,8 @@ a.btn { display:inline-block; text-decoration:none; }
      *  Returns false (after logging why) if that didn't work. */
     async _flowEnsureGroup(targets) {
       const f = this._flow;
-      const match = findMatchingGroup(this._groups, targets, this._coordinatorIeee());
+      const chosen = f.startGroupId != null ? this._groups.find((g) => Number(g.group_id) === f.startGroupId) : null;
+      const match = chosen ? null : findMatchingGroup(this._groups, targets, this._coordinatorIeee());
       try {
         if (match) {
           f.groupId = Number(match.group_id);
@@ -5911,12 +6065,230 @@ a.btn { display:inline-block; text-decoration:none; }
       this._explodedDeviceIeee = null;
     }
     // -------------------------------------------------------------------
+    // -------------------------------------------------------------------
+    // Device drawer (1.4.0). Clicking a device anywhere (Devices tab, Map,
+    // Bindings table, ?device= link) opens this side panel instead of the
+    // old "Explode" dialog. It shows what the device controls and what
+    // controls it, and gathers the per-device actions. "Show endpoints…"
+    // opens the per-endpoint dialog (the old exploded view) on top.
+    // -------------------------------------------------------------------
+    _openDeviceDrawer(d) {
+      if (!d) return;
+      this._drawerIeee = d.ieee;
+      this._drawerShareOpen = false;
+      this._renderDrawer();
+      const el = this._q("#drawer");
+      if (el) {
+        el.classList.add("open");
+        el.setAttribute("aria-hidden", "false");
+      }
+      if (!this._clusterCache.get(d.ieee)) {
+        this._ensureClusters(d.ieee).catch(() => {
+        }).then(() => this._drawerIeee === d.ieee && this._renderDrawer());
+      }
+    }
+    _closeDrawer() {
+      this._drawerIeee = null;
+      const el = this._q("#drawer");
+      if (el) {
+        el.classList.remove("open");
+        el.setAttribute("aria-hidden", "true");
+      }
+    }
+    /** Re-renders the drawer if it's open (after scans, device reloads…). */
+    _refreshDrawer() {
+      if (this._drawerIeee) this._renderDrawer();
+    }
+    _drawerRelations(ieee) {
+      const id = normIeee(ieee);
+      const coord = normIeee(this._coordinatorIeee() || "");
+      const health = this._computeHealthMap();
+      const controls = /* @__PURE__ */ new Map();
+      const controlledBy = /* @__PURE__ */ new Map();
+      let coordinatorClusters = 0;
+      const problems = [];
+      const add = (map, key, entry, cluster) => {
+        if (!map.has(key)) map.set(key, { ...entry, clusters: /* @__PURE__ */ new Set() });
+        map.get(key).clusters.add(cluster);
+      };
+      for (const b of this._rawBindings()) {
+        const h = health.get(b.id);
+        const mine = normIeee(b.sourceIeee) === id || !b.isGroup && normIeee(b.targetIeee) === id;
+        if (mine && h && (h.level === "error" || h.level === "warning")) problems.push(h);
+        if (normIeee(b.sourceIeee) === id) {
+          if (b.isGroup) add(controls, `g:${b.groupId}`, { kind: "group", groupId: b.groupId, name: this._groupName(b.groupId) }, b.clusterId);
+          else if (normIeee(b.targetIeee) === coord) coordinatorClusters++;
+          else {
+            const t = this._devices.find((x) => normIeee(x.ieee) === normIeee(b.targetIeee));
+            add(controls, `d:${normIeee(b.targetIeee)}`, { kind: "device", ieee: b.targetIeee, name: t ? this._deviceLabel(t) : b.targetIeee, missing: !t }, b.clusterId);
+          }
+        } else if (!b.isGroup && normIeee(b.targetIeee) === id) {
+          const src = this._devices.find((x) => normIeee(x.ieee) === normIeee(b.sourceIeee));
+          add(controlledBy, `d:${normIeee(b.sourceIeee)}`, { kind: "device", ieee: b.sourceIeee, name: src ? this._deviceLabel(src) : b.sourceIeee, missing: !src }, b.clusterId);
+        }
+      }
+      const memberOf = this._groups.filter((g) => (g.members || []).some((m) => m.device && normIeee(m.device.ieee) === id));
+      for (const g of memberOf) {
+        for (const b of this._rawBindings()) {
+          if (b.isGroup && Number(b.groupId) === Number(g.group_id) && normIeee(b.sourceIeee) !== id) {
+            const src = this._devices.find((x) => normIeee(x.ieee) === normIeee(b.sourceIeee));
+            add(controlledBy, `d:${normIeee(b.sourceIeee)}`, { kind: "device", ieee: b.sourceIeee, name: src ? this._deviceLabel(src) : b.sourceIeee, missing: !src, via: g.name }, b.clusterId);
+          }
+        }
+      }
+      const seen = /* @__PURE__ */ new Set();
+      const uniqueProblems = problems.filter((p) => {
+        const k = `${p.code}|${p.message}`;
+        if (seen.has(k)) return false;
+        seen.add(k);
+        return true;
+      });
+      return { controls: [...controls.values()], controlledBy: [...controlledBy.values()], coordinatorClusters, memberOf, problems: uniqueProblems };
+    }
+    _drawerRelListHtml(list2, emptyText) {
+      if (!list2.length) return `<p class="muted drawer-empty">${escapeHtml(emptyText)}</p>`;
+      return `<ul class="drawer-rel">${list2.sort((a, b) => a.name.localeCompare(b.name)).map((r) => {
+        const clusters = [...r.clusters].map(clusterName).join(", ");
+        const name = r.kind === "device" && !r.missing ? `<a href="#" class="src-link drawer-dev-link" data-ieee="${escapeHtml(r.ieee)}">${escapeHtml(r.name)}</a>` : `<span>${r.kind === "group" ? "\u{1F465} " : ""}${escapeHtml(r.name)}${r.missing ? " (not in ZHA)" : ""}</span>`;
+        const via = r.via ? ` <span class="muted">via group ${escapeHtml(r.via)}</span>` : "";
+        return `<li>${name}${via}<span class="muted drawer-clusters">${escapeHtml(clusters)}</span></li>`;
+      }).join("")}</ul>`;
+    }
+    _renderDrawer() {
+      const d = this._devices.find((x) => normIeee(x.ieee) === normIeee(this._drawerIeee || ""));
+      const body = this._q("#drawer-body");
+      if (!body) return;
+      if (!d) {
+        this._closeDrawer();
+        return;
+      }
+      this._q("#drawer-title").textContent = this._deviceLabel(d);
+      const rel = this._drawerRelations(d.ieee);
+      this._ensureZ2mModels();
+      const imgUrl = this._showDevicePhotos ? this._deviceImageUrl(d) : null;
+      const photo = imgUrl ? `<img src="${escapeHtml(imgUrl)}" alt="" class="drawer-photo" onerror="this.style.display='none'">` : "";
+      const tags = this._deviceTypeTags(d);
+      const reg = this._haDeviceRegistryEntry(d.ieee);
+      const facts = [
+        ["Area", this._areaName(d.area_id)],
+        ["Model", [d.manufacturer, d.model].filter(Boolean).join(" ") || "Unknown"],
+        reg && reg.sw_version ? ["Firmware", reg.sw_version] : null,
+        ["Power", d.power_source || "Unknown"],
+        ["Bindings read", this._lastScanCellInfo(d).html.replace(/<button[\s\S]*?<\/button>/, "")]
+      ].filter(Boolean);
+      const battery = this._isBatteryDevice(d);
+      const haUrl = deviceHaUrl(d);
+      const problems = rel.problems.length ? `<div class="drawer-section drawer-problems"><div class="drawer-section-title">Needs attention</div><ul>${rel.problems.slice(0, 5).map((p) => `<li class="health-${escapeHtml(p.level)}">${escapeHtml(p.message)}</li>`).join("")}</ul><a href="#" class="src-link" id="drawer-problems-link">See them in the Bindings tab</a></div>` : "";
+      const isController = controllerEndpoints(this._clusterCache.get(d.ieee)).length > 0;
+      const coordNote = rel.coordinatorClusters && isController ? `<p class="hint">Also bound to the coordinator (${rel.coordinatorClusters} cluster${rel.coordinatorClusters === 1 ? "" : "s"}), so Home Assistant sees its button presses.</p>` : "";
+      const share = this._drawerShareOpen ? `<div class="drawer-share">
+          <p>Sharing a capability scan tells the next person with this model which commands it really supports. Nothing is sent
+            automatically: you review it and submit it as a GitHub issue.</p>
+          <ol>
+            ${battery ? `<li><strong>Wake it:</strong> ${escapeHtml(this._deviceLabel(d))} runs on battery, so press a button on it just before you start, and again if an endpoint times out.</li>` : ""}
+            <li><strong>Check:</strong> click Start. The Endpoints and clusters view opens and asks each endpoint which commands it supports, one after another. This can take a minute or two.</li>
+            <li><strong>Share:</strong> when the checks are done, click <em>Share scan to community database</em> at the bottom of that view. It opens a prefilled GitHub issue (model, firmware and clusters only: no names or addresses).</li>
+          </ol>
+          <div class="dialog-actions"><button class="btn btn-primary btn-small" id="drawer-share-start">Start</button><button class="btn btn-small" id="drawer-share-cancel">Cancel</button></div>
+        </div>` : "";
+      body.innerHTML = `
+      <div class="drawer-head">
+        ${photo}
+        <div>
+          ${tags.length ? `<div class="drawer-tags">${tags.map((t) => `<span class="chip">${escapeHtml(t)}</span>`).join("")}</div>` : ""}
+          <table class="detail-table drawer-facts">${facts.map(([k, v]) => `<tr><td>${escapeHtml(k)}</td><td>${k === "Bindings read" ? v : escapeHtml(String(v))}</td></tr>`).join("")}</table>
+        </div>
+      </div>
+      ${problems}
+      <div class="drawer-section">
+        <div class="drawer-section-title">Controls</div>
+        ${this._drawerRelListHtml(rel.controls, "Nothing: it isn't bound to another device or group.")}
+        ${coordNote}
+      </div>
+      <div class="drawer-section">
+        <div class="drawer-section-title">Controlled by</div>
+        ${this._drawerRelListHtml(rel.controlledBy, "Nothing is bound to it.")}
+        ${rel.memberOf.length ? `<p class="hint">Member of ${rel.memberOf.map((g) => escapeHtml(g.name)).join(", ")}.</p>` : ""}
+      </div>
+      <div class="drawer-section drawer-actions">
+        <div class="drawer-section-title">Actions</div>
+        ${isController ? `<button class="btn btn-primary" id="drawer-control-lights" title="Pick lights for this remote to control; the card creates a group if needed, binds it and checks it works">Control lights with this\u2026</button>` : ""}
+        <button class="btn" id="drawer-show-bindings" title="Bindings tab, filtered to this device (what it controls and what controls it)">Show its bindings</button>
+        <button class="btn" id="drawer-rescan" title="Read this device's binding table again">Rescan bindings</button>
+        <button class="btn" id="drawer-share" title="Check which commands each endpoint supports and share it with the community database">Check and share capabilities\u2026</button>
+        ${share}
+        <button class="btn" id="drawer-endpoints" title="Per-endpoint layout: clusters, bindings and supported commands">Show endpoints\u2026</button>
+        ${haUrl ? `<a class="btn" href="${escapeHtml(haUrl)}" target="_blank" rel="noopener" title="Opens this device's page in Home Assistant, in a new tab">Open in Home Assistant</a>` : ""}
+      </div>`;
+      const on = (sel, fn) => {
+        const el = this._q(sel);
+        if (el) el.addEventListener("click", fn);
+      };
+      this._qa("#drawer-body .drawer-dev-link").forEach(
+        (a) => a.addEventListener("click", (e) => {
+          e.preventDefault();
+          this._openDeviceDrawer(this._devices.find((x) => x.ieee === a.dataset.ieee));
+        })
+      );
+      on("#drawer-control-lights", () => this._openGroupFlow(d));
+      const showBindings = (e) => {
+        if (e) e.preventDefault();
+        this._setTableDeviceFilter(d.ieee);
+        this._switchView("table");
+        this._closeDrawer();
+      };
+      on("#drawer-show-bindings", showBindings);
+      on("#drawer-problems-link", showBindings);
+      on("#drawer-rescan", async () => {
+        const btn = this._q("#drawer-rescan");
+        if (btn) {
+          btn.disabled = true;
+          btn.textContent = "Rescanning\u2026";
+        }
+        try {
+          await this._rescanDeviceFull(d.ieee, { tries: this._retryCount });
+        } finally {
+          this._refreshDrawer();
+        }
+      });
+      on("#drawer-share", () => {
+        this._drawerShareOpen = !this._drawerShareOpen;
+        this._renderDrawer();
+      });
+      on("#drawer-share-cancel", () => {
+        this._drawerShareOpen = false;
+        this._renderDrawer();
+      });
+      on("#drawer-share-start", () => {
+        this._drawerShareOpen = false;
+        this._renderDrawer();
+        this._openDeviceExplodedView(d, { checkAll: true });
+      });
+      on("#drawer-endpoints", () => this._openDeviceExplodedView(d));
+    }
+    /** Runs "Check supported commands" on every endpoint in turn. */
+    async _checkAllEndpoints(d) {
+      if (this._checkingAll) return;
+      this._checkingAll = d.ieee;
+      try {
+        for (const ep of this._deviceEndpointsIncludingGP(d)) {
+          if (!this._q("#dialog").classList.contains("open")) break;
+          if (this._explodedDeviceIeee && normIeee(this._explodedDeviceIeee) !== normIeee(d.ieee)) break;
+          const cur = this._commandScans.get(this._commandScanKey(d.ieee, ep));
+          if (cur && cur.status === "done") continue;
+          await this._checkEndpointCommands(d, ep);
+        }
+      } finally {
+        this._checkingAll = null;
+        this._rerenderExplodedFor(d);
+      }
+    }
     // Exploded device view dialog — triggered from the Devices tab. Scans the
     // one device on demand (same binds_get + cluster-scan calls the rest of
     // the card already makes against your own HA instance), then renders a
     // per-endpoint breakdown. No external lookups, nothing asked of the user.
     // -------------------------------------------------------------------
-    async _openDeviceExplodedView(d) {
+    async _openDeviceExplodedView(d, { checkAll = false } = {}) {
       this._shareDraft = null;
       const panel = this._q(".dialog-panel");
       if (panel) panel.classList.add("wide");
@@ -5933,6 +6305,7 @@ a.btn { display:inline-block; text-decoration:none; }
       if (!this._q("#dialog").classList.contains("open")) return;
       const fresh = this._devices.find((x) => x.ieee === d.ieee) || d;
       this._renderExplodedView(fresh);
+      if (checkAll) this._checkAllEndpoints(fresh);
     }
     _renderExplodedView(d) {
       this._explodedDeviceIeee = d.ieee;
@@ -5948,8 +6321,12 @@ a.btn { display:inline-block; text-decoration:none; }
       const roleNote = this._isMultiRoleDevice(d) ? `<p class="hint ep-role-note">\u{1F579} This device also has its own Light/Switch/Cover/Fan role, on top of
            the control relationship(s) below \u2014 e.g. a wired/local load alongside a Zigbee-bound one. Look
            through the endpoint cards below to see which one is which.</p>` : "";
-      this._q("#dialog-title").textContent = this._deviceLabel(d);
+      this._q("#dialog-title").textContent = `Endpoints and clusters: ${this._deviceLabel(d)}`;
+      const epCount = this._deviceEndpointsIncludingGP(d).length;
+      const checkAllBtn = epCount ? `<div class="ep-check-all">${this._checkingAll && normIeee(this._checkingAll) === normIeee(d.ieee) ? `<span class="muted">Checking each endpoint's supported commands in turn\u2026</span>` : `<button class="btn btn-small" id="ep-check-all" title="Runs Check supported commands on every endpoint, one after another">Check all endpoints</button>
+               <span class="muted">then share the result with the community database below.</span>`}</div>` : "";
       this._q("#dialog-body").innerHTML = `
+      ${checkAllBtn}
       <label class="row ep-photo-toggle">
         <input type="checkbox" id="ep-show-photos" ${this._showDevicePhotos ? "checked" : ""}>
         Show device photo (fetches from zigbee2mqtt.io, needs internet access)
@@ -5969,6 +6346,8 @@ a.btn { display:inline-block; text-decoration:none; }
         <button class="btn" id="explode-close">Close</button>
       </div>`;
       this._q("#explode-close").addEventListener("click", () => this._closeDialog());
+      const checkAll = this._q("#ep-check-all");
+      if (checkAll) checkAll.addEventListener("click", () => this._checkAllEndpoints(d));
       const ctl = this._q("#explode-control-lights");
       if (ctl) ctl.addEventListener("click", () => this._openGroupFlow(d));
       this._q("#ep-show-photos").addEventListener("change", (e) => {
@@ -6900,7 +7279,7 @@ a.btn { display:inline-block; text-decoration:none; }
           <td><span class="dot" style="background:${clusterColor(b.clusterId)}"></span> ${escapeHtml(
           r.clusterLabel
         )}</td>
-          <td>${b.isGroup ? `${escapeHtml(r.targetLabel)} (group)` : `<a href="#" class="src-link tgt-link" data-ieee="${escapeHtml(b.targetIeee)}" title="Show bindings involving this device">${escapeHtml(
+          <td>${b.isGroup ? `${escapeHtml(r.targetLabel)} (group)` : `<a href="#" class="src-link tgt-link" data-ieee="${escapeHtml(b.targetIeee)}" title="Open this device">${escapeHtml(
           r.targetLabel
         )}</a> <span class="muted">(ep ${b.targetEndpoint})</span>`}</td>
           <td><button class="health-badge health-${h.level}" data-health="${b.id}" title="${escapeHtml(
@@ -6918,11 +7297,15 @@ a.btn { display:inline-block; text-decoration:none; }
       this._qa("#table-body [data-forget]").forEach((btn) => {
         btn.addEventListener("click", () => this._confirmForgetSources([btn.dataset.forget]));
       });
-      this._qa(".src-link").forEach((el) => {
+      this._qa("#table-body .src-link").forEach((el) => {
         el.addEventListener("click", (e) => {
           e.preventDefault();
-          this._setTableDeviceFilter(el.dataset.ieee);
-          this._renderTable();
+          const dev = this._devices.find((x) => normIeee(x.ieee) === normIeee(el.dataset.ieee));
+          if (dev) this._openDeviceDrawer(dev);
+          else {
+            this._setTableDeviceFilter(el.dataset.ieee);
+            this._renderTable();
+          }
         });
       });
       this._qa("[data-health]").forEach((btn) => {
@@ -7299,7 +7682,7 @@ a.btn { display:inline-block; text-decoration:none; }
       if (!wrap) return;
       this._updateSortIndicators("#view-devices", this._devicesSort);
       if (!this._loaded) {
-        wrap.innerHTML = `<tr><td colspan="9" class="muted">Loading devices\u2026</td></tr>`;
+        wrap.innerHTML = `<tr><td colspan="8" class="muted">Loading devices\u2026</td></tr>`;
         return;
       }
       const search = (this._filters.search || "").trim();
@@ -7321,7 +7704,7 @@ a.btn { display:inline-block; text-decoration:none; }
       });
       rows = this._devicesSort.key ? this._sortRows(rows, this._devicesSort) : rows.sort((a, b) => a.name.localeCompare(b.name));
       if (!rows.length) {
-        wrap.innerHTML = search ? `<tr><td colspan="9" class="muted">No devices match \u201C${escapeHtml(search)}\u201D. Clear the search box to see all ${this._devices.length} devices.</td></tr>` : `<tr><td colspan="9" class="muted">No devices found.</td></tr>`;
+        wrap.innerHTML = search ? `<tr><td colspan="8" class="muted">No devices match \u201C${escapeHtml(search)}\u201D. Clear the search box to see all ${this._devices.length} devices.</td></tr>` : `<tr><td colspan="8" class="muted">No devices found.</td></tr>`;
         return;
       }
       wrap.innerHTML = rows.map(
@@ -7335,22 +7718,12 @@ a.btn { display:inline-block; text-decoration:none; }
           <td>${escapeHtml(r.power)}</td>
           <td>${r.count}</td>
           <td>${r.scanHtml}</td>
-          <td><button class="btn btn-small explode-btn" data-ieee="${escapeHtml(
-          r.device.ieee
-        )}">Explode</button></td>
         </tr>`
       ).join("");
       this._qa("#devices-table-body .src-link").forEach((el) => {
         el.addEventListener("click", (e) => {
           e.preventDefault();
-          this._setTableDeviceFilter(el.dataset.ieee);
-          this._switchView("table");
-        });
-      });
-      this._qa("#devices-table-body .explode-btn").forEach((btn) => {
-        btn.addEventListener("click", () => {
-          const device = this._devices.find((x) => x.ieee === btn.dataset.ieee);
-          if (device) this._openDeviceExplodedView(device);
+          this._openDeviceDrawer(this._devices.find((x) => x.ieee === el.dataset.ieee));
         });
       });
       this._qa("#devices-table-body .scan-cell-btn").forEach((btn) => {
@@ -8565,6 +8938,8 @@ a.btn { display:inline-block; text-decoration:none; }
       el.innerHTML = `
       <div class="advanced-form-wrap">
         <div class="advanced-form">
+          <p class="adv-guided-hint">Want a remote to control some lights? <button type="button" class="btn btn-small" id="adv-open-guided">Control lights with a remote\u2026</button>
+            does it step by step, including creating the group.</p>
           <p class="muted">Direct access to <code>zha_toolkit.bind_ieee</code> / <code>binds_remove_all</code> /
             <code>bind_group</code> for edge cases (specific endpoints, clusters not auto-detected, etc).</p>
           <label>Source device
@@ -8619,6 +8994,7 @@ a.btn { display:inline-block; text-decoration:none; }
       </div>`;
       this._populateAdvancedSelects();
       this._q("#adv-target-type").addEventListener("change", (e) => this._advApplyTargetType(e.target.value));
+      this._q("#adv-open-guided").addEventListener("click", () => this._openGroupFlowPickRemote());
       this._q("#adv-source").addEventListener("change", () => this._advPopulateSourceEndpoints());
       this._q("#adv-src-ep").addEventListener("change", () => {
         this._advPopulateClusterOptions();

@@ -3,6 +3,34 @@
 All notable changes to ZHA Bindings Manager are documented here.
 
 
+## [1.4.0]
+
+### Added
+
+- **Control lights with a remote… in the toolbar.** The guided setup no longer has to be found inside a device's view.
+  It now starts by picking the remote or wireless switch, then the lights. The Advanced tab points to it too.
+- **Choose a new or an existing group up front.** The first step of the guided setup asks whether to create a new
+  group (with a name you can change) or use an existing one, and says what will happen: for example that the lights
+  you ticked already form a group, which will be reused. Review states it plainly ("Group: create Hall dimmer lights
+  with 3 lights"). Before, a new group was only mentioned on the second screen.
+- **Device side panel.** Clicking a device anywhere (a Map node, a name in the Devices or Bindings tab, or a
+  `?device=` link) opens a panel on the right instead of a dialog. It shows the device's photo, area, model, firmware
+  and when its bindings were last read, what it controls and what controls it (click one to move to that device),
+  its group memberships, binding problems, and its actions:
+  - **Control lights with this…** (remotes and switches),
+  - **Show its bindings**, which filters the Bindings tab to this device (what clicking a name used to do),
+  - **Rescan bindings**,
+  - **Check and share capabilities…**, which explains the steps, then checks every endpoint's supported commands in
+    turn and ends with **Share scan to community database**,
+  - **Show endpoints…**, the per-endpoint view (formerly the "exploded" view, now called Endpoints and clusters),
+  - **Open in Home Assistant**.
+- **Check all endpoints** in the Endpoints and clusters view runs Check supported commands on every endpoint, one
+  after another.
+
+### Removed
+
+- The **Explode** button in the Devices tab. Click the device's name instead.
+
 ## [1.3.2]
 
 ### Fixed

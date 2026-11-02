@@ -1098,7 +1098,7 @@ export class ZhaBindingMapCard extends HTMLElement {
       this._setStatus("error", `The linked device (${ieee}) isn't in ZHA any more.`);
       return;
     }
-    this._openDeviceExplodedView(d);
+    this._openDeviceDrawer(d);
   }
 
   /** Fetches ZHA's current device and group lists. Used on first load, by
@@ -1733,6 +1733,7 @@ export class ZhaBindingMapCard extends HTMLElement {
           if (d) this._renderExplodedView(d);
         }
         if (this._q("#capexp-body")) this._renderCapExpBody();
+        this._refreshDrawer();
       })
       .catch((err) => {
         console.warn("[ZHA Bindings Manager] Zigbee2MQTT model map unavailable", err);
@@ -2145,6 +2146,7 @@ export class ZhaBindingMapCard extends HTMLElement {
     if (this._view === "floorplan") this._renderFloorplan();
     if (this._view === "devices") this._renderDevicesTab();
     if (this._view === "capexplorer") this._renderCapabilityExplorer();
+    this._refreshDrawer();
   }
 
   _q(sel) {
@@ -2173,6 +2175,8 @@ export class ZhaBindingMapCard extends HTMLElement {
     });
 
     this._q("#btn-scan").addEventListener("click", () => this._scanBindings());
+    this._q("#btn-control-lights").addEventListener("click", () => this._openGroupFlowPickRemote());
+    this._q("#drawer-close").addEventListener("click", () => this._closeDrawer());
     this._q("#btn-refresh-devices").addEventListener("click", () => this._loadAll());
     this._q("#btn-rescan-settings").addEventListener("click", () => {
       this._q("#rescan-settings-panel").classList.toggle("open");
@@ -2922,7 +2926,7 @@ export class ZhaBindingMapCard extends HTMLElement {
     badge.appendChild(icon);
     const title = this._svgEl("title");
     title.textContent =
-      "This device also has its own Light/Switch/Cover/Fan role, in addition to what's shown by the edges here — click to see the per-endpoint breakdown.";
+      "This device also has its own Light/Switch/Cover/Fan role, in addition to what's shown by the edges here — click it, then Show endpoints…, for the per-endpoint breakdown.";
     badge.appendChild(title);
     return badge;
   }
@@ -3063,7 +3067,7 @@ export class ZhaBindingMapCard extends HTMLElement {
       // A plain click (no drag) on a device node opens its exploded view —
       // same entry point as the Devices tab's "Explode" button. Group nodes
       // have no exploded view, so a plain click on one still does nothing.
-      if (ctx.node.kind === "device") this._openDeviceExplodedView(ctx.node.device);
+      if (ctx.node.kind === "device") this._openDeviceDrawer(ctx.node.device);
       return;
     }
     this._savePositions();
@@ -3139,7 +3143,28 @@ export class ZhaBindingMapCard extends HTMLElement {
   // share the result.
   // -------------------------------------------------------------------
 
-  async _openGroupFlow(source, { groupId = null } = {}) {
+  /** Toolbar entry (1.4.0): the flow starts by picking the remote. */
+  async _openGroupFlowPickRemote() {
+    this._closeDrawer();
+    this._flow = { step: "remote", fromToolbar: true, remotes: null, sourceIeee: null };
+    const panel = this._q(".dialog-panel");
+    if (panel) panel.classList.add("wide");
+    this._q("#dialog").classList.add("open");
+    this._explodedDeviceIeee = null;
+    this._renderGroupFlow();
+    await Promise.all(this._devices.map((d) => this._ensureClusters(d.ieee).catch(() => {})));
+    if (!this._flow || this._flow.step !== "remote") return;
+    const coord = normIeee(this._coordinatorIeee() || "");
+    this._flow.remotes = this._devices
+      .filter((d) => normIeee(d.ieee) !== coord && d.device_type !== "Coordinator" && !this._isRemovedDevice(d.ieee))
+      .filter((d) => controllerEndpoints(this._clusterCache.get(d.ieee)).length)
+      .map((d) => ({ ieee: d.ieee, name: this._deviceLabel(d), area: d.area_id ? this._areaName(d.area_id) : "", model: [d.manufacturer, d.model].filter(Boolean).join(" "), battery: this._isBatteryDevice(d) }))
+      .sort((a, b) => a.name.localeCompare(b.name));
+    this._renderGroupFlow();
+  }
+
+  async _openGroupFlow(source, { groupId = null, fromToolbar = false } = {}) {
+    this._closeDrawer();
     const clusters = await this._ensureClusters(source.ieee).catch(() => []);
     const eps = controllerEndpoints(clusters);
     if (!eps.length) {
@@ -3148,10 +3173,12 @@ export class ZhaBindingMapCard extends HTMLElement {
     }
     this._flow = {
       step: "pick",
+      fromToolbar,
       sourceIeee: source.ieee,
       endpoints: eps,
       endpoint: eps[0].endpoint,
       selected: new Set(),
+      groupChoice: groupId != null ? "existing" : "new",
       startGroupId: groupId != null ? Number(groupId) : null,
       candidates: null,
       mode: "group",
@@ -3216,6 +3243,30 @@ export class ZhaBindingMapCard extends HTMLElement {
     );
   }
 
+  _flowCanReview() {
+    const f = this._flow;
+    return !!(f && f.selected.size && !(f.groupChoice === "existing" && f.startGroupId == null));
+  }
+
+  /** One line under the group choice saying what will happen to the group. */
+  _flowGroupNote() {
+    const f = this._flow;
+    if (!f) return "";
+    const targets = this._flowTargets();
+    if (f.groupChoice === "existing") {
+      const g = f.startGroupId != null ? this._groups.find((x) => Number(x.group_id) === f.startGroupId) : null;
+      if (!g) return "Pick a group: its lights are ticked below, and you can tick more to add them to it.";
+      const add = missingMembers(g, targets);
+      return add.length
+        ? `${add.length} ticked light${add.length === 1 ? " isn't" : "s aren't"} in ${g.name} yet and will be added.`
+        : `Uses ${g.name} as it is.`;
+    }
+    if (!targets.length) return "Tick the lights below. The card creates this group in ZHA and adds them to it.";
+    const match = findMatchingGroup(this._groups, targets, this._coordinatorIeee());
+    if (match) return `These lights are already the group ${match.name}, so that group will be reused instead.`;
+    return `The card creates this group in ZHA with the ${targets.length} ticked light${targets.length === 1 ? "" : "s"}.`;
+  }
+
   _flowTargets() {
     return (this._flow.candidates || []).filter((t) => this._flow.selected.has(targetKey(t)));
   }
@@ -3277,15 +3328,62 @@ export class ZhaBindingMapCard extends HTMLElement {
   _renderGroupFlow() {
     const f = this._flow;
     if (!f) return;
-    const src = this._flowSource();
-    const srcName = this._deviceLabel(src);
-    this._q("#dialog-title").textContent = `Control lights with ${srcName}`;
     const body = this._q("#dialog-body");
-    const stepNames = { pick: "1. Choose lights", plan: "2. Review", run: "3. Set up", test: "4. Test", done: "5. Result" };
-    const steps = `<ol class="flow-steps">${Object.entries(stepNames)
+    const names = f.fromToolbar
+      ? ["remote", "Choose remote", "pick", "Choose lights", "plan", "Review", "run", "Set up", "test", "Test", "done", "Result"]
+      : ["pick", "Choose lights", "plan", "Review", "run", "Set up", "test", "Test", "done", "Result"];
+    const stepList = [];
+    for (let i = 0; i < names.length; i += 2) stepList.push([names[i], `${i / 2 + 1}. ${names[i + 1]}`]);
+    const steps = `<ol class="flow-steps">${stepList
       .map(([k, v]) => `<li class="${k === f.step || (f.step === "stopped" && k === "run") ? "active" : ""}">${v}</li>`)
       .join("")}</ol>`;
     let html = "";
+
+    if (f.step === "remote") {
+      this._q("#dialog-title").textContent = "Control lights with a remote";
+      const list =
+        f.remotes == null
+          ? `<p class="muted">Finding remotes and switches…</p>`
+          : !f.remotes.length
+          ? `<p class="muted">No device sends On/Off, Level Control or Colour Control commands, so there's nothing that can control lights. If you've just paired a remote, click ⟳ Devices and try again.</p>`
+          : `<div class="flow-targets">${f.remotes
+              .map(
+                (r) => `<label class="flow-target"><input type="radio" name="flow-remote" value="${escapeHtml(r.ieee)}" ${r.ieee === f.sourceIeee ? "checked" : ""}>
+                  <span>${escapeHtml(r.name)}${r.battery ? ' <span class="muted" title="Battery">🔋</span>' : ""}</span><span class="muted">${escapeHtml([r.area, r.model].filter(Boolean).join(" · "))}</span></label>`
+              )
+              .join("")}</div>`;
+      body.innerHTML = `${steps}<div class="flow">
+        <p>Pick the remote or wireless switch that should control your lights. The card then helps you choose the lights,
+          puts them in a ZHA group (creating one if needed), binds the remote to it and checks that it works.
+          The lights switch even when Home Assistant is down.</p>
+        <p><strong>Remotes and switches</strong></p>${list}
+        <div class="dialog-actions">
+          <button class="btn btn-primary" id="flow-remote-next" ${f.sourceIeee ? "" : "disabled"}>Next: choose lights</button>
+          <button class="btn" id="flow-cancel">Cancel</button>
+        </div></div>`;
+      this._qa('input[name="flow-remote"]').forEach((r) =>
+        r.addEventListener("change", () => {
+          f.sourceIeee = r.value;
+          const btn = this._q("#flow-remote-next");
+          if (btn) btn.disabled = false;
+        })
+      );
+      const next = this._q("#flow-remote-next");
+      if (next)
+        next.addEventListener("click", () => {
+          const d = this._devices.find((x) => x.ieee === f.sourceIeee);
+          if (d) this._openGroupFlow(d, { fromToolbar: true });
+        });
+      this._qa("#flow-cancel").forEach((b) => b.addEventListener("click", () => {
+        this._flow = null;
+        this._closeDialog();
+      }));
+      return;
+    }
+
+    const src = this._flowSource();
+    const srcName = this._deviceLabel(src);
+    this._q("#dialog-title").textContent = `Control lights with ${srcName}`;
 
     if (f.step === "pick") {
       const epSel =
@@ -3295,11 +3393,17 @@ export class ZhaBindingMapCard extends HTMLElement {
                 .map((e) => `<option value="${e.endpoint}" ${e.endpoint === Number(f.endpoint) ? "selected" : ""}>Endpoint ${e.endpoint}: ${escapeHtml(e.clusters.map(clusterName).join(", "))}</option>`)
                 .join("")}</select></label>`
           : `<p class="muted">Sends ${escapeHtml(f.endpoints[0].clusters.map(clusterName).join(", "))} from endpoint ${f.endpoints[0].endpoint}.</p>`;
-      const groupSel = `<label>Start from an existing group (optional)
-          <select id="flow-start-group"><option value="">— choose lights below —</option>${[...this._groups]
-            .sort((a, b) => (a.name || "").localeCompare(b.name || ""))
-            .map((g) => `<option value="${g.group_id}" ${Number(g.group_id) === f.startGroupId ? "selected" : ""}>${escapeHtml(g.name)}</option>`)
-            .join("")}</select></label>`;
+      const sortedGroups = [...this._groups].sort((a, b) => (a.name || "").localeCompare(b.name || ""));
+      const existing = f.groupChoice === "existing";
+      const groupSel = `<fieldset class="flow-mode flow-group-choice"><legend>Group</legend>
+          <label><input type="radio" name="flow-group-choice" value="new" ${existing ? "" : "checked"}> New group
+            <input type="text" id="flow-group-name" value="${escapeHtml(f.groupName)}" ${existing ? "disabled" : ""} aria-label="New group name"></label>
+          <label class="${sortedGroups.length ? "" : "muted"}"><input type="radio" name="flow-group-choice" value="existing" ${existing ? "checked" : ""} ${sortedGroups.length ? "" : "disabled"}> Existing group
+            <select id="flow-start-group" ${existing ? "" : "disabled"}><option value="">— pick a group —</option>${sortedGroups
+              .map((g) => `<option value="${g.group_id}" ${Number(g.group_id) === f.startGroupId ? "selected" : ""}>${escapeHtml(g.name)}</option>`)
+              .join("")}</select></label>
+          <p class="hint" id="flow-group-note">${escapeHtml(this._flowGroupNote())}</p>
+        </fieldset>`;
       const list =
         f.candidates == null
           ? `<p class="muted">Finding lights this remote can control…</p>`
@@ -3314,7 +3418,8 @@ export class ZhaBindingMapCard extends HTMLElement {
               .join("")}</div>`;
       html = `${epSel}${groupSel}<p><strong>Lights to control</strong> (<span id="flow-count">${f.selected.size}</span> selected)</p>${list}
         <div class="dialog-actions">
-          <button class="btn btn-primary" id="flow-next" ${f.selected.size ? "" : "disabled"}>Next: review</button>
+          <button class="btn btn-primary" id="flow-next" ${this._flowCanReview() ? "" : "disabled"}>Next: review</button>
+          ${f.fromToolbar ? `<button class="btn" id="flow-back-remote">Back</button>` : ""}
           <button class="btn" id="flow-advanced">Use the Advanced tab instead</button>
           <button class="btn" id="flow-cancel">Cancel</button>
         </div>`;
@@ -3340,14 +3445,15 @@ export class ZhaBindingMapCard extends HTMLElement {
         </fieldset>`;
       let groupLine = "";
       if (f.mode === "group") {
-        const match = findMatchingGroup(this._groups, targets, this._coordinatorIeee());
         const start = f.startGroupId != null ? this._groups.find((g) => Number(g.group_id) === f.startGroupId) : null;
+        const match = start ? null : findMatchingGroup(this._groups, targets, this._coordinatorIeee());
         if (match) groupLine = `<p>Group: reuse <strong>${escapeHtml(match.name)}</strong>, which already has exactly these lights.</p>`;
         else if (start) {
           const add = missingMembers(start, targets);
           groupLine = `<p>Group: use <strong>${escapeHtml(start.name)}</strong>${add.length ? ` and add ${escapeHtml(add.map((t) => t.name).join(", "))}` : ""}. Lights already in it that you didn't select stay in it.</p>`;
         } else {
-          groupLine = `<label>New group name <input type="text" id="flow-group-name" value="${escapeHtml(f.groupName)}"></label>`;
+          const name = (f.groupName || "").trim() || suggestGroupName(null, srcName);
+          groupLine = `<p>Group: create <strong>${escapeHtml(name)}</strong> with ${targets.length} light${targets.length === 1 ? "" : "s"}.</p>`;
         }
       }
       const clusterRows = plan
@@ -3435,7 +3541,7 @@ export class ZhaBindingMapCard extends HTMLElement {
           Nobody can tell in advance how a remote handles ${f.mode === "group" ? "group" : "direct"} bindings. Your result tells the next person with this remote what to expect.
           It opens a prefilled GitHub issue on the community database with the model, firmware, clusters and result only (no names or addresses).
           <div class="dialog-actions"><a class="btn btn-primary" id="flow-share" href="${escapeHtml(shareUrl)}" target="_blank" rel="noopener">Share result</a></div>
-          ${f.notInDb ? `<p class="hint">This remote isn't in the community database yet. Sharing a capability scan helps too: open the remote's device view, run "Check supported commands", then "Share scan".</p>` : ""}
+          ${f.notInDb ? `<p class="hint">This remote isn't in the community database yet. Sharing a capability scan helps too: click the remote anywhere in the card, then <strong>Check and share capabilities…</strong>.</p>` : ""}
         </div>`;
     return `<div class="flow-result flow-result-${level}"><strong>Result: ${escapeHtml(RESULT_TEXT[f.result] || f.result)}.</strong> ${escapeHtml(advice)}</div>
       ${share}
@@ -3500,14 +3606,23 @@ export class ZhaBindingMapCard extends HTMLElement {
       else this._flowSelectGroup(e.target.value);
       this._renderGroupFlow();
     });
+    this._qa('input[name="flow-group-choice"]').forEach((r) =>
+      r.addEventListener("change", () => {
+        f.groupChoice = r.value;
+        if (r.value === "new") f.startGroupId = null;
+        this._renderGroupFlow();
+      })
+    );
     this._qa("[data-flow-target]").forEach((cb) =>
       cb.addEventListener("change", () => {
         if (cb.checked) f.selected.add(cb.dataset.flowTarget);
         else f.selected.delete(cb.dataset.flowTarget);
         const btn = this._q("#flow-next");
-        if (btn) btn.disabled = !f.selected.size;
+        if (btn) btn.disabled = !this._flowCanReview();
         const count = this._q("#flow-count");
         if (count) count.textContent = String(f.selected.size);
+        const note = this._q("#flow-group-note");
+        if (note) note.textContent = this._flowGroupNote();
       })
     );
     on("#flow-next", "click", () => {
@@ -3516,6 +3631,15 @@ export class ZhaBindingMapCard extends HTMLElement {
       f.known = null;
       this._renderGroupFlow();
       this._flowLoadKnown();
+    });
+    on("#flow-back-remote", "click", () => {
+      const ieee = f.sourceIeee;
+      this._openGroupFlowPickRemote().then(() => {
+        if (this._flow && this._flow.step === "remote") {
+          this._flow.sourceIeee = ieee;
+          this._renderGroupFlow();
+        }
+      });
     });
     on("#flow-back", "click", () => {
       f.step = "pick";
@@ -3527,7 +3651,11 @@ export class ZhaBindingMapCard extends HTMLElement {
         this._renderGroupFlow();
       })
     );
-    on("#flow-group-name", "input", (e) => (f.groupName = e.target.value));
+    on("#flow-group-name", "input", (e) => {
+      f.groupName = e.target.value;
+      const note = this._q("#flow-group-note");
+      if (note) note.textContent = this._flowGroupNote();
+    });
     this._qa("[data-flow-cluster]").forEach((cb) =>
       cb.addEventListener("change", () => {
         const id = Number(cb.dataset.flowCluster);
@@ -3594,7 +3722,8 @@ export class ZhaBindingMapCard extends HTMLElement {
    *  Returns false (after logging why) if that didn't work. */
   async _flowEnsureGroup(targets) {
     const f = this._flow;
-    const match = findMatchingGroup(this._groups, targets, this._coordinatorIeee());
+    const chosen = f.startGroupId != null ? this._groups.find((g) => Number(g.group_id) === f.startGroupId) : null;
+    const match = chosen ? null : findMatchingGroup(this._groups, targets, this._coordinatorIeee());
     try {
       if (match) {
         f.groupId = Number(match.group_id);
@@ -3753,12 +3882,260 @@ export class ZhaBindingMapCard extends HTMLElement {
   }
 
   // -------------------------------------------------------------------
+  // -------------------------------------------------------------------
+  // Device drawer (1.4.0). Clicking a device anywhere (Devices tab, Map,
+  // Bindings table, ?device= link) opens this side panel instead of the
+  // old "Explode" dialog. It shows what the device controls and what
+  // controls it, and gathers the per-device actions. "Show endpoints…"
+  // opens the per-endpoint dialog (the old exploded view) on top.
+  // -------------------------------------------------------------------
+  _openDeviceDrawer(d) {
+    if (!d) return;
+    this._drawerIeee = d.ieee;
+    this._drawerShareOpen = false;
+    this._renderDrawer();
+    const el = this._q("#drawer");
+    if (el) {
+      el.classList.add("open");
+      el.setAttribute("aria-hidden", "false");
+    }
+    // Clusters decide whether "Control lights with this…" applies; fetch
+    // them in the background and re-render when they're in.
+    if (!this._clusterCache.get(d.ieee)) {
+      this._ensureClusters(d.ieee)
+        .catch(() => {})
+        .then(() => this._drawerIeee === d.ieee && this._renderDrawer());
+    }
+  }
+
+  _closeDrawer() {
+    this._drawerIeee = null;
+    const el = this._q("#drawer");
+    if (el) {
+      el.classList.remove("open");
+      el.setAttribute("aria-hidden", "true");
+    }
+  }
+
+  /** Re-renders the drawer if it's open (after scans, device reloads…). */
+  _refreshDrawer() {
+    if (this._drawerIeee) this._renderDrawer();
+  }
+
+  _drawerRelations(ieee) {
+    const id = normIeee(ieee);
+    const coord = normIeee(this._coordinatorIeee() || "");
+    const health = this._computeHealthMap();
+    const controls = new Map();
+    const controlledBy = new Map();
+    let coordinatorClusters = 0;
+    const problems = [];
+    const add = (map, key, entry, cluster) => {
+      if (!map.has(key)) map.set(key, { ...entry, clusters: new Set() });
+      map.get(key).clusters.add(cluster);
+    };
+    for (const b of this._rawBindings()) {
+      const h = health.get(b.id);
+      const mine = normIeee(b.sourceIeee) === id || (!b.isGroup && normIeee(b.targetIeee) === id);
+      if (mine && h && (h.level === "error" || h.level === "warning")) problems.push(h);
+      if (normIeee(b.sourceIeee) === id) {
+        if (b.isGroup) add(controls, `g:${b.groupId}`, { kind: "group", groupId: b.groupId, name: this._groupName(b.groupId) }, b.clusterId);
+        else if (normIeee(b.targetIeee) === coord) coordinatorClusters++;
+        else {
+          const t = this._devices.find((x) => normIeee(x.ieee) === normIeee(b.targetIeee));
+          add(controls, `d:${normIeee(b.targetIeee)}`, { kind: "device", ieee: b.targetIeee, name: t ? this._deviceLabel(t) : b.targetIeee, missing: !t }, b.clusterId);
+        }
+      } else if (!b.isGroup && normIeee(b.targetIeee) === id) {
+        const src = this._devices.find((x) => normIeee(x.ieee) === normIeee(b.sourceIeee));
+        add(controlledBy, `d:${normIeee(b.sourceIeee)}`, { kind: "device", ieee: b.sourceIeee, name: src ? this._deviceLabel(src) : b.sourceIeee, missing: !src }, b.clusterId);
+      }
+    }
+    // Groups this device is a member of, and who's bound to those groups.
+    const memberOf = this._groups.filter((g) => (g.members || []).some((m) => m.device && normIeee(m.device.ieee) === id));
+    for (const g of memberOf) {
+      for (const b of this._rawBindings()) {
+        if (b.isGroup && Number(b.groupId) === Number(g.group_id) && normIeee(b.sourceIeee) !== id) {
+          const src = this._devices.find((x) => normIeee(x.ieee) === normIeee(b.sourceIeee));
+          add(controlledBy, `d:${normIeee(b.sourceIeee)}`, { kind: "device", ieee: b.sourceIeee, name: src ? this._deviceLabel(src) : b.sourceIeee, missing: !src, via: g.name }, b.clusterId);
+        }
+      }
+    }
+    const seen = new Set();
+    const uniqueProblems = problems.filter((p) => {
+      const k = `${p.code}|${p.message}`;
+      if (seen.has(k)) return false;
+      seen.add(k);
+      return true;
+    });
+    return { controls: [...controls.values()], controlledBy: [...controlledBy.values()], coordinatorClusters, memberOf, problems: uniqueProblems };
+  }
+
+  _drawerRelListHtml(list, emptyText) {
+    if (!list.length) return `<p class="muted drawer-empty">${escapeHtml(emptyText)}</p>`;
+    return `<ul class="drawer-rel">${list
+      .sort((a, b) => a.name.localeCompare(b.name))
+      .map((r) => {
+        const clusters = [...r.clusters].map(clusterName).join(", ");
+        const name =
+          r.kind === "device" && !r.missing
+            ? `<a href="#" class="src-link drawer-dev-link" data-ieee="${escapeHtml(r.ieee)}">${escapeHtml(r.name)}</a>`
+            : `<span>${r.kind === "group" ? "👥 " : ""}${escapeHtml(r.name)}${r.missing ? " (not in ZHA)" : ""}</span>`;
+        const via = r.via ? ` <span class="muted">via group ${escapeHtml(r.via)}</span>` : "";
+        return `<li>${name}${via}<span class="muted drawer-clusters">${escapeHtml(clusters)}</span></li>`;
+      })
+      .join("")}</ul>`;
+  }
+
+  _renderDrawer() {
+    const d = this._devices.find((x) => normIeee(x.ieee) === normIeee(this._drawerIeee || ""));
+    const body = this._q("#drawer-body");
+    if (!body) return;
+    if (!d) {
+      this._closeDrawer();
+      return;
+    }
+    this._q("#drawer-title").textContent = this._deviceLabel(d);
+    const rel = this._drawerRelations(d.ieee);
+    this._ensureZ2mModels();
+    const imgUrl = this._showDevicePhotos ? this._deviceImageUrl(d) : null;
+    const photo = imgUrl
+      ? `<img src="${escapeHtml(imgUrl)}" alt="" class="drawer-photo" onerror="this.style.display='none'">`
+      : "";
+    const tags = this._deviceTypeTags(d);
+    const reg = this._haDeviceRegistryEntry(d.ieee);
+    const facts = [
+      ["Area", this._areaName(d.area_id)],
+      ["Model", [d.manufacturer, d.model].filter(Boolean).join(" ") || "Unknown"],
+      reg && reg.sw_version ? ["Firmware", reg.sw_version] : null,
+      ["Power", d.power_source || "Unknown"],
+      ["Bindings read", this._lastScanCellInfo(d).html.replace(/<button[\s\S]*?<\/button>/, "")],
+    ].filter(Boolean);
+    const battery = this._isBatteryDevice(d);
+    const haUrl = deviceHaUrl(d);
+    const problems = rel.problems.length
+      ? `<div class="drawer-section drawer-problems"><div class="drawer-section-title">Needs attention</div><ul>${rel.problems
+          .slice(0, 5)
+          .map((p) => `<li class="health-${escapeHtml(p.level)}">${escapeHtml(p.message)}</li>`)
+          .join("")}</ul><a href="#" class="src-link" id="drawer-problems-link">See them in the Bindings tab</a></div>`
+      : "";
+    const isController = controllerEndpoints(this._clusterCache.get(d.ieee)).length > 0;
+    const coordNote = rel.coordinatorClusters && isController
+      ? `<p class="hint">Also bound to the coordinator (${rel.coordinatorClusters} cluster${rel.coordinatorClusters === 1 ? "" : "s"}), so Home Assistant sees its button presses.</p>`
+      : "";
+    const share = this._drawerShareOpen
+      ? `<div class="drawer-share">
+          <p>Sharing a capability scan tells the next person with this model which commands it really supports. Nothing is sent
+            automatically: you review it and submit it as a GitHub issue.</p>
+          <ol>
+            ${battery ? `<li><strong>Wake it:</strong> ${escapeHtml(this._deviceLabel(d))} runs on battery, so press a button on it just before you start, and again if an endpoint times out.</li>` : ""}
+            <li><strong>Check:</strong> click Start. The Endpoints and clusters view opens and asks each endpoint which commands it supports, one after another. This can take a minute or two.</li>
+            <li><strong>Share:</strong> when the checks are done, click <em>Share scan to community database</em> at the bottom of that view. It opens a prefilled GitHub issue (model, firmware and clusters only: no names or addresses).</li>
+          </ol>
+          <div class="dialog-actions"><button class="btn btn-primary btn-small" id="drawer-share-start">Start</button><button class="btn btn-small" id="drawer-share-cancel">Cancel</button></div>
+        </div>`
+      : "";
+    body.innerHTML = `
+      <div class="drawer-head">
+        ${photo}
+        <div>
+          ${tags.length ? `<div class="drawer-tags">${tags.map((t) => `<span class="chip">${escapeHtml(t)}</span>`).join("")}</div>` : ""}
+          <table class="detail-table drawer-facts">${facts
+            .map(([k, v]) => `<tr><td>${escapeHtml(k)}</td><td>${k === "Bindings read" ? v : escapeHtml(String(v))}</td></tr>`)
+            .join("")}</table>
+        </div>
+      </div>
+      ${problems}
+      <div class="drawer-section">
+        <div class="drawer-section-title">Controls</div>
+        ${this._drawerRelListHtml(rel.controls, "Nothing: it isn't bound to another device or group.")}
+        ${coordNote}
+      </div>
+      <div class="drawer-section">
+        <div class="drawer-section-title">Controlled by</div>
+        ${this._drawerRelListHtml(rel.controlledBy, "Nothing is bound to it.")}
+        ${rel.memberOf.length ? `<p class="hint">Member of ${rel.memberOf.map((g) => escapeHtml(g.name)).join(", ")}.</p>` : ""}
+      </div>
+      <div class="drawer-section drawer-actions">
+        <div class="drawer-section-title">Actions</div>
+        ${isController ? `<button class="btn btn-primary" id="drawer-control-lights" title="Pick lights for this remote to control; the card creates a group if needed, binds it and checks it works">Control lights with this…</button>` : ""}
+        <button class="btn" id="drawer-show-bindings" title="Bindings tab, filtered to this device (what it controls and what controls it)">Show its bindings</button>
+        <button class="btn" id="drawer-rescan" title="Read this device's binding table again">Rescan bindings</button>
+        <button class="btn" id="drawer-share" title="Check which commands each endpoint supports and share it with the community database">Check and share capabilities…</button>
+        ${share}
+        <button class="btn" id="drawer-endpoints" title="Per-endpoint layout: clusters, bindings and supported commands">Show endpoints…</button>
+        ${haUrl ? `<a class="btn" href="${escapeHtml(haUrl)}" target="_blank" rel="noopener" title="Opens this device's page in Home Assistant, in a new tab">Open in Home Assistant</a>` : ""}
+      </div>`;
+    const on = (sel, fn) => {
+      const el = this._q(sel);
+      if (el) el.addEventListener("click", fn);
+    };
+    this._qa("#drawer-body .drawer-dev-link").forEach((a) =>
+      a.addEventListener("click", (e) => {
+        e.preventDefault();
+        this._openDeviceDrawer(this._devices.find((x) => x.ieee === a.dataset.ieee));
+      })
+    );
+    on("#drawer-control-lights", () => this._openGroupFlow(d));
+    const showBindings = (e) => {
+      if (e) e.preventDefault();
+      this._setTableDeviceFilter(d.ieee);
+      this._switchView("table");
+      this._closeDrawer();
+    };
+    on("#drawer-show-bindings", showBindings);
+    on("#drawer-problems-link", showBindings);
+    on("#drawer-rescan", async () => {
+      const btn = this._q("#drawer-rescan");
+      if (btn) {
+        btn.disabled = true;
+        btn.textContent = "Rescanning…";
+      }
+      try {
+        await this._rescanDeviceFull(d.ieee, { tries: this._retryCount });
+      } finally {
+        this._refreshDrawer();
+      }
+    });
+    on("#drawer-share", () => {
+      this._drawerShareOpen = !this._drawerShareOpen;
+      this._renderDrawer();
+    });
+    on("#drawer-share-cancel", () => {
+      this._drawerShareOpen = false;
+      this._renderDrawer();
+    });
+    on("#drawer-share-start", () => {
+      this._drawerShareOpen = false;
+      this._renderDrawer();
+      this._openDeviceExplodedView(d, { checkAll: true });
+    });
+    on("#drawer-endpoints", () => this._openDeviceExplodedView(d));
+  }
+
+  /** Runs "Check supported commands" on every endpoint in turn. */
+  async _checkAllEndpoints(d) {
+    if (this._checkingAll) return;
+    this._checkingAll = d.ieee;
+    try {
+      for (const ep of this._deviceEndpointsIncludingGP(d)) {
+        if (!this._q("#dialog").classList.contains("open")) break;
+        if (this._explodedDeviceIeee && normIeee(this._explodedDeviceIeee) !== normIeee(d.ieee)) break;
+        const cur = this._commandScans.get(this._commandScanKey(d.ieee, ep));
+        if (cur && cur.status === "done") continue;
+        await this._checkEndpointCommands(d, ep);
+      }
+    } finally {
+      this._checkingAll = null;
+      this._rerenderExplodedFor(d);
+    }
+  }
+
   // Exploded device view dialog — triggered from the Devices tab. Scans the
   // one device on demand (same binds_get + cluster-scan calls the rest of
   // the card already makes against your own HA instance), then renders a
   // per-endpoint breakdown. No external lookups, nothing asked of the user.
   // -------------------------------------------------------------------
-  async _openDeviceExplodedView(d) {
+  async _openDeviceExplodedView(d, { checkAll = false } = {}) {
     this._shareDraft = null;
     const panel = this._q(".dialog-panel");
     if (panel) panel.classList.add("wide");
@@ -3775,6 +4152,7 @@ export class ZhaBindingMapCard extends HTMLElement {
     if (!this._q("#dialog").classList.contains("open")) return; // closed while scanning
     const fresh = this._devices.find((x) => x.ieee === d.ieee) || d;
     this._renderExplodedView(fresh);
+    if (checkAll) this._checkAllEndpoints(fresh);
   }
 
   _renderExplodedView(d) {
@@ -3803,8 +4181,18 @@ export class ZhaBindingMapCard extends HTMLElement {
            through the endpoint cards below to see which one is which.</p>`
       : "";
 
-    this._q("#dialog-title").textContent = this._deviceLabel(d);
+    this._q("#dialog-title").textContent = `Endpoints and clusters: ${this._deviceLabel(d)}`;
+    const epCount = this._deviceEndpointsIncludingGP(d).length;
+    const checkAllBtn = epCount
+      ? `<div class="ep-check-all">${
+          this._checkingAll && normIeee(this._checkingAll) === normIeee(d.ieee)
+            ? `<span class="muted">Checking each endpoint's supported commands in turn…</span>`
+            : `<button class="btn btn-small" id="ep-check-all" title="Runs Check supported commands on every endpoint, one after another">Check all endpoints</button>
+               <span class="muted">then share the result with the community database below.</span>`
+        }</div>`
+      : "";
     this._q("#dialog-body").innerHTML = `
+      ${checkAllBtn}
       <label class="row ep-photo-toggle">
         <input type="checkbox" id="ep-show-photos" ${this._showDevicePhotos ? "checked" : ""}>
         Show device photo (fetches from zigbee2mqtt.io, needs internet access)
@@ -3832,6 +4220,8 @@ export class ZhaBindingMapCard extends HTMLElement {
         <button class="btn" id="explode-close">Close</button>
       </div>`;
     this._q("#explode-close").addEventListener("click", () => this._closeDialog());
+    const checkAll = this._q("#ep-check-all");
+    if (checkAll) checkAll.addEventListener("click", () => this._checkAllEndpoints(d));
     const ctl = this._q("#explode-control-lights");
     if (ctl) ctl.addEventListener("click", () => this._openGroupFlow(d));
     this._q("#ep-show-photos").addEventListener("change", (e) => {
@@ -5015,7 +5405,7 @@ export class ZhaBindingMapCard extends HTMLElement {
           <td>${
             b.isGroup
               ? `${escapeHtml(r.targetLabel)} (group)`
-              : `<a href="#" class="src-link tgt-link" data-ieee="${escapeHtml(b.targetIeee)}" title="Show bindings involving this device">${escapeHtml(
+              : `<a href="#" class="src-link tgt-link" data-ieee="${escapeHtml(b.targetIeee)}" title="Open this device">${escapeHtml(
                   r.targetLabel
                 )}</a> <span class="muted">(ep ${b.targetEndpoint})</span>`
           }</td>
@@ -5042,11 +5432,16 @@ export class ZhaBindingMapCard extends HTMLElement {
       btn.addEventListener("click", () => this._confirmForgetSources([btn.dataset.forget]));
     });
 
-    this._qa(".src-link").forEach((el) => {
+    this._qa("#table-body .src-link").forEach((el) => {
       el.addEventListener("click", (e) => {
         e.preventDefault();
-        this._setTableDeviceFilter(el.dataset.ieee);
-        this._renderTable();
+        const dev = this._devices.find((x) => normIeee(x.ieee) === normIeee(el.dataset.ieee));
+        if (dev) this._openDeviceDrawer(dev);
+        else {
+          // A device no longer in ZHA has no drawer; filter to its bindings instead.
+          this._setTableDeviceFilter(el.dataset.ieee);
+          this._renderTable();
+        }
       });
     });
 
@@ -5492,7 +5887,7 @@ export class ZhaBindingMapCard extends HTMLElement {
     if (!wrap) return;
     this._updateSortIndicators("#view-devices", this._devicesSort);
     if (!this._loaded) {
-      wrap.innerHTML = `<tr><td colspan="9" class="muted">Loading devices…</td></tr>`;
+      wrap.innerHTML = `<tr><td colspan="8" class="muted">Loading devices…</td></tr>`;
       return;
     }
     const search = (this._filters.search || "").trim();
@@ -5516,8 +5911,8 @@ export class ZhaBindingMapCard extends HTMLElement {
 
     if (!rows.length) {
       wrap.innerHTML = search
-        ? `<tr><td colspan="9" class="muted">No devices match “${escapeHtml(search)}”. Clear the search box to see all ${this._devices.length} devices.</td></tr>`
-        : `<tr><td colspan="9" class="muted">No devices found.</td></tr>`;
+        ? `<tr><td colspan="8" class="muted">No devices match “${escapeHtml(search)}”. Clear the search box to see all ${this._devices.length} devices.</td></tr>`
+        : `<tr><td colspan="8" class="muted">No devices found.</td></tr>`;
       return;
     }
     wrap.innerHTML = rows
@@ -5532,9 +5927,6 @@ export class ZhaBindingMapCard extends HTMLElement {
           <td>${escapeHtml(r.power)}</td>
           <td>${r.count}</td>
           <td>${r.scanHtml}</td>
-          <td><button class="btn btn-small explode-btn" data-ieee="${escapeHtml(
-            r.device.ieee
-          )}">Explode</button></td>
         </tr>`
       )
       .join("");
@@ -5542,14 +5934,7 @@ export class ZhaBindingMapCard extends HTMLElement {
     this._qa("#devices-table-body .src-link").forEach((el) => {
       el.addEventListener("click", (e) => {
         e.preventDefault();
-        this._setTableDeviceFilter(el.dataset.ieee);
-        this._switchView("table");
-      });
-    });
-    this._qa("#devices-table-body .explode-btn").forEach((btn) => {
-      btn.addEventListener("click", () => {
-        const device = this._devices.find((x) => x.ieee === btn.dataset.ieee);
-        if (device) this._openDeviceExplodedView(device);
+        this._openDeviceDrawer(this._devices.find((x) => x.ieee === el.dataset.ieee));
       });
     });
     this._qa("#devices-table-body .scan-cell-btn").forEach((btn) => {
@@ -7069,6 +7454,8 @@ export class ZhaBindingMapCard extends HTMLElement {
     el.innerHTML = `
       <div class="advanced-form-wrap">
         <div class="advanced-form">
+          <p class="adv-guided-hint">Want a remote to control some lights? <button type="button" class="btn btn-small" id="adv-open-guided">Control lights with a remote…</button>
+            does it step by step, including creating the group.</p>
           <p class="muted">Direct access to <code>zha_toolkit.bind_ieee</code> / <code>binds_remove_all</code> /
             <code>bind_group</code> for edge cases (specific endpoints, clusters not auto-detected, etc).</p>
           <label>Source device
@@ -7126,6 +7513,7 @@ export class ZhaBindingMapCard extends HTMLElement {
 
     this._q("#adv-target-type").addEventListener("change", (e) => this._advApplyTargetType(e.target.value));
 
+    this._q("#adv-open-guided").addEventListener("click", () => this._openGroupFlowPickRemote());
     this._q("#adv-source").addEventListener("change", () => this._advPopulateSourceEndpoints());
     this._q("#adv-src-ep").addEventListener("change", () => {
       this._advPopulateClusterOptions();

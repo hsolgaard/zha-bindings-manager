@@ -227,6 +227,41 @@ a.btn { display:inline-block; text-decoration:none; }
 .dialog-actions { display:flex; gap:8px; margin-top:14px; }
 .detail-table td { padding: 4px 8px; font-size: 0.9em; }
 
+/* Device drawer (1.4.0): side panel opened by clicking a device anywhere. */
+.drawer { position: fixed; top:0; right:0; bottom:0; width: min(400px, 100vw); z-index: 15;
+  background: var(--card-background-color, #fff); color: var(--primary-text-color);
+  box-shadow: -6px 0 24px rgba(0,0,0,0.25); transform: translateX(105%); transition: transform 0.18s ease-out;
+  display:flex; flex-direction:column; }
+.drawer.open { transform: none; }
+.drawer-header { display:flex; align-items:center; justify-content:space-between; gap:8px; font-weight:600;
+  padding: 14px 16px 10px; border-bottom: 1px solid var(--divider-color, rgba(0,0,0,0.12)); }
+.drawer-body { overflow-y:auto; padding: 12px 16px 24px; font-size: 0.92em; }
+.drawer-head { display:flex; gap:12px; align-items:flex-start; }
+.drawer-photo { width: 84px; height: 84px; object-fit: contain; flex: 0 0 auto; border-radius: 8px;
+  background: var(--secondary-background-color, #f5f5f5); }
+.drawer-tags { display:flex; flex-wrap:wrap; gap:4px; margin-bottom:4px; }
+.drawer-tags .chip { cursor: default; }
+.drawer-facts td:first-child { color: var(--secondary-text-color); white-space: nowrap; }
+.drawer-facts .scan-cell { display:block; }
+.drawer-section { margin-top: 16px; }
+.drawer-section-title { font-weight: 600; margin-bottom: 6px; }
+.drawer-rel { list-style:none; padding:0; margin:0; display:flex; flex-direction:column; gap:6px; }
+.drawer-rel li { display:flex; flex-wrap:wrap; gap:4px 8px; align-items:baseline; }
+.drawer-clusters { font-size: 0.85em; }
+.drawer-empty { margin: 0; }
+.drawer-problems ul { margin: 0 0 6px; padding-left: 18px; }
+.drawer-problems .health-error { color: var(--error-color, #db4437); }
+.drawer-problems .health-warning { color: var(--warning-color, #f4b400); }
+.drawer-actions { display:flex; flex-direction:column; align-items:stretch; gap:8px; }
+.drawer-actions .btn { text-align:center; text-decoration:none; }
+.drawer-share { border: 1px solid var(--divider-color, rgba(0,0,0,0.12)); border-radius: 8px; padding: 8px 12px; }
+.drawer-share ol { padding-left: 18px; margin: 6px 0; }
+.drawer-share li { margin-bottom: 4px; }
+.ep-check-all { display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin-bottom:8px; }
+.flow-group-choice label { display:flex; align-items:center; gap:6px; flex-wrap:wrap; }
+.flow-group-choice input[type="text"], .flow-group-choice select { flex: 1 1 180px; min-width: 0; }
+.adv-guided-hint { display:flex; align-items:center; gap:6px; flex-wrap:wrap; }
+
 /* Exploded device view — per-endpoint cards inside the (widened) dialog. */
 .ep-photo-toggle { font-size:0.82em; color: var(--secondary-text-color); margin-bottom:10px; }
 .ep-device-header { display:flex; align-items:flex-start; gap:14px; }

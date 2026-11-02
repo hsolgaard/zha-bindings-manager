@@ -13,6 +13,7 @@ export const SHELL_HTML = `
     </div>
     <input id="search" class="search" placeholder="Search devices…">
     <span id="storage-mode-badge" class="storage-mode-badge muted"></span>
+    <button class="btn" id="btn-control-lights" title="Guided setup: pick a remote and the lights it should control. The card makes or reuses a ZHA group, binds the remote to it and checks it works.">Control lights with a remote…</button>
     <button class="btn" id="btn-refresh-devices" title="Reload device list">⟳ Devices</button>
     <button class="btn btn-primary" id="btn-scan" title="Read current bindings from your Zigbee devices">Scan bindings</button>
     <button class="btn btn-small" id="btn-rescan-settings" title="Scan settings">⚙</button>
@@ -100,7 +101,7 @@ export const SHELL_HTML = `
       <div id="graph-empty" class="graph-empty"></div>
     </div>
     <p class="hint">Drag a device onto another device (or onto a group) to create a binding. Click a line to inspect / remove it.</p>
-    <p id="graph-role-legend" class="hint" style="display:none">🕹 badge = this device also has its own Light/Switch/Cover/Fan role, in addition to what's shown by the edges here (e.g. a wired/local load alongside a Zigbee-bound one) — click the device to see the full per-endpoint breakdown.</p>
+    <p id="graph-role-legend" class="hint" style="display:none">🕹 badge = this device also has its own Light/Switch/Cover/Fan role, in addition to what's shown by the edges here (e.g. a wired/local load alongside a Zigbee-bound one) — click the device, then Show endpoints…, to see the per-endpoint breakdown.</p>
   </div>
 
   <div id="view-table" class="view">
@@ -151,7 +152,6 @@ export const SHELL_HTML = `
         <th data-sort="power">Power</th>
         <th data-sort="count">Bindings</th>
         <th data-sort="scanRank">Last scan</th>
-        <th>Endpoints</th>
       </tr></thead>
       <tbody id="devices-table-body"></tbody>
     </table>
@@ -183,12 +183,20 @@ export const SHELL_HTML = `
       </div>
     </div>
     <p class="hint">Drop an image into your <code>www/</code> folder (e.g. <code>config/www/floorplan.png</code>) and reference it above as <code>/local/floorplan.png</code>. Drag a device from the list onto its spot on the plan to place it; drag a placed device to move it; click a placed device (without dragging) to send it back to the list.</p>
-    <p id="fp-role-legend" class="hint" style="display:none">🕹 badge = this device also has its own Light/Switch/Cover/Fan role, in addition to what's shown by the edges here (e.g. a wired/local load alongside a Zigbee-bound one) — click the device to see the full per-endpoint breakdown.</p>
+    <p id="fp-role-legend" class="hint" style="display:none">🕹 badge = this device also has its own Light/Switch/Cover/Fan role, in addition to what's shown by the edges here (e.g. a wired/local load alongside a Zigbee-bound one) — click the device, then Show endpoints…, to see the per-endpoint breakdown.</p>
   </div>
 
   <div id="view-capexplorer" class="view"></div>
 
   <div id="view-advanced" class="view"></div>
+
+  <div id="drawer" class="drawer" aria-hidden="true">
+    <div class="drawer-header">
+      <span id="drawer-title"></span>
+      <button id="drawer-close" class="btn btn-small" title="Close">✕</button>
+    </div>
+    <div id="drawer-body" class="drawer-body"></div>
+  </div>
 
   <div id="dialog" class="dialog">
     <div id="dialog-backdrop" class="dialog-backdrop"></div>

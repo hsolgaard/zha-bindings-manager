@@ -3,6 +3,18 @@
 All notable changes to ZHA Bindings Manager are documented here.
 
 
+## [1.4.1]
+
+### Security
+
+- **Saved scan data is validated when it's loaded.** Every saved binding is rebuilt from strictly typed fields
+  (whole-number endpoints and cluster ids, colon-hex addresses, group ids) and anything malformed is dropped, and the
+  remaining binding fields shown in the Bindings table and dialogs are escaped. Before, a crafted saved binding could
+  put markup into the page. Together with the
+  [integration 1.4.1](https://github.com/hsolgaard/zha-bindings-manager-integration/releases/tag/v1.4.1), which now
+  only lets admins save shared data, this closes a way for a non-admin user to run script in an admin's browser.
+  Thanks to Franck Nijhof (@frenck) for spotting it in the HACS review.
+
 ## [1.4.0]
 
 ### Added

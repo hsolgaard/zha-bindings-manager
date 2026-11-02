@@ -518,8 +518,9 @@ const storageChecks = [
     "_saveScanState/_loadScanState round-trip a failed device through the real bundle",
     async () => {
       card._config = { id: "smoketest" };
-      card._bindings = new Map([["dev1", [{ id: "b1" }]]]);
-      card._scanFailures = new Set(["dev1"]);
+      const b1 = { id: `${REMOTE}|1|6|${LIGHT}:1`, sourceIeee: REMOTE, sourceEndpoint: 1, clusterId: 6, isGroup: false, targetIeee: LIGHT, targetEndpoint: 1, groupId: null };
+      card._bindings = new Map([[REMOTE, [b1]]]);
+      card._scanFailures = new Set([REMOTE]);
       card._scanPartial = new Map();
       await card._saveScanState();
 
@@ -530,10 +531,24 @@ const storageChecks = [
       await card._loadScanState();
 
       return (
-        card._bindings.get("dev1") &&
-        card._bindings.get("dev1")[0].id === "b1" &&
-        card._scanFailures.has("dev1")
+        card._bindings.get(REMOTE) &&
+        card._bindings.get(REMOTE)[0].id === b1.id &&
+        card._scanFailures.has(REMOTE)
       );
+    },
+  ],
+  [
+    "1.4.1: a stored binding carrying markup is dropped on load, never rendered",
+    async () => {
+      card._config = { id: "smoketest-xss" };
+      const evil = '"><img src=x onerror=alert(1)>';
+      await card._storage.setScanState("smoketest-xss", {
+        last_complete: { savedAt: evil, bindings: { [REMOTE]: [{ id: evil, sourceIeee: REMOTE, sourceEndpoint: evil, clusterId: 6, isGroup: false, targetIeee: LIGHT, targetEndpoint: 1 }] } },
+        latest: { failures: [evil], partial: { [evil]: 1 } },
+      });
+      await card._loadScanState();
+      const flat = JSON.stringify([...card._bindings.entries()]) + [...card._scanFailures].join() + card._lastScanAt;
+      return !flat.includes("<img") && card._bindings.get(REMOTE).length === 0;
     },
   ],
   // v0.32.3: floor plan, device positions, filters, and other per-card

@@ -21,7 +21,7 @@
  * zha_toolkit MUST be installed (via HACS) and working for bind/unbind/scan
  * to function. See README.md for details.
  *
- * Version: 1.4.0
+ * Version: 1.4.1
  */
 (() => {
   // src/capexplorer-constants.js
@@ -78,7 +78,7 @@
 
   // src/constants.js
   var ZTK_DOMAIN = "zha_toolkit";
-  var CARD_VERSION = "1.4.0";
+  var CARD_VERSION = "1.4.1";
   var CHANGELOG_URL = "https://github.com/hsolgaard/zha-bindings-manager/blob/main/CHANGELOG.md";
   var DEFAULT_BINDABLE_OUT_CLUSTERS = [5, 6, 8, 258, 768];
   var MEMBERSHIP_EDGE_COLOR = "#8e24aa";
@@ -614,6 +614,58 @@
       }
     }
     return { entries: out, total };
+  }
+  var IEEE_RE = /^[0-9a-f]{2}(:[0-9a-f]{2}){7}$/;
+  var SAFE_ID_RE = /^[0-9A-Za-z:|]{1,120}$/;
+  function isIeee(value) {
+    return typeof value === "string" && IEEE_RE.test(value.toLowerCase());
+  }
+  function intIn(value, max) {
+    const n = typeof value === "string" && /^0x[0-9a-f]+$/i.test(value) ? parseInt(value, 16) : Number(value);
+    return Number.isInteger(n) && n >= 0 && n <= max ? n : null;
+  }
+  function sanitizeStoredBinding(b, sourceKey) {
+    if (!b || typeof b !== "object") return null;
+    const sourceIeee = normIeee(typeof b.sourceIeee === "string" ? b.sourceIeee : sourceKey);
+    if (!isIeee(sourceIeee)) return null;
+    const sourceEndpoint = intIn(b.sourceEndpoint, 255);
+    const clusterId = intIn(b.clusterId, 65535);
+    if (sourceEndpoint == null || clusterId == null) return null;
+    const isGroup = b.isGroup === true;
+    let targetIeee = null;
+    let targetEndpoint = null;
+    let groupId = null;
+    if (isGroup) {
+      groupId = intIn(b.groupId, 65535);
+      if (groupId == null) return null;
+    } else {
+      targetIeee = normIeee(typeof b.targetIeee === "string" ? b.targetIeee : "");
+      targetEndpoint = intIn(b.targetEndpoint, 255);
+      if (!isIeee(targetIeee) || targetEndpoint == null) return null;
+    }
+    const rebuilt = `${sourceIeee}|${sourceEndpoint}|${clusterId}|${isGroup ? "g" + groupId : `${targetIeee}:${targetEndpoint}`}`;
+    const id = typeof b.id === "string" && SAFE_ID_RE.test(b.id) ? b.id : rebuilt;
+    return { id, sourceIeee, sourceEndpoint, clusterId, isGroup, targetIeee, targetEndpoint, groupId };
+  }
+  function sanitizeStoredBindings(raw) {
+    const out = /* @__PURE__ */ new Map();
+    let dropped = 0;
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) return { bindings: out, dropped };
+    for (const [key, list2] of Object.entries(raw)) {
+      const ieee = normIeee(key);
+      if (!isIeee(ieee) || !Array.isArray(list2)) {
+        dropped += Array.isArray(list2) ? list2.length : 1;
+        continue;
+      }
+      const clean = [];
+      for (const b of list2) {
+        const s = sanitizeStoredBinding(b, ieee);
+        if (s) clean.push(s);
+        else dropped++;
+      }
+      out.set(ieee, clean);
+    }
+    return { bindings: out, dropped };
   }
 
   // src/api-client.js
@@ -3423,14 +3475,17 @@ a.btn { display:inline-block; text-decoration:none; }
       try {
         const state = await this._storage.getScanState(this._config.id);
         if (state.last_complete && state.last_complete.bindings) {
-          this._bindings = new Map(Object.entries(state.last_complete.bindings));
-          this._lastScanAt = state.last_complete.savedAt || null;
+          const { bindings, dropped } = sanitizeStoredBindings(state.last_complete.bindings);
+          if (dropped) console.warn(`[ZHA Bindings Manager] ignored ${dropped} malformed saved binding(s)`);
+          this._bindings = bindings;
+          const savedAt = state.last_complete.savedAt;
+          this._lastScanAt = typeof savedAt === "string" && !Number.isNaN(Date.parse(savedAt)) ? savedAt : null;
         }
-        this._scanFailures = new Set(
-          state.latest && state.latest.failures || []
-        );
+        const failures = state.latest && Array.isArray(state.latest.failures) ? state.latest.failures : [];
+        this._scanFailures = new Set(failures.filter(isIeee).map(normIeee));
+        const partial = state.latest && state.latest.partial || {};
         this._scanPartial = new Map(
-          Object.entries(state.latest && state.latest.partial || {})
+          typeof partial === "object" && !Array.isArray(partial) ? Object.entries(partial).filter(([k]) => isIeee(k)).map(([k, v]) => [normIeee(k), v]) : []
         );
       } catch (e) {
       }
@@ -3774,7 +3829,7 @@ a.btn { display:inline-block; text-decoration:none; }
     }
     /** Plain-text "Source (ep 1) → Target (ep 2), On/Off" for messages. */
     _describeChange(p) {
-      const src = `${this._ieeeLabel(p.sourceIeee, { plain: true })} (ep ${p.sourceEndpoint})`;
+      const src = `${this._ieeeLabel(p.sourceIeee, { plain: true })} (ep ${escapeHtml(String(p.sourceEndpoint))})`;
       let dst;
       if (p.target.isGroup) {
         const g = this._groups.find((x) => x.group_id === p.target.groupId);
@@ -6963,13 +7018,13 @@ a.btn { display:inline-block; text-decoration:none; }
       const badges = [];
       this._groupBindingsByKey(rel.self, (b) => `${b.targetIeee}:${b.targetEndpoint}`).forEach(
         ({ binding: b, clusters }) => {
-          const main = `Self-bound${b.targetEndpoint !== ep ? ` (ep ${b.targetEndpoint})` : ""}`;
+          const main = `Self-bound${b.targetEndpoint !== ep ? ` (ep ${escapeHtml(String(b.targetEndpoint))})` : ""}`;
           badges.push(badge("ep-badge-self", main, clusters));
         }
       );
       this._groupBindingsByKey(rel.controlsDevice, (b) => `${b.targetIeee}:${b.targetEndpoint}`).forEach(
         ({ binding: b, clusters }) => {
-          const main = `Controls ${escapeHtml(this._targetDeviceLabel(b.targetIeee))} (ep ${b.targetEndpoint})`;
+          const main = `Controls ${escapeHtml(this._targetDeviceLabel(b.targetIeee))} (ep ${escapeHtml(String(b.targetEndpoint))})`;
           badges.push(badge("ep-badge-out", main, clusters));
         }
       );
@@ -6994,7 +7049,7 @@ a.btn { display:inline-block; text-decoration:none; }
         rel.unknown,
         (b) => b.isGroup ? `group:${b.groupId}` : `${b.targetIeee}:${b.targetEndpoint}`
       ).forEach(({ binding: b, clusters }) => {
-        const main = b.isGroup ? `Unclassified binding to group ${escapeHtml(this._groupLabel(b.groupId))}` : `Unclassified binding to ${escapeHtml(this._targetDeviceLabel(b.targetIeee))} (ep ${b.targetEndpoint})`;
+        const main = b.isGroup ? `Unclassified binding to group ${escapeHtml(this._groupLabel(b.groupId))}` : `Unclassified binding to ${escapeHtml(this._targetDeviceLabel(b.targetIeee))} (ep ${escapeHtml(String(b.targetEndpoint))})`;
         badges.push(badge("ep-badge-unknown", main, clusters));
       });
       if (!badges.length) badges.push(`<span class="ep-badge ep-badge-reporting">Reporting only</span>`);
@@ -7045,8 +7100,8 @@ a.btn { display:inline-block; text-decoration:none; }
       }[cls];
       this._q("#dialog-body").innerHTML = `
       <table class="detail-table">
-        <tr><td>Source</td><td>${escapeHtml(sourceLabel)} (ep ${binding.sourceEndpoint})</td></tr>
-        <tr><td>Target</td><td>${escapeHtml(targetLabel)}${binding.isGroup ? "" : ` (ep ${binding.targetEndpoint})`}</td></tr>
+        <tr><td>Source</td><td>${escapeHtml(sourceLabel)} (ep ${escapeHtml(String(binding.sourceEndpoint))})</td></tr>
+        <tr><td>Target</td><td>${escapeHtml(targetLabel)}${binding.isGroup ? "" : ` (ep ${escapeHtml(String(binding.targetEndpoint))})`}</td></tr>
         <tr><td>Cluster</td><td>${clusterName(binding.clusterId)} (${hex4(binding.clusterId)})</td></tr>
         <tr><td>Type</td><td>${typeText}</td></tr>
       </table>
@@ -7214,7 +7269,7 @@ a.btn { display:inline-block; text-decoration:none; }
         const target = b.isGroup ? this._groups.find((g) => g.group_id === b.groupId) : this._devices.find((d) => d.ieee === b.targetIeee);
         const known = source ? null : this._knownDeviceInfo(b.sourceIeee);
         const sourceLabel = source ? this._deviceLabel(source) : this._ieeeLabel(b.sourceIeee);
-        const targetLabel = b.isGroup ? target && target.name || `Group ${b.groupId}` : target ? this._deviceLabel(target) : this._ieeeLabel(b.targetIeee);
+        const targetLabel = b.isGroup ? target && target.name || `Group ${escapeHtml(String(b.groupId))}` : target ? this._deviceLabel(target) : this._ieeeLabel(b.targetIeee);
         const typeLabel = source ? this._devicePrimaryType(source) : "\u2014";
         const typeFull = source ? this._deviceTypeTags(source).join(", ") : "";
         const areaLabel = source ? this._areaName(source.area_id) : known && known.area_id ? this._areaName(known.area_id) : "\u2014";
@@ -7268,11 +7323,11 @@ a.btn { display:inline-block; text-decoration:none; }
         const b = r.binding;
         const h = r.health;
         return `
-        <tr data-id="${b.id}">
+        <tr data-id="${escapeHtml(b.id)}">
           ${filtered ? `<td class="dir-cell dir-${r.direction}">${escapeHtml(directionLabel(r.direction))}</td>` : ""}
           <td><a href="#" class="src-link" data-ieee="${escapeHtml(b.sourceIeee)}">${escapeHtml(
           r.sourceLabel
-        )}</a> <span class="muted">(ep ${b.sourceEndpoint})</span></td>
+        )}</a> <span class="muted">(ep ${escapeHtml(String(b.sourceEndpoint))})</span></td>
           <td title="${escapeHtml(r.typeFull)}">${escapeHtml(r.typeLabel)}</td>
           <td>${escapeHtml(r.areaLabel)}</td>
           <td>${escapeHtml(r.manModel)}</td>
@@ -7281,11 +7336,11 @@ a.btn { display:inline-block; text-decoration:none; }
         )}</td>
           <td>${b.isGroup ? `${escapeHtml(r.targetLabel)} (group)` : `<a href="#" class="src-link tgt-link" data-ieee="${escapeHtml(b.targetIeee)}" title="Open this device">${escapeHtml(
           r.targetLabel
-        )}</a> <span class="muted">(ep ${b.targetEndpoint})</span>`}</td>
-          <td><button class="health-badge health-${h.level}" data-health="${b.id}" title="${escapeHtml(
+        )}</a> <span class="muted">(ep ${escapeHtml(String(b.targetEndpoint))})</span>`}</td>
+          <td><button class="health-badge health-${h.level}" data-health="${escapeHtml(b.id)}" title="${escapeHtml(
           h.message
         )}">${HEALTH_ICON[h.level]} ${escapeHtml(HEALTH_LABEL[h.level])}</button></td>
-          <td>${h.code === "source_missing" ? `<button class="btn btn-small" data-forget="${escapeHtml(b.sourceIeee)}" title="Remove the leftover saved data for this removed device. Nothing is sent to Zigbee.">Forget</button>` : `<button class="btn btn-small btn-danger" data-unbind="${b.id}">Unbind</button>`}</td>
+          <td>${h.code === "source_missing" ? `<button class="btn btn-small" data-forget="${escapeHtml(b.sourceIeee)}" title="Remove the leftover saved data for this removed device. Nothing is sent to Zigbee.">Forget</button>` : `<button class="btn btn-small btn-danger" data-unbind="${escapeHtml(b.id)}">Unbind</button>`}</td>
         </tr>`;
       }).join("");
       this._qa("[data-unbind]").forEach((btn) => {
@@ -7407,7 +7462,7 @@ a.btn { display:inline-block; text-decoration:none; }
       if (!dead.length) return;
       const rowsHtml = dead.map((b) => {
         const src = this._devices.find((d) => normIeee(d.ieee) === normIeee(b.sourceIeee));
-        return `<tr><td>${escapeHtml(src ? this._deviceLabel(src) : b.sourceIeee)} (ep ${b.sourceEndpoint})</td><td>${escapeHtml(
+        return `<tr><td>${escapeHtml(src ? this._deviceLabel(src) : b.sourceIeee)} (ep ${escapeHtml(String(b.sourceEndpoint))})</td><td>${escapeHtml(
           clusterName(b.clusterId)
         )}</td><td>${escapeHtml(this._ieeeLabel(b.targetIeee, { plain: true }))} <code>${escapeHtml(b.targetIeee)}</code></td></tr>`;
       }).join("");
@@ -7510,9 +7565,9 @@ a.btn { display:inline-block; text-decoration:none; }
       ${health.recommendation ? `<p><strong>Next steps:</strong> ${escapeHtml(health.recommendation)}</p>` : ""}`;
       this._q("#dialog-body").innerHTML = `
       <table class="detail-table">
-        <tr><td>Binding</td><td>${escapeHtml(sourceLabel)} (ep ${binding.sourceEndpoint}) \u2192 ${escapeHtml(
+        <tr><td>Binding</td><td>${escapeHtml(sourceLabel)} (ep ${escapeHtml(String(binding.sourceEndpoint))}) \u2192 ${escapeHtml(
         targetLabel
-      )}${binding.isGroup ? " (group)" : ` (ep ${binding.targetEndpoint})`}</td></tr>
+      )}${binding.isGroup ? " (group)" : ` (ep ${escapeHtml(String(binding.targetEndpoint))})`}</td></tr>
         <tr><td>Cluster</td><td>${clusterName(binding.clusterId)} (${hex4(binding.clusterId)})</td></tr>
       </table>
       ${detailHtml}
@@ -7570,7 +7625,7 @@ a.btn { display:inline-block; text-decoration:none; }
           model: source ? source.model || "" : "",
           cluster: clusterName(b.clusterId),
           cluster_id: hex4(b.clusterId),
-          target_name: b.isGroup ? target && target.name || `Group ${b.groupId}` : target ? this._deviceLabel(target) : "",
+          target_name: b.isGroup ? target && target.name || `Group ${escapeHtml(String(b.groupId))}` : target ? this._deviceLabel(target) : "",
           target_ieee_or_group: b.isGroup ? `group:${b.groupId}` : b.targetIeee,
           target_endpoint: b.isGroup ? "" : b.targetEndpoint,
           health_status: HEALTH_LABEL[health.level] || health.level,
@@ -9366,11 +9421,11 @@ a.btn { display:inline-block; text-decoration:none; }
             label = `Group: ${escapeHtml(g ? g.name : `#${b.groupId}`)}`;
           } else {
             const d = this._devices.find((dv) => dv.ieee === b.targetIeee);
-            label = `${escapeHtml(d ? this._deviceLabel(d) : b.targetIeee)} <span class="muted">(ep ${b.targetEndpoint})</span>`;
+            label = `${escapeHtml(d ? this._deviceLabel(d) : b.targetIeee)} <span class="muted">(ep ${escapeHtml(String(b.targetEndpoint))})</span>`;
           }
         } else {
           const d = this._devices.find((dv) => dv.ieee === b.sourceIeee);
-          label = `${escapeHtml(d ? this._deviceLabel(d) : b.sourceIeee)} <span class="muted">(ep ${b.sourceEndpoint})</span>`;
+          label = `${escapeHtml(d ? this._deviceLabel(d) : b.sourceIeee)} <span class="muted">(ep ${escapeHtml(String(b.sourceEndpoint))})</span>`;
         }
         return `<div class="advanced-binding-row">
           <span class="dot" style="background:${clusterColor(b.clusterId)}"></span>

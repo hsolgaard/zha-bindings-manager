@@ -21,7 +21,7 @@
  * zha_toolkit MUST be installed (via HACS) and working for bind/unbind/scan
  * to function. See README.md for details.
  *
- * Version: 1.4.1
+ * Version: 1.4.2
  */
 (() => {
   // src/capexplorer-constants.js
@@ -78,7 +78,7 @@
 
   // src/constants.js
   var ZTK_DOMAIN = "zha_toolkit";
-  var CARD_VERSION = "1.4.1";
+  var CARD_VERSION = "1.4.2";
   var CHANGELOG_URL = "https://github.com/hsolgaard/zha-bindings-manager/blob/main/CHANGELOG.md";
   var DEFAULT_BINDABLE_OUT_CLUSTERS = [5, 6, 8, 258, 768];
   var MEMBERSHIP_EDGE_COLOR = "#8e24aa";
@@ -6137,9 +6137,20 @@ a.btn { display:inline-block; text-decoration:none; }
         el.classList.add("open");
         el.setAttribute("aria-hidden", "false");
       }
-      if (!this._clusterCache.get(d.ieee)) {
-        this._ensureClusters(d.ieee).catch(() => {
-        }).then(() => this._drawerIeee === d.ieee && this._renderDrawer());
+      const id = normIeee(d.ieee);
+      const groupIds = new Set(
+        this._groups.filter((g) => (g.members || []).some((m) => m.device && normIeee(m.device.ieee) === id)).map((g) => Number(g.group_id))
+      );
+      const sources = /* @__PURE__ */ new Set([d.ieee]);
+      for (const b of this._rawBindings()) {
+        if (!b.isGroup && normIeee(b.targetIeee) === id || b.isGroup && groupIds.has(Number(b.groupId))) sources.add(b.sourceIeee);
+      }
+      const missing = [...sources].filter((ieee) => !this._clusterCache.get(ieee));
+      if (missing.length) {
+        Promise.all(missing.map((ieee) => this._ensureClusters(ieee).catch(() => {
+        }))).then(
+          () => normIeee(this._drawerIeee || "") === id && this._renderDrawer()
+        );
       }
     }
     _closeDrawer() {
@@ -6160,7 +6171,12 @@ a.btn { display:inline-block; text-decoration:none; }
       const health = this._computeHealthMap();
       const controls = /* @__PURE__ */ new Map();
       const controlledBy = /* @__PURE__ */ new Map();
+      const reportsTo = /* @__PURE__ */ new Map();
       let coordinatorClusters = 0;
+      const isReporting = (b) => {
+        const cls = this._classifyBinding(b);
+        return cls === "reporting" || cls === "unknown" && Number(b.clusterId) === 0;
+      };
       const problems = [];
       const add = (map, key, entry, cluster) => {
         if (!map.has(key)) map.set(key, { ...entry, clusters: /* @__PURE__ */ new Set() });
@@ -6170,14 +6186,19 @@ a.btn { display:inline-block; text-decoration:none; }
         const h = health.get(b.id);
         const mine = normIeee(b.sourceIeee) === id || !b.isGroup && normIeee(b.targetIeee) === id;
         if (mine && h && (h.level === "error" || h.level === "warning")) problems.push(h);
-        if (normIeee(b.sourceIeee) === id) {
+        if (normIeee(b.sourceIeee) === id && isReporting(b)) {
+          if (normIeee(b.targetIeee || "") === coord) continue;
+          const key = b.isGroup ? `g:${b.groupId}` : `d:${normIeee(b.targetIeee)}`;
+          const t = b.isGroup ? null : this._devices.find((x) => normIeee(x.ieee) === normIeee(b.targetIeee));
+          add(reportsTo, key, { name: b.isGroup ? this._groupName(b.groupId) : t ? this._deviceLabel(t) : b.targetIeee }, b.clusterId);
+        } else if (normIeee(b.sourceIeee) === id) {
           if (b.isGroup) add(controls, `g:${b.groupId}`, { kind: "group", groupId: b.groupId, name: this._groupName(b.groupId) }, b.clusterId);
           else if (normIeee(b.targetIeee) === coord) coordinatorClusters++;
           else {
             const t = this._devices.find((x) => normIeee(x.ieee) === normIeee(b.targetIeee));
             add(controls, `d:${normIeee(b.targetIeee)}`, { kind: "device", ieee: b.targetIeee, name: t ? this._deviceLabel(t) : b.targetIeee, missing: !t }, b.clusterId);
           }
-        } else if (!b.isGroup && normIeee(b.targetIeee) === id) {
+        } else if (!b.isGroup && normIeee(b.targetIeee) === id && !isReporting(b)) {
           const src = this._devices.find((x) => normIeee(x.ieee) === normIeee(b.sourceIeee));
           add(controlledBy, `d:${normIeee(b.sourceIeee)}`, { kind: "device", ieee: b.sourceIeee, name: src ? this._deviceLabel(src) : b.sourceIeee, missing: !src }, b.clusterId);
         }
@@ -6185,7 +6206,7 @@ a.btn { display:inline-block; text-decoration:none; }
       const memberOf = this._groups.filter((g) => (g.members || []).some((m) => m.device && normIeee(m.device.ieee) === id));
       for (const g of memberOf) {
         for (const b of this._rawBindings()) {
-          if (b.isGroup && Number(b.groupId) === Number(g.group_id) && normIeee(b.sourceIeee) !== id) {
+          if (b.isGroup && Number(b.groupId) === Number(g.group_id) && normIeee(b.sourceIeee) !== id && !isReporting(b)) {
             const src = this._devices.find((x) => normIeee(x.ieee) === normIeee(b.sourceIeee));
             add(controlledBy, `d:${normIeee(b.sourceIeee)}`, { kind: "device", ieee: b.sourceIeee, name: src ? this._deviceLabel(src) : b.sourceIeee, missing: !src, via: g.name }, b.clusterId);
           }
@@ -6198,7 +6219,14 @@ a.btn { display:inline-block; text-decoration:none; }
         seen.add(k);
         return true;
       });
-      return { controls: [...controls.values()], controlledBy: [...controlledBy.values()], coordinatorClusters, memberOf, problems: uniqueProblems };
+      return {
+        controls: [...controls.values()],
+        controlledBy: [...controlledBy.values()],
+        reportsTo: [...reportsTo.values()],
+        coordinatorClusters,
+        memberOf,
+        problems: uniqueProblems
+      };
     }
     _drawerRelListHtml(list2, emptyText) {
       if (!list2.length) return `<p class="muted drawer-empty">${escapeHtml(emptyText)}</p>`;
@@ -6259,6 +6287,7 @@ a.btn { display:inline-block; text-decoration:none; }
         <div class="drawer-section-title">Controls</div>
         ${this._drawerRelListHtml(rel.controls, "Nothing: it isn't bound to another device or group.")}
         ${coordNote}
+        ${rel.reportsTo.length ? `<p class="hint">Reports its own state to ${rel.reportsTo.map((r) => `${escapeHtml(r.name)} (${escapeHtml([...r.clusters].map(clusterName).join(", "))})`).join(", ")}. That's not control, so it isn't listed above.</p>` : ""}
       </div>
       <div class="drawer-section">
         <div class="drawer-section-title">Controlled by</div>

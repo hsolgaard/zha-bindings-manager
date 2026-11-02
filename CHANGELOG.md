@@ -3,6 +3,16 @@
 All notable changes to ZHA Bindings Manager are documented here.
 
 
+## [1.4.2]
+
+### Fixed
+
+- **The device side panel only lists real control under Controls and Controlled by.** A binding on a cluster the
+  device only serves is the device reporting its own state (for example a light bound to its group on Basic), not
+  control. These were listed as if the device controlled the group, and as if a light controlled the other lights in
+  its group. They now appear as a separate "Reports its own state to…" line, and "Also bound to the coordinator…"
+  only counts clusters the device sends commands on.
+
 ## [1.4.1]
 
 ### Security

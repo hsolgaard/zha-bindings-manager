@@ -117,6 +117,62 @@ export async function fetchBehaviourDoc({ force = false } = {}) {
   return _behaviourMemory;
 }
 
+// Zigbee2MQTT model map (data/z2m-models.json), rebuilt weekly in the
+// community repo from Zigbee2MQTT's own device definitions. zigbee2mqtt.io
+// names its device photos by product code ("41E2PBSWMZ/356PB2MBTZ"), not by
+// the Zigbee model string the device reports ("CH2AX/SWITCH/1"), and the two
+// only match for about a third of devices. Shape:
+//   { models: { "<zigbee model>": "<product code>" },
+//     fingerprints: { "<manufacturer>|<zigbee model>": "<product code>" } }
+// Fingerprints are what make reused Tuya model strings (TS0601, TS011F, ...)
+// resolvable at all. A missing file just means "no map", not an error.
+const Z2M_MODELS_URL = `https://raw.githubusercontent.com/${CAPABILITY_DB_REPO}/main/data/z2m-models.json`;
+const Z2M_MODELS_CACHE_KEY = "zha-capability-explorer:z2m-models-cache";
+const EMPTY_Z2M_MAP = Object.freeze({ models: {}, fingerprints: {} });
+let _z2mMemory = null;
+
+export async function fetchZ2mModels({ force = false } = {}) {
+  if (!force && _z2mMemory) return _z2mMemory;
+  if (!force) {
+    try {
+      const raw = JSON.parse(localStorage.getItem(Z2M_MODELS_CACHE_KEY) || "null");
+      if (raw && raw.map && typeof raw.fetchedAt === "number" && Date.now() - raw.fetchedAt < CACHE_TTL_MS) {
+        _z2mMemory = raw.map;
+        return raw.map;
+      }
+    } catch (e) {
+      /* fall through to a fetch */
+    }
+  }
+  const res = await fetch(Z2M_MODELS_URL, { cache: "no-store" });
+  if (res.status === 404) return (_z2mMemory = EMPTY_Z2M_MAP);
+  if (!res.ok) throw new Error(`Failed to fetch the Zigbee2MQTT model map (HTTP ${res.status})`);
+  const doc = await res.json();
+  _z2mMemory = {
+    models: (doc && doc.models) || {},
+    fingerprints: (doc && doc.fingerprints) || {},
+  };
+  try {
+    localStorage.setItem(Z2M_MODELS_CACHE_KEY, JSON.stringify({ map: _z2mMemory, fetchedAt: Date.now() }));
+  } catch (e) {
+    /* cache is optional (the map is ~250 KB, so quota errors are possible) */
+  }
+  return _z2mMemory;
+}
+
+// Product code zigbee2mqtt.io uses for this device, or null when the map
+// doesn't know it. The exact manufacturer|model fingerprint wins over the
+// bare model, because a bare model string can be shared by unrelated
+// products. `ambiguous: true` (the caller's list of reused Tuya models)
+// means only a fingerprint match counts.
+export function z2mProductCode(map, manufacturer, model, { ambiguous = false } = {}) {
+  if (!map || !model) return null;
+  const fp = map.fingerprints && map.fingerprints[`${manufacturer || ""}|${model}`];
+  if (fp) return fp;
+  if (ambiguous) return null;
+  return (map.models && map.models[model]) || null;
+}
+
 // Groups the flat index by manufacturer_slug+model_slug — most of the UI
 // needs "everything known about this device" rather than one endpoint+
 // firmware row at a time.

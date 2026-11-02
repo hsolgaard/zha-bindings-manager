@@ -163,6 +163,24 @@ const checks = [
     "_deviceImageUrl: ambiguous Tuya model IDs get no lookup, not a confidently-wrong photo",
     () => card._deviceImageUrl({ model: "TS0601" }) === null,
   ],
+  [
+    "_deviceImageUrl: Z2M model map turns the Zigbee model into the product-code photo",
+    () => {
+      card._z2mModels = {
+        models: { "CH2AX/SWITCH/1": "41E2PBSWMZ/356PB2MBTZ" },
+        fingerprints: { "_TZ3000_j0ktmul1|TS0601": "AUT000069" },
+      };
+      const ok =
+        card._deviceImageUrl({ model: "CH2AX/SWITCH/1", manufacturer: "Schneider Electric" }).endsWith(
+          "/41E2PBSWMZ-356PB2MBTZ.png"
+        ) &&
+        card._deviceImageUrl({ model: "TS0601", manufacturer: "_TZ3000_j0ktmul1" }).endsWith("/AUT000069.png") &&
+        card._deviceImageUrl({ model: "TS0601", manufacturer: "_TZE200_unknown" }) === null &&
+        card._deviceImageUrl(card._devices[0]).includes("ZBM5-3C-80-86.png");
+      card._z2mModels = null;
+      return ok;
+    },
+  ],
   ["_deviceShapeSvg", () => card._deviceShapeSvg(3).includes("<svg")],
   ["_detachStateFor", () => card._detachStateFor(card._devices[0], 1).state === null],
   [

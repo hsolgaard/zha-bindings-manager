@@ -3,6 +3,18 @@
 All notable changes to ZHA Bindings Manager are documented here.
 
 
+## [1.3.2]
+
+### Fixed
+
+- **Device photos for devices whose Zigbee model isn't their product code.** zigbee2mqtt.io names its photos by
+  product code, while ZHA shows the model the device reports, and the two often differ (the Clipsal Wiser 2AX switch
+  reports "CH2AX/SWITCH/1" but its photo is "41E2PBSWMZ/356PB2MBTZ"; the IKEA RODRET is "E2201"). The card now
+  looks the model up in a map built weekly from Zigbee2MQTT's own device definitions
+  ([zigbee-capabilities#325](https://github.com/hsolgaard/zigbee-capabilities/issues/325)). The map also tells
+  Tuya devices that share a model string (TS0601, TS011F…) apart by manufacturer, so many of them now get a photo
+  too. The map is only downloaded when **Show device photos** is on.
+
 ## [1.3.1]
 
 ### Added

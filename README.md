@@ -8,6 +8,9 @@ See what controls what, identify stale or unexpected bindings, inspect devices e
 ![HACS](https://img.shields.io/badge/HACS-Default-41BDF5)
 ![license](https://img.shields.io/badge/license-MIT-blue)
 
+> [!IMPORTANT]
+> **Most people want the [ZHA Bindings Manager integration](https://github.com/hsolgaard/zha-bindings-manager-integration) instead.** It includes this card, adds a **ZHA Bindings** sidebar page with no dashboard setup, and adds shared storage, bindings on each device's page, a nightly check for disappearing bindings and more. In HACS it's the **ZHA Bindings Manager** entry of type **Integration**; this one, **ZHA Bindings Manager (card only)**, is the Dashboard entry. Install one or the other, not both.
+
 > [!NOTE]
 > The Lovelace card is added as `type: custom:zha-binding-map-card`. That internal name remains unchanged even though the project has grown beyond a binding map.
 

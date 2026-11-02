@@ -90,6 +90,8 @@ import {
   slugify,
   fetchCapabilityIndex,
   fetchBehaviourDoc,
+  fetchZ2mModels,
+  z2mProductCode,
   matchLocalDevices,
   firmwareVersions,
   groupByDevice,
@@ -1704,8 +1706,37 @@ export class ZhaBindingMapCard extends HTMLElement {
    *  this skips the guess entirely rather than making it and hoping. */
   _deviceImageUrl(d) {
     if (!d.model) return null;
-    if (AMBIGUOUS_TUYA_MODELS.includes(d.model)) return null;
-    return `https://www.zigbee2mqtt.io/images/devices/${encodeURIComponent(d.model.replace(/\//g, "-"))}.png`;
+    const ambiguous = AMBIGUOUS_TUYA_MODELS.includes(d.model);
+    // Since 1.3.2: zigbee2mqtt.io names photos by product code, which often
+    // differs from the Zigbee model string (Clipsal "CH2AX/SWITCH/1" is
+    // 41E2PBSWMZ/356PB2MBTZ). The community repo's z2m-models.json maps one
+    // to the other, and its manufacturer|model fingerprints also resolve the
+    // ambiguous Tuya models safely. Without a map hit, fall back to the
+    // model string as before (and still no guess for ambiguous Tuya).
+    const code = z2mProductCode(this._z2mModels, d.manufacturer, d.model, { ambiguous });
+    if (!code && ambiguous) return null;
+    const name = code || d.model;
+    return `https://www.zigbee2mqtt.io/images/devices/${encodeURIComponent(name.replace(/\//g, "-"))}.png`;
+  }
+
+  /** Loads the Zigbee2MQTT model map once, only when device photos are on,
+   *  then re-renders whatever is showing photos so they switch to the right
+   *  image. A failed fetch leaves the old model-string guess in place. */
+  _ensureZ2mModels() {
+    if (!this._showDevicePhotos || this._z2mModels || this._z2mModelsLoading) return;
+    this._z2mModelsLoading = true;
+    fetchZ2mModels()
+      .then((map) => {
+        this._z2mModels = map;
+        if (this._explodedDeviceIeee && this._q("#dialog") && this._q("#dialog").classList.contains("open")) {
+          const d = this._devices.find((x) => x.ieee === this._explodedDeviceIeee);
+          if (d) this._renderExplodedView(d);
+        }
+        if (this._q("#capexp-body")) this._renderCapExpBody();
+      })
+      .catch((err) => {
+        console.warn("[ZHA Bindings Manager] Zigbee2MQTT model map unavailable", err);
+      });
   }
 
   /** Offline, always-available fallback: a simple wall-plate shape with one
@@ -3756,6 +3787,7 @@ export class ZhaBindingMapCard extends HTMLElement {
       ? endpoints.map((ep) => this._endpointCardHtml(d, ep)).join("")
       : `<p class="muted">No endpoint data came back for this device — the scan may have failed (sleepy or unreachable device). Try again from the Devices tab.</p>`;
 
+    this._ensureZ2mModels();
     const imgUrl = this._deviceImageUrl(d);
     const shape = this._deviceShapeSvg(endpoints.length);
     const visual =
@@ -6286,9 +6318,10 @@ export class ZhaBindingMapCard extends HTMLElement {
   // Exploded view's gang-count shape — there's no endpoint/gang context
   // for a bare search-result/index entry the way there is for a real
   // device you've scanned.
-  _capExpDevicePhotoHtml(model) {
+  _capExpDevicePhotoHtml(model, manufacturer) {
     if (!this._showDevicePhotos) return "";
-    const imgUrl = this._deviceImageUrl({ model });
+    this._ensureZ2mModels();
+    const imgUrl = this._deviceImageUrl({ model, manufacturer });
     if (!imgUrl) return `<div class="capexp-device-photo-fallback" aria-hidden="true"></div>`;
     return `<img src="${escapeHtml(imgUrl)}" alt="" loading="lazy" class="capexp-device-photo"
          onerror="this.style.display='none'; this.nextElementSibling.style.display='block';">
@@ -6482,7 +6515,7 @@ export class ZhaBindingMapCard extends HTMLElement {
             return `
               <div class="capexp-device-card">
                 <div class="capexp-device-top">
-                  ${this._capExpDevicePhotoHtml(m.device.model)}
+                  ${this._capExpDevicePhotoHtml(m.device.model, m.device.manufacturer)}
                   <div class="capexp-device-main">
                     <div class="capexp-device-header">
                       <span class="capexp-device-name">${escapeHtml(manufacturerDisplayLabel(m.device.manufacturer))} ${escapeHtml(
@@ -6871,7 +6904,7 @@ export class ZhaBindingMapCard extends HTMLElement {
         return `
           <div class="capexp-device-card">
             <div class="capexp-device-top">
-              ${this._capExpDevicePhotoHtml(r.model)}
+              ${this._capExpDevicePhotoHtml(r.model, r.manufacturer)}
               <div class="capexp-device-main">
                 <div class="capexp-device-header">
                   <span class="capexp-device-name">${escapeHtml(manufacturerDisplayLabel(r.manufacturer))} ${escapeHtml(

@@ -21,7 +21,7 @@
  * zha_toolkit MUST be installed (via HACS) and working for bind/unbind/scan
  * to function. See README.md for details.
  *
- * Version: 1.3.1
+ * Version: 1.3.2
  */
 (() => {
   // src/capexplorer-constants.js
@@ -78,7 +78,7 @@
 
   // src/constants.js
   var ZTK_DOMAIN = "zha_toolkit";
-  var CARD_VERSION = "1.3.1";
+  var CARD_VERSION = "1.3.2";
   var CHANGELOG_URL = "https://github.com/hsolgaard/zha-bindings-manager/blob/main/CHANGELOG.md";
   var DEFAULT_BINDABLE_OUT_CLUSTERS = [5, 6, 8, 258, 768];
   var MEMBERSHIP_EDGE_COLOR = "#8e24aa";
@@ -2318,6 +2318,43 @@ a.btn { display:inline-block; text-decoration:none; }
     }
     return _behaviourMemory;
   }
+  var Z2M_MODELS_URL = `https://raw.githubusercontent.com/${CAPABILITY_DB_REPO}/main/data/z2m-models.json`;
+  var Z2M_MODELS_CACHE_KEY = "zha-capability-explorer:z2m-models-cache";
+  var EMPTY_Z2M_MAP = Object.freeze({ models: {}, fingerprints: {} });
+  var _z2mMemory = null;
+  async function fetchZ2mModels({ force = false } = {}) {
+    if (!force && _z2mMemory) return _z2mMemory;
+    if (!force) {
+      try {
+        const raw = JSON.parse(localStorage.getItem(Z2M_MODELS_CACHE_KEY) || "null");
+        if (raw && raw.map && typeof raw.fetchedAt === "number" && Date.now() - raw.fetchedAt < CACHE_TTL_MS) {
+          _z2mMemory = raw.map;
+          return raw.map;
+        }
+      } catch (e) {
+      }
+    }
+    const res = await fetch(Z2M_MODELS_URL, { cache: "no-store" });
+    if (res.status === 404) return _z2mMemory = EMPTY_Z2M_MAP;
+    if (!res.ok) throw new Error(`Failed to fetch the Zigbee2MQTT model map (HTTP ${res.status})`);
+    const doc = await res.json();
+    _z2mMemory = {
+      models: doc && doc.models || {},
+      fingerprints: doc && doc.fingerprints || {}
+    };
+    try {
+      localStorage.setItem(Z2M_MODELS_CACHE_KEY, JSON.stringify({ map: _z2mMemory, fetchedAt: Date.now() }));
+    } catch (e) {
+    }
+    return _z2mMemory;
+  }
+  function z2mProductCode(map, manufacturer, model, { ambiguous = false } = {}) {
+    if (!map || !model) return null;
+    const fp = map.fingerprints && map.fingerprints[`${manufacturer || ""}|${model}`];
+    if (fp) return fp;
+    if (ambiguous) return null;
+    return map.models && map.models[model] || null;
+  }
   function groupByDevice(index) {
     const map = /* @__PURE__ */ new Map();
     for (const entry of index) {
@@ -4117,8 +4154,28 @@ a.btn { display:inline-block; text-decoration:none; }
      *  this skips the guess entirely rather than making it and hoping. */
     _deviceImageUrl(d) {
       if (!d.model) return null;
-      if (AMBIGUOUS_TUYA_MODELS.includes(d.model)) return null;
-      return `https://www.zigbee2mqtt.io/images/devices/${encodeURIComponent(d.model.replace(/\//g, "-"))}.png`;
+      const ambiguous = AMBIGUOUS_TUYA_MODELS.includes(d.model);
+      const code = z2mProductCode(this._z2mModels, d.manufacturer, d.model, { ambiguous });
+      if (!code && ambiguous) return null;
+      const name = code || d.model;
+      return `https://www.zigbee2mqtt.io/images/devices/${encodeURIComponent(name.replace(/\//g, "-"))}.png`;
+    }
+    /** Loads the Zigbee2MQTT model map once, only when device photos are on,
+     *  then re-renders whatever is showing photos so they switch to the right
+     *  image. A failed fetch leaves the old model-string guess in place. */
+    _ensureZ2mModels() {
+      if (!this._showDevicePhotos || this._z2mModels || this._z2mModelsLoading) return;
+      this._z2mModelsLoading = true;
+      fetchZ2mModels().then((map) => {
+        this._z2mModels = map;
+        if (this._explodedDeviceIeee && this._q("#dialog") && this._q("#dialog").classList.contains("open")) {
+          const d = this._devices.find((x) => x.ieee === this._explodedDeviceIeee);
+          if (d) this._renderExplodedView(d);
+        }
+        if (this._q("#capexp-body")) this._renderCapExpBody();
+      }).catch((err) => {
+        console.warn("[ZHA Bindings Manager] Zigbee2MQTT model map unavailable", err);
+      });
     }
     /** Offline, always-available fallback: a simple wall-plate shape with one
      *  rectangle per real endpoint, so a 3-gang switch reads as a 3-gang
@@ -5882,6 +5939,7 @@ a.btn { display:inline-block; text-decoration:none; }
       const summary = this._deviceSummaryLines(d).map(([k, v]) => `<tr><td>${escapeHtml(k)}</td><td>${escapeHtml(String(v))}</td></tr>`).join("");
       const endpoints = this._deviceEndpoints(d);
       const cards = endpoints.length ? endpoints.map((ep) => this._endpointCardHtml(d, ep)).join("") : `<p class="muted">No endpoint data came back for this device \u2014 the scan may have failed (sleepy or unreachable device). Try again from the Devices tab.</p>`;
+      this._ensureZ2mModels();
       const imgUrl = this._deviceImageUrl(d);
       const shape = this._deviceShapeSvg(endpoints.length);
       const visual = this._showDevicePhotos && imgUrl ? `<img src="${escapeHtml(imgUrl)}" alt="" class="ep-device-photo"
@@ -7956,9 +8014,10 @@ a.btn { display:inline-block; text-decoration:none; }
     // Exploded view's gang-count shape — there's no endpoint/gang context
     // for a bare search-result/index entry the way there is for a real
     // device you've scanned.
-    _capExpDevicePhotoHtml(model) {
+    _capExpDevicePhotoHtml(model, manufacturer) {
       if (!this._showDevicePhotos) return "";
-      const imgUrl = this._deviceImageUrl({ model });
+      this._ensureZ2mModels();
+      const imgUrl = this._deviceImageUrl({ model, manufacturer });
       if (!imgUrl) return `<div class="capexp-device-photo-fallback" aria-hidden="true"></div>`;
       return `<img src="${escapeHtml(imgUrl)}" alt="" loading="lazy" class="capexp-device-photo"
          onerror="this.style.display='none'; this.nextElementSibling.style.display='block';">
@@ -8063,7 +8122,7 @@ a.btn { display:inline-block; text-decoration:none; }
         return `
               <div class="capexp-device-card">
                 <div class="capexp-device-top">
-                  ${this._capExpDevicePhotoHtml(m.device.model)}
+                  ${this._capExpDevicePhotoHtml(m.device.model, m.device.manufacturer)}
                   <div class="capexp-device-main">
                     <div class="capexp-device-header">
                       <span class="capexp-device-name">${escapeHtml(manufacturerDisplayLabel(m.device.manufacturer))} ${escapeHtml(
@@ -8376,7 +8435,7 @@ a.btn { display:inline-block; text-decoration:none; }
         return `
           <div class="capexp-device-card">
             <div class="capexp-device-top">
-              ${this._capExpDevicePhotoHtml(r.model)}
+              ${this._capExpDevicePhotoHtml(r.model, r.manufacturer)}
               <div class="capexp-device-main">
                 <div class="capexp-device-header">
                   <span class="capexp-device-name">${escapeHtml(manufacturerDisplayLabel(r.manufacturer))} ${escapeHtml(

@@ -21,7 +21,7 @@
  * zha_toolkit MUST be installed (via HACS) and working for bind/unbind/scan
  * to function. See README.md for details.
  *
- * Version: 1.4.2
+ * Version: 1.5.0
  */
 (() => {
   // src/capexplorer-constants.js
@@ -78,7 +78,7 @@
 
   // src/constants.js
   var ZTK_DOMAIN = "zha_toolkit";
-  var CARD_VERSION = "1.4.2";
+  var CARD_VERSION = "1.5.0";
   var CHANGELOG_URL = "https://github.com/hsolgaard/zha-bindings-manager/blob/main/CHANGELOG.md";
   var DEFAULT_BINDABLE_OUT_CLUSTERS = [5, 6, 8, 258, 768];
   var MEMBERSHIP_EDGE_COLOR = "#8e24aa";
@@ -487,6 +487,7 @@
     }
     if (err.message) return err.message;
     if (err.error && err.error.message) return err.error.message;
+    if (err.code && !err.message) return `${String(err.code).replace(/_/g, " ")} (no details)`;
     try {
       const s = JSON.stringify(err);
       if (s && s !== "{}") return s;
@@ -679,6 +680,20 @@
     async fetchGroups() {
       return this.hass.callWS({ type: "zha/groups" });
     }
+    /** Experimental (integration only): read one router's routing and
+     *  neighbour tables; returns the stored entry. */
+    async meshRead(ieee) {
+      return this.hass.callWS({ type: "zha_bindings_manager/mesh_read", ieee });
+    }
+    /** Binding tables the integration read itself (1.5.0):
+     *  {scans: {ieee: {at, bindings, partial}}}. */
+    async deviceScans() {
+      return this.hass.callWS({ type: "zha_bindings_manager/device_scans" });
+    }
+    /** Experimental: every stored entry, {devices: {ieee: entry}}. */
+    async meshGet() {
+      return this.hass.callWS({ type: "zha_bindings_manager/mesh_get" });
+    }
     async fetchClusters(ieee) {
       return this.hass.callWS({ type: "zha/devices/clusters", ieee });
     }
@@ -863,6 +878,25 @@
         members: members.map((m) => ({ ieee: m.ieee, endpoint_id: Number(m.endpoint) }))
       });
     }
+    /** binds_remove_all limited to one source endpoint and cluster, with no
+     *  target filter: removes every binding on that endpoint and cluster,
+     *  group bindings included. Used for a light's reporting binding to a
+     *  group, which unbind_group can't remove (see groups.js). */
+    async removeBindingsOnCluster(sourceIeee, endpoint, clusterId) {
+      return this.callToolkit("binds_remove_all", { ieee: sourceIeee, endpoint: Number(endpoint), cluster: [Number(clusterId)] });
+    }
+    /** Removes [{ieee, endpoint}] from a ZHA group (ZHA's own websocket). */
+    async removeGroupMembers(groupId, members) {
+      return this.hass.callWS({
+        type: "zha/group/members/remove",
+        group_id: Number(groupId),
+        members: members.map((m) => ({ ieee: m.ieee, endpoint_id: Number(m.endpoint) }))
+      });
+    }
+    /** Deletes ZHA groups (ZHA's own websocket, as the Groups page uses). */
+    async removeGroups(groupIds) {
+      return this.hass.callWS({ type: "zha/group/remove", group_ids: groupIds.map(Number) });
+    }
     async unbindGroup(sourceIeee, groupId, clusterIds, opts = {}) {
       const data = { ieee: sourceIeee, command_data: groupId };
       if (clusterIds && clusterIds.length === 1) data.cluster = clusterIds[0];
@@ -880,12 +914,13 @@
       <button class="tab" data-view="floorplan">Floor Plan</button>
       <button class="tab" data-view="table">Bindings</button>
       <button class="tab" data-view="devices">Devices</button>
+      <button class="tab" data-view="groups">Groups</button>
       <button class="tab" data-view="capexplorer">Zigbee Capability Explorer</button>
       <button class="tab" data-view="advanced">Advanced</button>
+      <button class="tab" data-view="mesh" id="tab-mesh" style="display:none" title="Beta: link quality and routes in your Zigbee mesh. Still being tested; it may change.">Network<sup class="tab-beta">beta</sup></button>
     </div>
     <input id="search" class="search" placeholder="Search devices\u2026">
     <span id="storage-mode-badge" class="storage-mode-badge muted"></span>
-    <button class="btn" id="btn-control-lights" title="Guided setup: pick a remote and the lights it should control. The card makes or reuses a ZHA group, binds the remote to it and checks it works.">Control lights with a remote\u2026</button>
     <button class="btn" id="btn-refresh-devices" title="Reload device list">\u27F3 Devices</button>
     <button class="btn btn-primary" id="btn-scan" title="Read current bindings from your Zigbee devices">Scan bindings</button>
     <button class="btn btn-small" id="btn-rescan-settings" title="Scan settings">\u2699</button>
@@ -968,11 +1003,12 @@
       </div>
       <button class="btn btn-small" id="btn-clear-filters">Clear type / manufacturer / area filters</button>
     </div>
+    <div id="map-route-banner" class="map-route-banner" style="display:none"></div>
     <div class="graph-wrap">
       <svg id="graph-svg" viewBox="0 0 1200 840" preserveAspectRatio="xMidYMid meet"></svg>
       <div id="graph-empty" class="graph-empty"></div>
     </div>
-    <p class="hint">Drag a device onto another device (or onto a group) to create a binding. Click a line to inspect / remove it.</p>
+    <p class="hint">Drag a device onto another device (or onto a group) to create a binding. Click a line to inspect / remove it<span id="map-route-hint" style="display:none">, or to show the route its commands take through your routers (Network, beta)</span>.</p>
     <p id="graph-role-legend" class="hint" style="display:none">\u{1F579} badge = this device also has its own Light/Switch/Cover/Fan role, in addition to what's shown by the edges here (e.g. a wired/local load alongside a Zigbee-bound one) \u2014 click the device, then Show endpoints\u2026, to see the per-endpoint breakdown.</p>
   </div>
 
@@ -1012,6 +1048,7 @@
     </div>
   </div>
 
+  <div id="view-groups" class="view"></div>
   <div id="view-devices" class="view">
     <div class="table-scroll">
     <table class="bindings-table">
@@ -1032,6 +1069,7 @@
 
   <div id="view-floorplan" class="view">
     <div class="graph-toolbar">
+      <label class="row" id="fp-floor-wrap" style="display:none">Floor <select id="fp-floor"></select></label>
       <label class="row fp-image-row">Image URL
         <input type="text" id="fp-image-url" placeholder="/local/floorplan.png">
       </label>
@@ -1044,6 +1082,7 @@
         <input type="number" id="fp-marker-scale" min="40" max="200" step="10" style="width:4.5em; margin-left:6px;">%
       </label>
     </div>
+    <div id="fp-floor-help" class="fp-floor-help hint"></div>
     <div class="floorplan-layout">
       <div class="fp-sidebar">
         <div class="filter-group-title">Unplaced devices</div>
@@ -1061,6 +1100,8 @@
   <div id="view-capexplorer" class="view"></div>
 
   <div id="view-advanced" class="view"></div>
+
+  <div id="view-mesh" class="view"></div>
 
   <div id="drawer" class="drawer" aria-hidden="true">
     <div class="drawer-header">
@@ -1218,7 +1259,7 @@
      *  - bundledCardVersion: the card version the integration ships (1.0.0+).
      *  Unknown values are null. */
     static async probe(hass) {
-      const none = { installed: false, available: false, version: null, bundledCardVersion: null };
+      const none = { installed: false, available: false, version: null, bundledCardVersion: null, experimental: false, lqi: null };
       try {
         const res = await hass.connection.sendMessagePromise({ type: WS_GET_CAPABILITIES });
         if (!res || !res.available) return none;
@@ -1228,7 +1269,10 @@
           installed: true,
           available: !storageOff,
           version: str(res.version),
-          bundledCardVersion: str(res.bundled_card_version)
+          bundledCardVersion: str(res.bundled_card_version),
+          // 1.5.0 (local build): experimental features + link-quality thresholds.
+          experimental: !!(res.features && res.features.experimental_features === true),
+          lqi: res.lqi_thresholds && Number.isInteger(res.lqi_thresholds.good) && Number.isInteger(res.lqi_thresholds.weak) ? { good: res.lqi_thresholds.good, weak: res.lqi_thresholds.weak } : null
         };
       } catch (e) {
         return none;
@@ -2037,6 +2081,25 @@ a.btn { display:inline-block; text-decoration:none; }
 .drawer-tags .chip { cursor: default; }
 .drawer-facts td:first-child { color: var(--secondary-text-color); white-space: nowrap; }
 .drawer-facts .scan-cell { display:block; }
+.map-route-banner { margin: 6px 0; padding: 8px 10px; border-left: 4px solid var(--primary-color); background: var(--secondary-background-color, #f5f5f5); border-radius: 6px; font-size: 13px; display:flex; gap:8px; align-items:flex-start; flex-wrap: wrap; }
+.map-route-banner .map-route-text { flex: 1 1 260px; }
+.map-route-hop { stroke-width: 5; stroke-dasharray: 10 6; opacity: .9; pointer-events: stroke; }
+.map-route-lqi { font-size: 12px; font-weight: 700; paint-order: stroke; stroke: var(--card-background-color, #fff); stroke-width: 3px; }
+.node.map-route-node .node-shape { stroke: var(--primary-color); stroke-width: 4; }
+.groups-head { display:flex; gap:12px; align-items:flex-start; flex-wrap:wrap; margin: 8px 0 12px; }
+.groups-head p { flex: 1 1 320px; margin: 0; }
+.group-card { border: 1px solid var(--divider-color, #e0e0e0); border-radius: 10px; padding: 10px 12px; margin-bottom: 10px; }
+.group-card.group-focus { border-color: var(--primary-color); box-shadow: 0 0 0 2px var(--primary-color); }
+.group-card-head { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+.group-card-head .spacer { flex: 1; }
+.group-cols { display:grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 12px; margin-top: 8px; }
+.groups-list { list-style:none; padding:0; margin: 4px 0; }
+.groups-list li { display:flex; align-items:center; gap:6px; flex-wrap:wrap; padding: 3px 0; }
+.groups-list li .btn { margin-left:auto; }
+.groups-reasons { margin: 4px 0 8px; padding-left: 18px; }
+.groups-reasons li { margin: 2px 0; }
+.groups-pick { display:flex; flex-direction:column; gap:4px; max-height: 260px; overflow:auto; margin: 6px 0; }
+.drawer-db-missing { color: var(--warning-color, #b26a00); font-weight: 500; }
 .drawer-section { margin-top: 16px; }
 .drawer-section-title { font-weight: 600; margin-bottom: 6px; }
 .drawer-rel { list-style:none; padding:0; margin:0; display:flex; flex-direction:column; gap:6px; }
@@ -2055,6 +2118,79 @@ a.btn { display:inline-block; text-decoration:none; }
 .flow-group-choice label { display:flex; align-items:center; gap:6px; flex-wrap:wrap; }
 .flow-group-choice input[type="text"], .flow-group-choice select { flex: 1 1 180px; min-width: 0; }
 .adv-guided-hint { display:flex; align-items:center; gap:6px; flex-wrap:wrap; }
+
+/* Experimental (1.5.0 local build): Network tab and route check. */
+.exp-badge { display:inline-block; font-size:0.7em; font-weight:600; letter-spacing:0.02em; padding:1px 6px; border-radius:8px;
+  margin-left:4px; vertical-align:middle; color: var(--warning-color, #ffa000); border:1px solid var(--warning-color, #ffa000); }
+.tab-beta { font-size:0.62em; font-weight:500; margin-left:2px; opacity:0.75; letter-spacing:0.02em; color: inherit; }
+.mesh-intro p { margin: 0 0 8px; }
+.mesh-toolbar { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+.mesh-progress { display:flex; align-items:center; gap:8px; margin:6px 0; font-size:0.9em; }
+.mesh-progress:empty { display:none; }
+.mesh-layout { display:flex; gap:16px; align-items:flex-start; margin-top:8px; }
+.mesh-picture { flex: 1 1 auto; min-width:0; }
+.mesh-side { flex: 0 0 300px; font-size:0.9em; }
+.mesh-svg { width:100%; height:auto; max-height:70vh; border:1px solid var(--divider-color, rgba(0,0,0,0.12)); border-radius:8px;
+  background: var(--card-background-color, #fff); }
+.mesh-node { cursor:pointer; }
+.mesh-picture { position:relative; }
+.mesh-zoom { position:absolute; top:8px; right:8px; display:flex; gap:4px; z-index:1; }
+.mesh-svg { touch-action:none; cursor:grab; }
+.mesh-link { cursor:pointer; }
+.mesh-svg .mesh-zs { transform: scale(var(--mz, 1)); transform-origin: 0 0; transform-box: view-box; }
+.mesh-svg [style*="--sw"] { stroke-width: calc(var(--sw) * var(--mz, 1) * 1px); }
+.mesh-picture { position: relative; }
+.mesh-picture > .mesh-selected { position: absolute; left: 8px; top: 8px; z-index: 2; max-width: min(340px, calc(100% - 16px)); background: var(--card-background-color, #fff); box-shadow: 0 2px 8px rgba(0,0,0,0.25); }
+.edge-pending { stroke-dasharray: 6 5; opacity: 0.85; cursor: pointer; }
+.mesh-show-hint { margin:4px 0 0; }
+.mesh-battery circle { fill: var(--card-background-color, #fff); stroke-width:2; }
+.mesh-battery.orphan circle { stroke: var(--disabled-text-color, #999) !important; stroke-dasharray: 2 2; }
+.mesh-battery-label { fill: var(--secondary-text-color); }
+.mesh-failed { list-style:none; padding:0; margin:0 0 12px; display:flex; flex-direction:column; gap:4px; }
+.mesh-failed li { display:flex; justify-content:space-between; align-items:center; gap:8px; }
+.mesh-routes { padding-left:18px; margin:0 0 12px; }
+.mesh-routes li { margin-bottom:4px; }
+.mesh-link-hit { stroke: transparent; pointer-events: stroke; }
+.mesh-link:hover line:first-child { stroke-opacity:1; }
+.mesh-selected { border:1px solid var(--divider-color, rgba(0,0,0,0.12)); border-radius:8px; padding:8px 10px; margin-bottom:12px; }
+.mesh-selected ul { margin:6px 0; padding-left:18px; }
+.mesh-selected p { margin:4px 0 6px; font-size:0.9em; }
+.mesh-unplaced { margin-top:6px; font-size:0.9em; }
+.mesh-legend span { display:inline-flex; align-items:center; gap:4px; margin-right:10px; }
+.mesh-legend-note { font-size:0.85em; margin-top:4px; }
+.mesh-floor-badge { fill: var(--primary-color); font-weight:700; paint-order: stroke; stroke: var(--card-background-color, #fff); stroke-width:3px; }
+.mesh-node circle.via-ceiling { fill:none; stroke: var(--warning-color, #ffa000); stroke-dasharray: 3 3; stroke-width:1.5; }
+.mesh-floors-help, .fp-floor-help details { font-size:0.9em; margin:4px 0 8px; }
+.mesh-floors-help summary, .fp-floor-help summary { cursor:pointer; color: var(--primary-color); }
+.mesh-floors-help ol, .fp-floor-help ol { margin:6px 0; padding-left:20px; }
+.fp-floor-help { margin: 0 0 6px; }
+.mesh-unplaced summary { cursor:pointer; }
+.mesh-node circle, .mesh-node rect { fill: var(--card-background-color, #fff); stroke: var(--primary-text-color); stroke-width:1.5; }
+.mesh-node circle.unread { stroke-dasharray: 3 3; stroke: var(--secondary-text-color); }
+.mesh-node rect { fill: var(--primary-color); }
+.mesh-label { fill: var(--primary-text-color); paint-order: stroke; stroke: var(--card-background-color, #fff); stroke-width:3px; }
+.mesh-kids { fill: var(--secondary-text-color); font-weight:600; }
+.mesh-legend { display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-top:6px; font-size:0.85em; }
+.mesh-tips { padding-left:18px; margin:0 0 12px; }
+.mesh-tips li { margin-bottom:6px; }
+.mesh-tip-warning { color: var(--primary-text-color); }
+.mesh-tip-info { color: var(--secondary-text-color); }
+.mesh-links tr { cursor:pointer; }
+.mesh-links tr.active td { background: var(--secondary-background-color, rgba(0,0,0,0.05)); }
+.lqi-chip { display:inline-block; font-size:0.8em; padding:0 6px; border-radius:8px; white-space:nowrap; border:1px solid currentColor; }
+.lqi-good { color: var(--success-color, #43a047); }
+.lqi-fair { color: var(--warning-color, #ffa000); }
+.lqi-weak { color: var(--error-color, #db4437); }
+.lqi-unknown { color: var(--secondary-text-color); }
+.route-list { list-style:none; padding:0; margin:6px 0; display:flex; flex-direction:column; gap:10px; }
+.route-chain { margin:4px 0; line-height:1.9; }
+.route-arrow { color: var(--secondary-text-color); }
+.route-members { margin:4px 0; padding-left:18px; }
+.route-verdict { font-size:0.9em; margin-top:2px; }
+.route-good { color: var(--success-color, #43a047); }
+.route-weak { color: var(--error-color, #db4437); }
+.route-none, .route-unknown { color: var(--secondary-text-color); }
+@media (max-width: 800px) { .mesh-layout { flex-direction: column; } .mesh-side { flex-basis:auto; width:100%; } }
 
 /* Exploded device view \u2014 per-endpoint cards inside the (widened) dialog. */
 .ep-photo-toggle { font-size:0.82em; color: var(--secondary-text-color); margin-bottom:10px; }
@@ -2267,6 +2403,347 @@ a.btn { display:inline-block; text-decoration:none; }
   .capexp-mode-btn { width: 100%; }
 }
 `;
+
+  // src/unbind-errors.js
+  function toolkitErrorText(err) {
+    const msg = err && (err.message || String(err)) || "";
+    return msg.replace(/^binds_remove_all failed:\s*/i, "").trim();
+  }
+  function explainUnbindFailure({ errors = [], targetRemoved = false } = {}) {
+    const real = [...new Set(errors.filter(Boolean))];
+    if (targetRemoved && (!real.length || real.some((e) => /keyerror|unknown error/i.test(e)))) {
+      return "zha-toolkit can't remove a binding to a device that's no longer in ZHA: it looks the removed device up, fails, and never sends the unbind (a known zha-toolkit bug, reported to its developer). Until it's fixed, these bindings stay. They only use a slot in the switch's binding table. If you need the slot now, pair the removed device again (it keeps its address), then unbind it normally.";
+    }
+    if (real.length) return `zha-toolkit said: ${real.slice(0, 2).join("; ")}${real.length > 2 ? " (and more)" : ""}.`;
+    return "";
+  }
+
+  // src/groups.js
+  function groupRows({ groups, bindings, classify, coordinatorIeee }) {
+    const coord = coordinatorIeee ? normIeee(coordinatorIeee) : null;
+    return (groups || []).map((g) => {
+      const groupId = Number(g.group_id);
+      const members = (g.members || []).filter((m) => m && m.device && m.device.ieee && normIeee(m.device.ieee) !== coord).map((m) => ({ ieee: normIeee(m.device.ieee), endpoint: Number(m.endpoint_id) }));
+      const byController = /* @__PURE__ */ new Map();
+      let others = 0;
+      for (const b of bindings || []) {
+        if (!b || !b.isGroup || Number(b.groupId) !== groupId) continue;
+        if (classify(b) === "reporting") {
+          others++;
+          continue;
+        }
+        const key = `${normIeee(b.sourceIeee)}:${Number(b.sourceEndpoint)}`;
+        if (!byController.has(key)) byController.set(key, { sourceIeee: normIeee(b.sourceIeee), endpoint: Number(b.sourceEndpoint), clusters: /* @__PURE__ */ new Set() });
+        byController.get(key).clusters.add(Number(b.clusterId));
+      }
+      const controllers = [...byController.values()].map((c) => ({ ...c, clusters: [...c.clusters].sort((a, b) => a - b) }));
+      return { groupId, name: g.name || `Group ${groupId}`, members, controllers, others };
+    }).sort((a, b) => a.name.localeCompare(b.name, void 0, { sensitivity: "base" }));
+  }
+  function groupUnbindPlan(groupId, bindings, { clustersFor = () => void 0 } = {}) {
+    const seen = /* @__PURE__ */ new Set();
+    const out = [];
+    const all = bindings || [];
+    for (const b of all) {
+      if (!b || !b.isGroup || Number(b.groupId) !== Number(groupId)) continue;
+      const op = { sourceIeee: normIeee(b.sourceIeee), endpoint: Number(b.sourceEndpoint), clusterId: Number(b.clusterId) };
+      const key = `${op.sourceIeee}:${op.endpoint}:${op.clusterId}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      const clusters = clustersFor(op.sourceIeee);
+      const sends = (clusters || []).some((c) => c.type === "out" && Number(c.id) === op.clusterId && Number(c.endpoint_id) === op.endpoint);
+      if (sends || !clusters) {
+        op.method = "group";
+      } else {
+        const others = all.some(
+          (x) => x && normIeee(x.sourceIeee) === op.sourceIeee && Number(x.sourceEndpoint) === op.endpoint && Number(x.clusterId) === op.clusterId && !(x.isGroup && Number(x.groupId) === Number(groupId))
+        );
+        op.method = others ? "skip" : "remove";
+      }
+      out.push(op);
+    }
+    return out;
+  }
+  function noAnswerError(text) {
+    return !text || /unknown[_ ]error|no details|timeout|timed out|delivery|not ?responding|didn't answer|no answer|deliveryerror|mac_no_ack|nwk_route/i.test(text);
+  }
+  function groupDeleteReasons(devices) {
+    return devices.map((d) => {
+      if (d.skipped) {
+        return `${d.name}: it reports its own state to the group on a cluster it also uses for other bindings, and zha-toolkit can only remove them all together, so this one was left.`;
+      }
+      const errs = [...new Set((d.errors || []).filter(Boolean))];
+      if (!d.answered || errs.length && errs.every(noAnswerError)) {
+        return d.battery ? `${d.name} didn't answer: it's on battery, so wake it (press a button) and try again.` : `${d.name} didn't answer: it may be offline or switched off at the wall.`;
+      }
+      if (errs.length) return `${d.name}: zha-toolkit said ${errs.slice(0, 2).join("; ")}.`;
+      return `${d.name}: zha-toolkit reported success, but the binding is still there.`;
+    });
+  }
+  var groupIdHex = (id) => `0x${Number(id).toString(16).padStart(4, "0")}`;
+
+  // src/mesh.js
+  var LQI_RECOMMENDED = Object.freeze({ good: 150, weak: 80 });
+  var MAX_HOPS = 10;
+  function nwkNumber(value) {
+    if (typeof value === "number" && Number.isInteger(value) && value >= 0 && value <= 65535) return value;
+    if (typeof value === "string" && /^0x[0-9a-f]{1,4}$/i.test(value.trim())) return parseInt(value.trim(), 16);
+    return null;
+  }
+  function rateLqi(lqi, thr = LQI_RECOMMENDED) {
+    if (typeof lqi !== "number") return "unknown";
+    if (lqi >= thr.good) return "good";
+    if (lqi >= thr.weak) return "fair";
+    return "weak";
+  }
+  var RANK = { weak: 0, unknown: 1, fair: 2, good: 3 };
+  function linkKey(a, b) {
+    return a < b ? `${a}|${b}` : `${b}|${a}`;
+  }
+  function buildMesh(snapshot, devices = []) {
+    const snap = snapshot && typeof snapshot === "object" ? snapshot : {};
+    const nwkToIeee = /* @__PURE__ */ new Map();
+    const typeOf = /* @__PURE__ */ new Map();
+    for (const d of devices) {
+      const ieee = normIeee(d.ieee);
+      const n = nwkNumber(d.nwk);
+      if (n != null) nwkToIeee.set(n, ieee);
+      if (d.device_type) typeOf.set(ieee, d.device_type === "EndDevice" ? "EndDevice" : d.device_type);
+    }
+    const links = /* @__PURE__ */ new Map();
+    const parentOf = /* @__PURE__ */ new Map();
+    const children = /* @__PURE__ */ new Map();
+    let staleEntries = 0;
+    for (const [rawReporter, entry] of Object.entries(snap)) {
+      const reporter = normIeee(rawReporter);
+      for (const n of entry && entry.neighbours || []) {
+        const other = normIeee(n.ieee);
+        if (!other || other === reporter) continue;
+        if (n.nwk != null && !nwkToIeee.has(n.nwk)) nwkToIeee.set(n.nwk, other);
+        if (n.type && !typeOf.has(other)) typeOf.set(other, n.type);
+        const key = linkKey(reporter, other);
+        if (!links.has(key)) {
+          const [a, b] = reporter < other ? [reporter, other] : [other, reporter];
+          links.set(key, { a, b, heard: {} });
+        }
+        const usable = typeof n.lqi === "number" && n.lqi > 0;
+        links.get(key).heard[reporter] = usable ? n.lqi : null;
+        if (!usable) staleEntries++;
+        if (n.rel === "Child" && n.type === "EndDevice") {
+          parentOf.set(other, { parent: reporter, lqi: typeof n.lqi === "number" && n.lqi > 0 ? n.lqi : null });
+          children.set(reporter, (children.get(reporter) || 0) + 1);
+        }
+      }
+    }
+    for (const l of links.values()) {
+      const vals = Object.values(l.heard).filter((v) => typeof v === "number");
+      l.lqi = vals.length ? Math.min(...vals) : null;
+    }
+    return { snapshot: snap, nwkToIeee, typeOf, links, parentOf, children, staleEntries };
+  }
+  function linkBetween(mesh, a, b) {
+    return mesh.links.get(linkKey(normIeee(a), normIeee(b))) || null;
+  }
+  function isRouterLike(mesh, ieee) {
+    const t = mesh.typeOf.get(normIeee(ieee));
+    return t === "Router" || t === "Coordinator";
+  }
+  function ieeeToNwk(mesh, ieee) {
+    for (const [n, i] of mesh.nwkToIeee.entries()) if (i === ieee) return n;
+    return null;
+  }
+  function routePath(mesh, sourceIeee, targetIeee) {
+    const source = normIeee(sourceIeee);
+    const target = normIeee(targetIeee);
+    const hops = [];
+    const hop = (from, to) => {
+      const l = linkBetween(mesh, from, to);
+      hops.push({ from, to, lqi: l ? l.lqi : null });
+    };
+    if (source === target) return { status: "ok", hops, note: null };
+    let current = source;
+    if (!mesh.snapshot[source]) {
+      const p = mesh.parentOf.get(source);
+      if (!p) {
+        if (linkBetween(mesh, source, target)) {
+          hop(source, target);
+          return { status: "ok", hops, note: null };
+        }
+        return { status: "none", hops, note: "Its parent router isn't known: no router listed it as a child. Scan again, or wake it first." };
+      }
+      hop(source, p.parent);
+      current = p.parent;
+    }
+    const targetParent = !mesh.snapshot[target] && mesh.parentOf.get(target) ? mesh.parentOf.get(target).parent : null;
+    const visited = /* @__PURE__ */ new Set([current]);
+    for (let i = 0; i < MAX_HOPS; i++) {
+      if (current === target) return { status: "ok", hops, note: null };
+      if (targetParent && current === targetParent) {
+        hop(current, target);
+        return { status: "ok", hops, note: null };
+      }
+      const entry = mesh.snapshot[current];
+      if (!entry || !entry.ok) {
+        return { status: "partial", hops, note: `${current} wasn't read, so the path stops there.` };
+      }
+      const goal = targetParent || target;
+      const goalNwk = ieeeToNwk(mesh, goal);
+      const route = goalNwk == null ? null : (entry.routes || []).find((r) => r.dst === goalNwk && r.status === "Active");
+      let next = null;
+      if (route) {
+        next = mesh.nwkToIeee.get(route.next) || null;
+        if (!next) return { status: "partial", hops, note: `The next hop (0x${route.next.toString(16).padStart(4, "0")}) isn't a known device.` };
+      } else if ((entry.neighbours || []).some((n) => normIeee(n.ieee) === goal)) {
+        next = goal;
+      }
+      if (!next) {
+        return { status: hops.length ? "partial" : "none", hops, note: "No active route to the target in this router's routing table (routes appear after recent traffic)." };
+      }
+      if (visited.has(next)) return { status: "partial", hops, note: "The routing tables loop back on themselves; they're probably out of date." };
+      visited.add(next);
+      hop(current, next);
+      current = next;
+    }
+    return { status: "partial", hops, note: `Stopped after ${MAX_HOPS} hops.` };
+  }
+  function pathVerdict(path, thr = LQI_RECOMMENDED) {
+    if (!path || path.status === "none") return { level: "none", weakest: null };
+    let weakest = null;
+    for (const h of path.hops) {
+      if (typeof h.lqi !== "number") continue;
+      if (!weakest || h.lqi < weakest.lqi) weakest = h;
+    }
+    const anyUnknown = path.hops.some((h) => typeof h.lqi !== "number");
+    if (weakest && rateLqi(weakest.lqi, thr) === "weak") return { level: "weak", weakest };
+    if (path.status !== "ok" || anyUnknown) return { level: "unknown", weakest };
+    return { level: "good", weakest };
+  }
+  function bestRouterLink(mesh, ieee) {
+    const id = normIeee(ieee);
+    let best = null;
+    for (const l of mesh.links.values()) {
+      if (l.a !== id && l.b !== id) continue;
+      const other = l.a === id ? l.b : l.a;
+      if (!isRouterLike(mesh, other) || typeof l.lqi !== "number") continue;
+      if (!best || l.lqi > best.lqi) best = { other, lqi: l.lqi };
+    }
+    return best;
+  }
+  function groupCheck(mesh, sourceIeee, memberIeees) {
+    const src = normIeee(sourceIeee);
+    const p = mesh.parentOf.get(src);
+    return {
+      parent: p ? { parent: p.parent, lqi: p.lqi } : null,
+      sourceIsRouter: !!mesh.snapshot[src],
+      members: memberIeees.map((m) => ({ ieee: normIeee(m), best: bestRouterLink(mesh, m) }))
+    };
+  }
+  function visibleRouterLinks(mesh, thr = LQI_RECOMMENDED, perRouter = 3) {
+    const keep = /* @__PURE__ */ new Set();
+    const byRouter = /* @__PURE__ */ new Map();
+    for (const l of mesh.links.values()) {
+      if (typeof l.lqi !== "number" || !isRouterLike(mesh, l.a) || !isRouterLike(mesh, l.b)) continue;
+      for (const end of [l.a, l.b]) {
+        if (!byRouter.has(end)) byRouter.set(end, []);
+        byRouter.get(end).push(l);
+      }
+    }
+    for (const list2 of byRouter.values()) {
+      list2.sort((x, y) => y.lqi - x.lqi);
+      list2.slice(0, perRouter).forEach((l) => keep.add(l));
+    }
+    return [...keep];
+  }
+  function weakestLinks(mesh, limit = 10) {
+    return [...mesh.links.values()].filter((l) => typeof l.lqi === "number").sort((x, y) => x.lqi - y.lqi).slice(0, limit);
+  }
+  function meshSuggestions(mesh, { thr = LQI_RECOMMENDED, areaOf = () => "", nameOf = (i) => i, routers = [] } = {}) {
+    const out = [];
+    const routerSet = new Set(routers.map(normIeee));
+    for (const [child, p] of mesh.parentOf.entries()) {
+      if (rateLqi(p.lqi, thr) === "weak") {
+        out.push({
+          kind: "weak_parent",
+          level: "warning",
+          ieees: [child, p.parent],
+          text: `${nameOf(child)} hears its parent ${nameOf(p.parent)} poorly (LQI ${p.lqi}). A router nearer to it would help.`
+        });
+      }
+    }
+    const dependsOn = /* @__PURE__ */ new Map();
+    const consider = new Set(routerSet);
+    for (const dev of consider) {
+      const ok = [];
+      for (const l of mesh.links.values()) {
+        if (l.a !== dev && l.b !== dev) continue;
+        const other = l.a === dev ? l.b : l.a;
+        if (!isRouterLike(mesh, other)) continue;
+        if (RANK[rateLqi(l.lqi, thr)] >= RANK.fair) ok.push(other);
+      }
+      if (ok.length === 1) {
+        if (!dependsOn.has(ok[0])) dependsOn.set(ok[0], []);
+        dependsOn.get(ok[0]).push(dev);
+      }
+    }
+    for (const [router, devs] of dependsOn.entries()) {
+      if (devs.length === 1 || mesh.typeOf.get(router) === "Coordinator") {
+        for (const dev of devs) {
+          const l = linkBetween(mesh, dev, router);
+          out.push({
+            kind: "single_link",
+            level: "warning",
+            ieees: [dev, router],
+            text: `${nameOf(dev)} has only one usable link (to ${nameOf(router)}, ${rateLqi(l && l.lqi, thr)} ${l && l.lqi}). A router nearer to it would give it a second route.`
+          });
+        }
+        continue;
+      }
+      out.push({
+        kind: "single_point",
+        level: "warning",
+        ieees: [router, ...devs],
+        text: `Single point of failure: ${devs.length} routers have no other good or fair link than ${nameOf(router)} (${devs.map(nameOf).join(", ")}). If it goes offline, they lose their way to the rest of the mesh.`
+      });
+    }
+    for (const r of routerSet) {
+      const best = bestRouterLink(mesh, r);
+      if (best && rateLqi(best.lqi, thr) === "weak") {
+        out.push({
+          kind: "isolated_router",
+          level: "warning",
+          ieees: [r],
+          text: `${nameOf(r)} has no good or fair link to another router (best LQI ${best.lqi}).`
+        });
+      }
+    }
+    for (const [router, n] of mesh.children.entries()) {
+      if (n >= 3) {
+        const kids = [...mesh.parentOf.entries()].filter(([, p]) => p.parent === router).map(([c]) => nameOf(c));
+        out.push({
+          kind: "many_children",
+          level: "info",
+          ieees: [router],
+          text: `${nameOf(router)} is the parent of ${n} battery devices (${kids.join(", ")}). If it's switched off at the wall, they lose contact until they find a new parent.`
+        });
+      }
+    }
+    const areas = /* @__PURE__ */ new Map();
+    for (const ieee of mesh.typeOf.keys()) {
+      const a = areaOf(ieee);
+      if (!a) continue;
+      if (!areas.has(a)) areas.set(a, { routers: 0, devices: 0 });
+      const e = areas.get(a);
+      e.devices++;
+      if (isRouterLike(mesh, ieee)) e.routers++;
+    }
+    for (const [area, e] of areas.entries()) {
+      if (e.devices >= 1 && e.routers === 0) {
+        out.push({ kind: "area_without_router", level: "info", ieees: [], text: `${area} has ${e.devices} Zigbee device${e.devices === 1 ? "" : "s"} but no router.` });
+      }
+    }
+    const order = { warning: 0, info: 1 };
+    return out.sort((x, y) => order[x.level] - order[y.level]);
+  }
 
   // src/table-filter.js
   var DIRECTION_ALL = "all";
@@ -3310,6 +3787,9 @@ a.btn { display:inline-block; text-decoration:none; }
       this._backendInstalled = probe.installed;
       this._backendVersion = probe.version;
       this._bundledCardVersion = probe.bundledCardVersion;
+      this._experimental = probe.experimental;
+      this._lqiThr = probe.lqi || { ...LQI_RECOMMENDED };
+      this._toggleExperimentalUi();
       if (!this._backendAvailable) {
         this._storageMode = "local";
         this._storage = this._localStorage;
@@ -3705,6 +4185,7 @@ a.btn { display:inline-block; text-decoration:none; }
       await this._loadRetryCount();
       await this._loadScanBatchSize();
       await this._loadFpMarkerScale();
+      await this._loadPendingChecks();
       await this._loadFloorplan();
       await this._loadEndpointAnnotations();
       await this._loadShowDevicePhotos();
@@ -3713,6 +4194,44 @@ a.btn { display:inline-block; text-decoration:none; }
       this._setStatus("info", "Loading ZHA devices\u2026", 0);
       await this._reloadDevices({ initial: true });
       this._openDeepLinkedDevice();
+      this._pickUpIntegrationScans();
+    }
+    /** 1.5.0: the integration reads binding tables itself (the device-page
+     *  Rescan button, the nightly binding check). Use any read that's newer
+     *  than the card's own last read of that device. */
+    async _pickUpIntegrationScans() {
+      if (!this._backendInstalled || !this._api) return;
+      let res;
+      try {
+        res = await this._api.deviceScans();
+      } catch (e) {
+        return;
+      }
+      const scans = res && res.scans || {};
+      const taken = [];
+      for (const [ieee, scan] of Object.entries(scans)) {
+        const id = normIeee(ieee);
+        if (!isIeee(id) || !scan || typeof scan.at !== "string" || Number.isNaN(Date.parse(scan.at))) continue;
+        if (!this._devices.some((d) => normIeee(d.ieee) === id)) continue;
+        const h = this._responseHistory.get(id);
+        const mine = h && (h.lastSuccessAt || null);
+        if (mine && Date.parse(mine) >= Date.parse(scan.at)) continue;
+        const { bindings } = sanitizeStoredBindings({ [id]: scan.bindings || [] });
+        this._bindings.set(id, bindings.get(id) || []);
+        const entry = h || { successMs: [], outcomes: [], lastAttemptAt: null, lastSuccessAt: null };
+        entry.lastSuccessAt = scan.at;
+        if (!entry.lastAttemptAt || Date.parse(entry.lastAttemptAt) < Date.parse(scan.at)) entry.lastAttemptAt = scan.at;
+        this._responseHistory.set(id, entry);
+        taken.push(this._ieeeLabel(id, { plain: true }));
+      }
+      if (!taken.length) return;
+      await this._saveScanState();
+      await this._saveHistory();
+      this._render();
+      this._setStatus(
+        "info",
+        `Using ${taken.length} newer binding read${taken.length === 1 ? "" : "s"} from the integration (device-page Rescan or nightly check): ${taken.slice(0, 3).join(", ")}${taken.length > 3 ? "\u2026" : ""}.`
+      );
     }
     /** /zha-bindings-manager?device=<ieee> (linked from the integration's
      *  device-page Bindings sensor and Repairs issues) opens that device's
@@ -3922,7 +4441,43 @@ a.btn { display:inline-block; text-decoration:none; }
         );
       }
     }
+    /** 1.5.0: unconfirmed changes survive a page reload. */
+    async _loadPendingChecks() {
+      try {
+        const raw = await this._storage.getItem(this._config.id, "pending-checks");
+        const cutoff = Date.now() - 14 * 24 * 3600 * 1e3;
+        const list2 = Array.isArray(raw) ? raw : [];
+        const ok = (e) => e && (e.kind === "bind" || e.kind === "unbind") && isIeee(e.sourceIeee) && Number.isInteger(e.sourceEndpoint) && Number.isInteger(e.clusterId) && typeof e.sentAt === "number" && e.sentAt > cutoff && e.target && (e.target.isGroup ? Number.isInteger(e.target.groupId) : isIeee(e.target.ieee) && Number.isInteger(e.target.endpoint));
+        this._pendingChecks = new Map(
+          list2.filter(ok).map((e) => {
+            const clean = {
+              kind: e.kind,
+              sourceIeee: normIeee(e.sourceIeee),
+              sourceEndpoint: e.sourceEndpoint,
+              clusterId: e.clusterId,
+              target: e.target.isGroup ? { isGroup: true, groupId: e.target.groupId } : { isGroup: false, ieee: normIeee(e.target.ieee), endpoint: e.target.endpoint },
+              sentAt: e.sentAt
+            };
+            return [pendingKey(clean), clean];
+          })
+        );
+      } catch (e) {
+        this._pendingChecks = /* @__PURE__ */ new Map();
+      }
+      this._pendingLoaded = true;
+      this._renderPendingBanner();
+    }
+    _savePendingChecks() {
+      if (!this._pendingLoaded || !this._storage) return;
+      const list2 = [...this._pendingChecks.values()];
+      const sig = JSON.stringify(list2);
+      if (sig === this._pendingSaved) return;
+      this._pendingSaved = sig;
+      this._storage.setItem(this._config.id, "pending-checks", list2).catch(() => {
+      });
+    }
     _renderPendingBanner() {
+      this._savePendingChecks();
       const el = this._q("#pending-banner");
       if (!el) return;
       const items = [...this._pendingChecks.values()];
@@ -4615,7 +5170,10 @@ a.btn { display:inline-block; text-decoration:none; }
       if (this._view === "advanced") this._renderAdvanced();
       if (this._view === "floorplan") this._renderFloorplan();
       if (this._view === "devices") this._renderDevicesTab();
+      if (this._view === "groups") this._renderGroupsTab();
       if (this._view === "capexplorer") this._renderCapabilityExplorer();
+      if (this._view === "mesh") this._renderMesh();
+      this._toggleExperimentalUi();
       this._refreshDrawer();
     }
     _q(sel) {
@@ -4637,7 +5195,6 @@ a.btn { display:inline-block; text-decoration:none; }
         btn.addEventListener("click", () => this._switchView(btn.dataset.view));
       });
       this._q("#btn-scan").addEventListener("click", () => this._scanBindings());
-      this._q("#btn-control-lights").addEventListener("click", () => this._openGroupFlowPickRemote());
       this._q("#drawer-close").addEventListener("click", () => this._closeDrawer());
       this._q("#btn-refresh-devices").addEventListener("click", () => this._loadAll());
       this._q("#btn-rescan-settings").addEventListener("click", () => {
@@ -4762,6 +5319,8 @@ a.btn { display:inline-block; text-decoration:none; }
         this._saveFloorplan();
         this._loadFpImage(url);
       });
+      const fpFloor = this._q("#fp-floor");
+      if (fpFloor) fpFloor.addEventListener("change", () => this._fpSwitchFloor(fpFloor.value));
       this._q("#btn-fp-zoom-in").addEventListener("click", () => this._fpZoomBy(1.2));
       this._q("#btn-fp-zoom-out").addEventListener("click", () => this._fpZoomBy(1 / 1.2));
       this._q("#btn-fp-zoom-fit").addEventListener("click", () => this._fpZoomFit());
@@ -5210,6 +5769,32 @@ a.btn { display:inline-block; text-decoration:none; }
         });
         this._edgesLayer.appendChild(line);
       });
+      [...this._pendingChecks.values()].filter((e) => e.kind === "bind" && !this._bindingPresent(e.sourceIeee, e.sourceEndpoint, e.clusterId, e.target)).forEach((e) => {
+        const fromKey = this._nodeKey(e.sourceIeee);
+        const toKey = e.target.isGroup ? this._groupNodeKey(e.target.groupId) : this._nodeKey(e.target.ieee);
+        if (!visibleKeys.has(fromKey) || !visibleKeys.has(toKey)) return;
+        const pairKey = `${fromKey}->${toKey}`;
+        const idx = pairCount.get(pairKey) || 0;
+        pairCount.set(pairKey, idx + 1);
+        const line = this._svgEl("path", {
+          class: "edge edge-pending",
+          "data-from": fromKey,
+          "data-to": toKey,
+          "data-offset": idx,
+          stroke: clusterColor(e.clusterId),
+          fill: "none",
+          "marker-end": "url(#arrow)"
+        });
+        line.style.setProperty("--edge-color", clusterColor(e.clusterId));
+        const title = this._svgEl("title");
+        title.textContent = `Not confirmed yet: bind ${this._describeChange(e)}. Click to check again (wake a battery device first).`;
+        line.appendChild(title);
+        line.addEventListener("click", (ev) => {
+          ev.stopPropagation();
+          this._checkPendingAgain();
+        });
+        this._edgesLayer.appendChild(line);
+      });
       this._membershipEdges().forEach((m) => {
         const fromKey = this._groupNodeKey(m.groupId);
         const toKey = this._nodeKey(m.memberIeee);
@@ -5234,7 +5819,97 @@ a.btn { display:inline-block; text-decoration:none; }
         });
         this._edgesLayer.appendChild(line);
       });
+      this._renderMapRoute();
       this._updateEdgePositions();
+    }
+    /** 1.5.0 (experimental): a binding's likely route drawn over the Map, hop
+     *  by hop through the routers, from the last network scan. Set by "Show
+     *  route on the Map" in a binding's details. */
+    _renderMapRoute() {
+      const banner = this._q("#map-route-banner");
+      this._qa("#graph-svg .map-route-node").forEach((el) => el.classList.remove("map-route-node"));
+      if (this._routeLayer && this._routeLayer.parentNode) this._routeLayer.parentNode.removeChild(this._routeLayer);
+      this._routeLayer = null;
+      const r = this._mapRoute;
+      if (!r || !this._experimental) {
+        if (banner) banner.style.display = "none";
+        return;
+      }
+      const nameOf = (i) => this._ieeeLabel(i, { plain: true });
+      const show = (html) => {
+        if (!banner) return;
+        banner.style.display = "";
+        banner.innerHTML = `<span class="map-route-text">${html}</span> <button class="btn btn-small" id="map-route-clear">Clear route</button>`;
+        const b = this._q("#map-route-clear");
+        if (b) b.addEventListener("click", () => {
+          this._mapRoute = null;
+          this._renderMapRoute();
+        });
+      };
+      const title = `<strong>Route ${escapeHtml(nameOf(r.sourceIeee))} \u2192 ${escapeHtml(nameOf(r.targetIeee))}</strong>`;
+      if (!this._meshSnapshot) {
+        this._meshEnsureLoaded();
+        show(`${title}: loading the last network scan\u2026`);
+        return;
+      }
+      if (!Object.keys(this._meshSnapshot).length) {
+        show(`${title}: no network scan yet. Open the <strong>Network</strong> tab and click <strong>Scan network</strong>.`);
+        return;
+      }
+      const path = routePath(this._meshModel(), r.sourceIeee, r.targetIeee);
+      const v = pathVerdict(path, this._lqiThr);
+      const visible = new Set((this._graphNodes || []).map((n) => n.key));
+      const hidden = /* @__PURE__ */ new Set();
+      const layer = this._svgEl("g", { class: "map-route-layer" });
+      path.hops.forEach((h, i) => {
+        const a = this._nodeKey(h.from);
+        const b = this._nodeKey(h.to);
+        [a, b].forEach((k, j) => {
+          if (!visible.has(k)) hidden.add(j ? h.to : h.from);
+          else if (this._nodeEls && this._nodeEls.get(k)) this._nodeEls.get(k).classList.add("map-route-node");
+        });
+        if (!visible.has(a) || !visible.has(b)) return;
+        const level = rateLqi(h.lqi, this._lqiThr);
+        const line = this._svgEl("path", { class: `map-route-hop map-route-${level}`, "data-from": a, "data-to": b, fill: "none", "marker-end": "url(#route-arrow)" });
+        line.style.stroke = this._lqiColor(level);
+        const t = this._svgEl("title");
+        t.textContent = `Hop ${i + 1}: ${nameOf(h.from)} \u2192 ${nameOf(h.to)}, ${typeof h.lqi === "number" ? `${level} (LQI ${h.lqi})` : "link quality not reported"}`;
+        line.appendChild(t);
+        layer.appendChild(line);
+        const label = this._svgEl("text", { class: "map-route-lqi", "data-from": a, "data-to": b, "text-anchor": "middle" });
+        label.textContent = typeof h.lqi === "number" ? String(h.lqi) : "?";
+        label.style.fill = this._lqiColor(level);
+        layer.appendChild(label);
+      });
+      const svg = this._q("#graph-svg");
+      const defs = svg && svg.querySelector("defs");
+      if (defs && !defs.querySelector("#route-arrow")) {
+        defs.insertAdjacentHTML("beforeend", `<marker id="route-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="5" markerHeight="5" orient="auto"><path d="M 0 0 L 10 5 L 0 10 z" fill="context-stroke"></path></marker>`);
+      }
+      if (svg && this._nodesLayer) svg.insertBefore(layer, this._nodesLayer);
+      this._routeLayer = layer;
+      this._updateMapRoutePositions();
+      const chain = path.hops.length ? `${escapeHtml(nameOf(path.hops[0].from))}${path.hops.map((h) => ` \u2192 ${this._lqiChip(h.lqi)} ${escapeHtml(nameOf(h.to))}`).join("")}` : "";
+      const verdict = v.level === "good" ? "Likely path looks good." : v.level === "weak" ? `Weak link: ${escapeHtml(nameOf(v.weakest.from))} to ${escapeHtml(nameOf(v.weakest.to))} (LQI ${v.weakest.lqi}).` : v.level === "none" ? `No route found. ${escapeHtml(path.note || "")}` : `Partly known. ${escapeHtml(path.note || "Some link qualities weren't reported.")}`;
+      const hiddenNote = hidden.size ? ` <span class="muted">Not on the Map with the current filters: ${[...hidden].map((i) => escapeHtml(nameOf(i))).join(", ")} (tick Routers or End devices to see every hop).</span>` : "";
+      show(`${title}: ${chain ? `${chain}. ` : ""}${verdict}${hiddenNote} <span class="muted">A prediction from the scan ${escapeHtml(this._meshAgeText() || "")}.</span>`);
+    }
+    _updateMapRoutePositions() {
+      if (!this._routeLayer) return;
+      this._routeLayer.querySelectorAll("[data-from]").forEach((el) => {
+        const from = this._positions[el.dataset.from];
+        const to = this._positions[el.dataset.to];
+        if (!from || !to) return;
+        const dx = to.x - from.x, dy = to.y - from.y;
+        const dist = Math.hypot(dx, dy) || 1;
+        if (el.tagName.toLowerCase() === "text") {
+          el.setAttribute("x", (from.x + to.x) / 2 - dy / dist * 12);
+          el.setAttribute("y", (from.y + to.y) / 2 + dx / dist * 12);
+          return;
+        }
+        const g1 = this._nodeRadius(el.dataset.from) + 4, g2 = this._nodeRadius(el.dataset.to) + 6;
+        el.setAttribute("d", `M ${from.x + dx / dist * g1} ${from.y + dy / dist * g1} L ${to.x - dx / dist * g2} ${to.y - dy / dist * g2}`);
+      });
     }
     /** Matches the radius used in _renderNode() for each node kind, so edges
      *  can be trimmed back to the actual drawn edge of the icon rather than
@@ -5247,6 +5922,7 @@ a.btn { display:inline-block; text-decoration:none; }
     }
     _updateEdgePositions() {
       if (!this._edgesLayer) return;
+      this._updateMapRoutePositions();
       this._edgesLayer.querySelectorAll(".edge").forEach((el) => {
         const from = this._positions[el.dataset.from];
         const to = this._positions[el.dataset.to];
@@ -5460,18 +6136,20 @@ a.btn { display:inline-block; text-decoration:none; }
         <tr><td>Group</td><td>${escapeHtml(groupLabel)}</td></tr>
         <tr><td>Member</td><td>${escapeHtml(deviceLabel)} (ep ${m.memberEndpoint})</td></tr>
       </table>
-      <p class="hint">This isn't a binding-table entry \u2014 it's real ZCL group
-        membership, sourced from ZHA's own group data. The member receives
-        this group's commands without needing any binding of its own. To
-        change group membership, use Home Assistant's own group management
-        (Settings &rarr; Devices &amp; Services &rarr; Zigbee Home
-        Automation &rarr; Groups) \u2014 this card doesn't offer a "remove from
-        group" action yet.</p>
+      <p class="hint">This isn't a binding-table entry: it's group membership, from ZHA's own
+        group data. The member receives this group's commands without needing any binding of its own.
+        Add or remove members on the <strong>Groups</strong> tab.</p>
       <div class="dialog-actions">
+        <button class="btn" id="membership-groups">Open the Groups tab</button>
         <button class="btn" id="unbind-cancel">Close</button>
       </div>`;
       this._q("#dialog").classList.add("open");
       this._q("#unbind-cancel").addEventListener("click", () => this._closeDialog());
+      this._q("#membership-groups").addEventListener("click", () => {
+        this._closeDialog();
+        this._groupsFocus = m.groupId;
+        this._switchView("groups");
+      });
     }
     // -------------------------------------------------------------------
     // "Control lights with this remote" flow (1.1.0). Pure logic lives in
@@ -5482,9 +6160,9 @@ a.btn { display:inline-block; text-decoration:none; }
     // share the result.
     // -------------------------------------------------------------------
     /** Toolbar entry (1.4.0): the flow starts by picking the remote. */
-    async _openGroupFlowPickRemote() {
+    async _openGroupFlowPickRemote({ groupId = null } = {}) {
       this._closeDrawer();
-      this._flow = { step: "remote", fromToolbar: true, remotes: null, sourceIeee: null };
+      this._flow = { step: "remote", fromToolbar: true, remotes: null, sourceIeee: null, presetGroupId: groupId };
       const panel = this._q(".dialog-panel");
       if (panel) panel.classList.add("wide");
       this._q("#dialog").classList.add("open");
@@ -5674,7 +6352,7 @@ a.btn { display:inline-block; text-decoration:none; }
         if (next)
           next.addEventListener("click", () => {
             const d = this._devices.find((x) => x.ieee === f.sourceIeee);
-            if (d) this._openGroupFlow(d, { fromToolbar: true });
+            if (d) this._openGroupFlow(d, { fromToolbar: true, groupId: f.presetGroupId != null ? f.presetGroupId : null });
           });
         this._qa("#flow-cancel").forEach((b) => b.addEventListener("click", () => {
           this._flow = null;
@@ -6113,11 +6791,13 @@ a.btn { display:inline-block; text-decoration:none; }
       }
     }
     _closeDialog() {
+      const hadFlow = !!this._flow;
       this._flow = null;
       this._q("#dialog").classList.remove("open");
       const panel = this._q(".dialog-panel");
       if (panel) panel.classList.remove("wide");
       this._explodedDeviceIeee = null;
+      if (hadFlow || ["groups", "graph", "table", "devices"].includes(this._view)) this._render();
     }
     // -------------------------------------------------------------------
     // -------------------------------------------------------------------
@@ -6131,8 +6811,10 @@ a.btn { display:inline-block; text-decoration:none; }
       if (!d) return;
       this._drawerIeee = d.ieee;
       this._drawerShareOpen = false;
+      this._drawerRouteOpen = false;
       this._renderDrawer();
       const el = this._q("#drawer");
+      this._wireDrawerSwipe();
       if (el) {
         el.classList.add("open");
         el.setAttribute("aria-hidden", "false");
@@ -6153,12 +6835,54 @@ a.btn { display:inline-block; text-decoration:none; }
         );
       }
     }
+    /** Swipe right on the side panel to close it (1.5.0b6, for phones where
+     *  the ✕ can sit under the app's header). Wired once. */
+    _wireDrawerSwipe() {
+      const el = this._q("#drawer");
+      if (!el || el.dataset.swipe) return;
+      el.dataset.swipe = "1";
+      let start = null;
+      el.addEventListener(
+        "touchstart",
+        (e) => {
+          if (e.touches.length !== 1) return;
+          start = { x: e.touches[0].clientX, y: e.touches[0].clientY, dx: 0, horizontal: null };
+        },
+        { passive: true }
+      );
+      el.addEventListener(
+        "touchmove",
+        (e) => {
+          if (!start || e.touches.length !== 1) return;
+          const dx = e.touches[0].clientX - start.x;
+          const dy = e.touches[0].clientY - start.y;
+          if (start.horizontal === null && Math.hypot(dx, dy) > 8) start.horizontal = Math.abs(dx) > Math.abs(dy) && dx > 0;
+          if (!start.horizontal) return;
+          start.dx = Math.max(0, dx);
+          el.style.transition = "none";
+          el.style.transform = `translateX(${start.dx}px)`;
+        },
+        { passive: true }
+      );
+      const end = () => {
+        if (!start) return;
+        const close = start.horizontal && start.dx > Math.min(100, el.offsetWidth * 0.25);
+        el.style.transition = "";
+        el.style.transform = "";
+        start = null;
+        if (close) this._closeDrawer();
+      };
+      el.addEventListener("touchend", end);
+      el.addEventListener("touchcancel", end);
+    }
     _closeDrawer() {
       this._drawerIeee = null;
       const el = this._q("#drawer");
       if (el) {
         el.classList.remove("open");
         el.setAttribute("aria-hidden", "true");
+        const body = this._q("#drawer-body");
+        if (body) setTimeout(() => !this._drawerIeee && (body.innerHTML = ""), 250);
       }
     }
     /** Re-renders the drawer if it's open (after scans, device reloads…). */
@@ -6237,6 +6961,22 @@ a.btn { display:inline-block; text-decoration:none; }
         return `<li>${name}${via}<span class="muted drawer-clusters">${escapeHtml(clusters)}</span></li>`;
       }).join("")}</ul>`;
     }
+    /** 1.5.0: whether this model is in the community capability database.
+     *  Returns HTML (escaped here). Loads the index once if it isn't yet. */
+    _drawerCommunityStatus(d) {
+      if (!d.manufacturer && !d.model) return `<span class="muted">Unknown model</span>`;
+      if (!this._capExpIndex) {
+        if (this._capExpError) return `<span class="muted">Couldn't load it</span>`;
+        if (!this._capExpLoading) this._capExpLoadIndex();
+        return `<span class="muted">Checking\u2026</span>`;
+      }
+      const m = matchLocalDevices([d], this._capExpIndex)[0];
+      if (!m) {
+        return `<span class="drawer-db-missing">Not in it yet.</span> <a href="#" class="src-link" id="drawer-db-share">Check and share capabilities</a> <span class="muted">to help the next person with this model.</span>`;
+      }
+      const n = m.entries.length;
+      return `In it <span class="muted">(${n} firmware observation${n === 1 ? "" : "s"})</span>`;
+    }
     _renderDrawer() {
       const d = this._devices.find((x) => normIeee(x.ieee) === normIeee(this._drawerIeee || ""));
       const body = this._q("#drawer-body");
@@ -6257,7 +6997,8 @@ a.btn { display:inline-block; text-decoration:none; }
         ["Model", [d.manufacturer, d.model].filter(Boolean).join(" ") || "Unknown"],
         reg && reg.sw_version ? ["Firmware", reg.sw_version] : null,
         ["Power", d.power_source || "Unknown"],
-        ["Bindings read", this._lastScanCellInfo(d).html.replace(/<button[\s\S]*?<\/button>/, "")]
+        ["Bindings read", this._lastScanCellInfo(d).html.replace(/<button[\s\S]*?<\/button>/, "")],
+        ["Community database", this._drawerCommunityStatus(d)]
       ].filter(Boolean);
       const battery = this._isBatteryDevice(d);
       const haUrl = deviceHaUrl(d);
@@ -6279,7 +7020,7 @@ a.btn { display:inline-block; text-decoration:none; }
         ${photo}
         <div>
           ${tags.length ? `<div class="drawer-tags">${tags.map((t) => `<span class="chip">${escapeHtml(t)}</span>`).join("")}</div>` : ""}
-          <table class="detail-table drawer-facts">${facts.map(([k, v]) => `<tr><td>${escapeHtml(k)}</td><td>${k === "Bindings read" ? v : escapeHtml(String(v))}</td></tr>`).join("")}</table>
+          <table class="detail-table drawer-facts">${facts.map(([k, v]) => `<tr><td>${escapeHtml(k)}</td><td>${k === "Bindings read" || k === "Community database" ? v : escapeHtml(String(v))}</td></tr>`).join("")}</table>
         </div>
       </div>
       ${problems}
@@ -6294,6 +7035,7 @@ a.btn { display:inline-block; text-decoration:none; }
         ${this._drawerRelListHtml(rel.controlledBy, "Nothing is bound to it.")}
         ${rel.memberOf.length ? `<p class="hint">Member of ${rel.memberOf.map((g) => escapeHtml(g.name)).join(", ")}.</p>` : ""}
       </div>
+      ${this._drawerMeshHtml(d)}
       <div class="drawer-section drawer-actions">
         <div class="drawer-section-title">Actions</div>
         ${isController ? `<button class="btn btn-primary" id="drawer-control-lights" title="Pick lights for this remote to control; the card creates a group if needed, binds it and checks it works">Control lights with this\u2026</button>` : ""}
@@ -6301,6 +7043,7 @@ a.btn { display:inline-block; text-decoration:none; }
         <button class="btn" id="drawer-rescan" title="Read this device's binding table again">Rescan bindings</button>
         <button class="btn" id="drawer-share" title="Check which commands each endpoint supports and share it with the community database">Check and share capabilities\u2026</button>
         ${share}
+        ${this._experimental && rel.controls.length ? `<button class="btn" id="drawer-route" title="Experimental: the likely path each of its bindings takes through the mesh, and the weakest link">Check route\u2026</button>${this._drawerRouteHtml(d, rel)}` : ""}
         <button class="btn" id="drawer-endpoints" title="Per-endpoint layout: clusters, bindings and supported commands">Show endpoints\u2026</button>
         ${haUrl ? `<a class="btn" href="${escapeHtml(haUrl)}" target="_blank" rel="noopener" title="Opens this device's page in Home Assistant, in a new tab">Open in Home Assistant</a>` : ""}
       </div>`;
@@ -6339,6 +7082,15 @@ a.btn { display:inline-block; text-decoration:none; }
         this._drawerShareOpen = !this._drawerShareOpen;
         this._renderDrawer();
       });
+      const dbShare = this._q("#drawer-db-share");
+      if (dbShare)
+        dbShare.addEventListener("click", (e) => {
+          e.preventDefault();
+          this._drawerShareOpen = true;
+          this._renderDrawer();
+          const box = this._q("#drawer-body .drawer-share");
+          if (box && box.scrollIntoView) box.scrollIntoView({ block: "nearest", behavior: "smooth" });
+        });
       on("#drawer-share-cancel", () => {
         this._drawerShareOpen = false;
         this._renderDrawer();
@@ -6349,6 +7101,780 @@ a.btn { display:inline-block; text-decoration:none; }
         this._openDeviceExplodedView(d, { checkAll: true });
       });
       on("#drawer-endpoints", () => this._openDeviceExplodedView(d));
+      on("#drawer-mesh-read", () => this._meshReadOne(d.ieee));
+      on("#drawer-mesh-read-parent", (e) => this._meshReadOne(e.currentTarget.dataset.parent));
+      on("#drawer-mesh-scan", () => {
+        this._switchView("mesh");
+        this._meshScan();
+      });
+      on("#drawer-route", () => {
+        this._drawerRouteOpen = !this._drawerRouteOpen;
+        this._renderDrawer();
+      });
+      this._qa("#drawer-body [data-route-map]").forEach(
+        (b) => b.addEventListener("click", () => {
+          this._mapRoute = { sourceIeee: d.ieee, targetIeee: b.dataset.routeMap };
+          this._closeDrawer();
+          if (this._view !== "graph") this._switchView("graph");
+          else this._renderGraph();
+        })
+      );
+      on("#drawer-route-close", () => {
+        this._drawerRouteOpen = false;
+        this._renderDrawer();
+      });
+      const scanFromDrawer = () => {
+        this._switchView("mesh");
+        this._meshScan();
+      };
+      on("#drawer-route-scan", scanFromDrawer);
+      on("#drawer-route-rescan", scanFromDrawer);
+    }
+    // -------------------------------------------------------------------
+    // Experimental (1.5.0 local build): Network tab and route check.
+    // Only shown when the integration reports experimental_features. The
+    // integration reads each router's tables (mesh_read) and stores them;
+    // everything below is worked out here from that snapshot (src/mesh.js).
+    // -------------------------------------------------------------------
+    _toggleExperimentalUi() {
+      const tab = this._q && this.shadowRoot && this._q("#tab-mesh");
+      if (tab) tab.style.display = this._experimental ? "" : "none";
+      const hint = this._q && this.shadowRoot && this._q("#map-route-hint");
+      if (hint) hint.style.display = this._experimental ? "" : "none";
+      if (!this._experimental && this._view === "mesh") this._switchView("graph");
+    }
+    _meshRouters() {
+      return this._devices.filter((d) => d.device_type === "Router" || d.device_type === "Coordinator").sort((a, b) => a.device_type === "Coordinator" ? -1 : b.device_type === "Coordinator" ? 1 : this._deviceLabel(a).localeCompare(this._deviceLabel(b)));
+    }
+    _meshModel() {
+      if (!this._meshSnapshot) return null;
+      if (!this._meshCache || this._meshCache.version !== this._meshVersion || this._meshCache.devices !== this._devices) {
+        this._meshCache = { version: this._meshVersion, devices: this._devices, mesh: buildMesh(this._meshSnapshot, this._devices) };
+      }
+      return this._meshCache.mesh;
+    }
+    async _meshEnsureLoaded() {
+      if (this._meshSnapshot || this._meshLoading || !this._experimental) return;
+      this._meshLoading = true;
+      try {
+        const res = await this._api.meshGet();
+        this._meshSnapshot = res && res.devices || {};
+        this._meshVersion = (this._meshVersion || 0) + 1;
+      } catch (err) {
+        this._meshError = err && err.message || String(err);
+        this._meshSnapshot = {};
+      } finally {
+        this._meshLoading = false;
+      }
+      if (this._view === "mesh") this._renderMesh();
+      if (this._mapRoute && this._view === "graph") this._renderMapRoute();
+      this._refreshDrawer();
+    }
+    async _meshScan() {
+      if (this._meshScanning) return;
+      const routers = this._meshRouters();
+      if (!routers.length) {
+        this._setStatus("error", "No routers in the device list, so there's nothing to read.");
+        return;
+      }
+      if (!this._meshSnapshot) this._meshSnapshot = {};
+      this._meshScanning = { done: 0, total: routers.length, stop: false, current: null, failed: 0 };
+      this._renderMesh();
+      for (const d of routers) {
+        if (this._meshScanning.stop) break;
+        this._meshScanning.current = this._deviceLabel(d);
+        this._renderMeshProgress();
+        try {
+          const entry = await this._api.meshRead(d.ieee);
+          this._meshSnapshot[normIeee(d.ieee)] = entry;
+          if (!entry.ok) this._meshScanning.failed++;
+        } catch (err) {
+          this._meshScanning.failed++;
+          this._meshSnapshot[normIeee(d.ieee)] = { at: (/* @__PURE__ */ new Date()).toISOString(), ok: false, error: err && err.message || String(err), routes: [], neighbours: [] };
+        }
+        this._meshVersion = (this._meshVersion || 0) + 1;
+        this._meshScanning.done++;
+        this._renderMeshProgress();
+      }
+      const s = this._meshScanning;
+      this._meshScanning = null;
+      this._setStatus(
+        s.failed ? "warning" : "success",
+        `Network scan ${s.stop ? "stopped" : "finished"}: ${s.done - s.failed} of ${s.total} routers answered${s.failed ? ` (${s.failed} didn't)` : ""}.`
+      );
+      if (this._view === "mesh") this._renderMesh();
+      this._refreshDrawer();
+    }
+    _renderMeshProgress() {
+      const el = this._q("#mesh-progress");
+      const s = this._meshScanning;
+      if (!el || !s) return;
+      el.innerHTML = `<progress max="${s.total}" value="${s.done}"></progress>
+      <span>Reading ${escapeHtml(s.current || "")} (${s.done} of ${s.total})\u2026</span>`;
+    }
+    _meshAgeText() {
+      const times = Object.values(this._meshSnapshot || {}).map((e) => e && typeof e.at === "string" ? Date.parse(e.at) : NaN).filter((t) => !Number.isNaN(t));
+      if (!times.length) return null;
+      return relTime(new Date(Math.min(...times)).toISOString());
+    }
+    _lqiColor(level) {
+      return { good: "var(--success-color, #43a047)", fair: "var(--warning-color, #ffa000)", weak: "var(--error-color, #db4437)" }[level] || "var(--disabled-text-color, #999)";
+    }
+    _lqiChip(lqi) {
+      const level = rateLqi(lqi, this._lqiThr);
+      const label = typeof lqi === "number" ? `${level} \xB7 ${lqi}` : "unknown";
+      return `<span class="lqi-chip lqi-${level}">${escapeHtml(label)}</span>`;
+    }
+    /** Layouts the Network tab can draw on: each floor's plan (or the single
+     *  plan without HA floors) with at least one placed router, and the Map. */
+    _meshLayout() {
+      const floors = this._haFloors();
+      const routers = this._meshRouters().map((d) => normIeee(d.ieee));
+      const options = [];
+      if (floors.length) {
+        for (const f of floors) {
+          const plan = this._fpPlanFor(f.floor_id);
+          const n = routers.filter((i) => plan.positions && plan.positions[i] && this._deviceFloor(i) === f.floor_id).length;
+          if (plan.imageUrl && n) options.push({ value: `plan:${f.floor_id}`, label: f.name, floor: f.floor_id });
+        }
+      } else {
+        const plan = this._fpPlanFor(null);
+        const n = routers.filter((i) => plan.positions && plan.positions[i]).length;
+        if (plan.imageUrl && n >= 2) options.push({ value: "plan:", label: "Floor plan", floor: null });
+      }
+      options.push({ value: "map", label: "Map layout", floor: null });
+      const chosen = options.find((o) => o.value === this._meshLayoutChoice) || options[0];
+      return { mode: chosen.value === "map" ? "map" : "plan", floor: chosen.floor, value: chosen.value, options, floors };
+    }
+    _meshPlanSize(layout) {
+      const plan = this._fpPlanFor(layout.floor);
+      if (plan.imageUrl === this._fpImageUrl && this._fpImageSize) return this._fpImageSize;
+      return this._imgSize(plan.imageUrl, () => this._view === "mesh" && this._renderMesh());
+    }
+    _meshPos(ieee, layout) {
+      if (layout.mode === "plan") {
+        const size = this._meshPlanSize(layout);
+        if (!size) return null;
+        if (layout.floors.length && this._deviceFloor(ieee) !== layout.floor) return null;
+        const plan = this._fpPlanFor(layout.floor);
+        const f = plan.positions && plan.positions[ieee];
+        return f ? { x: f.x * size.w, y: f.y * size.h } : null;
+      }
+      return this._positions[this._nodeKey(ieee)] || null;
+    }
+    _meshLinkTitle(l, nameOf) {
+      const ha = l.heard[l.a];
+      const hb = l.heard[l.b];
+      const level = rateLqi(l.lqi, this._lqiThr);
+      const parts = [];
+      if (typeof ha === "number") parts.push(`${nameOf(l.a)} hears ${nameOf(l.b)} at ${ha}`);
+      if (typeof hb === "number") parts.push(`${nameOf(l.b)} hears ${nameOf(l.a)} at ${hb}`);
+      return `${nameOf(l.a)} \u2194 ${nameOf(l.b)}: ${level} ${l.lqi}${parts.length ? ` (${parts.join(", ")})` : ""}`;
+    }
+    _meshLegendHtml() {
+      const thr = this._lqiThr;
+      const sample = (level, w, dash) => `<svg width="34" height="10" aria-hidden="true"><line x1="2" y1="5" x2="32" y2="5" stroke="${this._lqiColor(level)}" stroke-width="${w}" ${dash ? 'stroke-dasharray="5 3"' : ""}/></svg>`;
+      return `<div class="mesh-legend">
+      <span>${sample("good", 4)} good, LQI ${thr.good} or more</span>
+      <span>${sample("fair", 2.5)} fair, ${thr.weak} to ${thr.good - 1}</span>
+      <span>${sample("weak", 1.5, true)} weak, below ${thr.weak}: messages may be lost</span>
+    </div>`;
+    }
+    _renderMesh() {
+      const el = this._q("#view-mesh");
+      if (!el) return;
+      if (!this._experimental) {
+        el.innerHTML = `<p class="muted">Turn on <strong>Experimental features</strong> under the ZHA Bindings Manager integration's Configure to use this tab.</p>`;
+        return;
+      }
+      if (!this._meshSnapshot) {
+        el.innerHTML = `<p class="muted">Loading the last network scan\u2026</p>`;
+        this._meshEnsureLoaded();
+        return;
+      }
+      const mesh = this._meshModel();
+      const thr = this._lqiThr;
+      const routers = this._meshRouters();
+      const read = Object.keys(this._meshSnapshot).length;
+      const age = this._meshAgeText();
+      const scanning = !!this._meshScanning;
+      const intro = `<div class="mesh-intro">
+        <p>Link quality between your routers, read from their own neighbour and routing tables.
+          Each link shows the weaker of its two directions. Good is LQI ${thr.good} or more, weak is below ${thr.weak}
+          (change these under the integration's Configure). It's a snapshot: routes change, and battery devices are only seen through their parent.</p>
+        <div class="mesh-toolbar">
+          <button class="btn btn-primary" id="mesh-scan" ${scanning ? "disabled" : ""} title="Reads every router's tables one at a time with zha-toolkit. Takes a few seconds per router.">Scan network</button>
+          ${scanning ? `<button class="btn" id="mesh-stop">Stop</button>` : ""}
+          <span class="muted">${age ? `Snapshot of ${read} of ${routers.length} routers, oldest read ${escapeHtml(age)}` : "No scan yet."}</span>
+          <span class="spacer"></span>
+          <label class="row">Layout
+            <select id="mesh-layout">${this._meshLayout().options.map((o) => `<option value="${escapeHtml(o.value)}" ${o.value === this._meshLayout().value ? "selected" : ""}>${escapeHtml(o.label)}</option>`).join("")}</select></label>
+          <label class="row">Show
+            <select id="mesh-show">
+              <option value="strongest" ${this._meshShowMode() === "strongest" ? "selected" : ""}>Strongest links</option>
+              <option value="all" ${this._meshShowMode() === "all" ? "selected" : ""}>Every link heard</option>
+              <option value="routes" ${this._meshShowMode() === "routes" ? "selected" : ""}>Routes my bindings use</option>
+            </select></label>
+          <label class="row"><input type="checkbox" id="mesh-battery" ${this._meshShowBattery !== false ? "checked" : ""}> Battery devices</label>
+        </div>
+        <p class="hint mesh-show-hint">${escapeHtml(this._meshShowHint())}</p>
+        <div id="mesh-progress" class="mesh-progress"></div>
+        ${this._meshFloorsHelpHtml()}
+      </div>`;
+      if (!read) {
+        el.innerHTML = intro + `<p class="muted">Click <strong>Scan network</strong> to read the tables. Nothing on your network is changed.</p>`;
+        this._wireMesh();
+        this._renderMeshProgress();
+        return;
+      }
+      const weakest = weakestLinks(mesh, 12).filter((l) => isRouterLike(mesh, l.a) || isRouterLike(mesh, l.b));
+      const nameOf = (i) => {
+        const d = this._devices.find((x) => normIeee(x.ieee) === i);
+        return d ? this._deviceLabel(d) : i;
+      };
+      const areaOf = (i) => {
+        const d = this._devices.find((x) => normIeee(x.ieee) === i);
+        return d && d.area_id ? this._areaName(d.area_id) : "";
+      };
+      const tips = meshSuggestions(mesh, { thr, nameOf, areaOf, routers: routers.map((d) => normIeee(d.ieee)) });
+      const failed = Object.entries(this._meshSnapshot).filter(([, e]) => e && !e.ok);
+      el.innerHTML = `${intro}
+      <div class="mesh-layout">
+        <div class="mesh-picture">${this._meshSvg(mesh)}
+          ${this._meshSelectedLinkHtml(mesh, nameOf)}
+          ${this._meshLegendHtml()}
+          <div class="mesh-legend-note"><span class="muted">Thicker = stronger. Each link uses the weaker of its two directions. ${this._meshLayout().floors.length && this._meshLayout().mode === "plan" ? "\u2191 and \u2193 mark links to routers on the floor above or below; a dashed ring means the router only has usable links to other floors. " : ""}Shading: green = good, amber = fair (works fine), red = weak, based on each router's second-best link; no shading = no routers there. Tap a line for its details; zoom with the buttons, the mouse wheel or a pinch, and drag to move. Click a device to open it.${mesh.staleEntries ? ` ${mesh.staleEntries} stale neighbour entries (LQI 0, not heard recently) were ignored.` : ""}</span></div>
+        </div>
+        <div class="mesh-side">
+          ${this._meshShowMode() === "routes" ? this._meshRoutesListHtml(mesh, nameOf) : ""}
+          <div class="drawer-section-title">Suggestions</div>
+          ${tips.length ? `<ul class="mesh-tips">${tips.map((t, i) => `<li class="mesh-tip-${t.level}" data-tip="${i}">${escapeHtml(t.text)}</li>`).join("")}</ul>` : `<p class="muted">Nothing stands out.</p>`}
+          ${this._meshBetweenFloorsHtml(mesh, nameOf)}
+          <div class="drawer-section-title">Weakest links</div>
+          <table class="detail-table mesh-links">${weakest.map(
+        (l) => `<tr data-link="${escapeHtml(l.a)}|${escapeHtml(l.b)}" class="${this._meshHighlight === `${l.a}|${l.b}` ? "active" : ""}"><td>${escapeHtml(nameOf(l.a))} \u2194 ${escapeHtml(nameOf(l.b))}</td><td>${this._lqiChip(l.lqi)}</td></tr>`
+      ).join("")}</table>
+          ${failed.length ? `<div class="drawer-section-title">Didn't answer</div><ul class="mesh-failed">${failed.map(
+        ([i, e]) => `<li><span>${escapeHtml(nameOf(i))}${e.error ? ` <span class="muted">(${escapeHtml(e.error)})</span>` : ""}</span> <button class="btn btn-small" data-mesh-read="${escapeHtml(i)}" ${this._meshReading ? "disabled" : ""}>Read again</button></li>`
+      ).join("")}</ul>` : ""}
+        </div>
+      </div>`;
+      this._wireMesh();
+      this._renderMeshProgress();
+    }
+    _meshSvg(mesh) {
+      const layout = this._meshLayout();
+      const { mode } = layout;
+      const size = mode === "plan" ? this._meshPlanSize(layout) : { w: 1200, h: 840 };
+      if (!size) return `<p class="muted">Loading the floor plan image\u2026</p>`;
+      const W = size.w;
+      const H = size.h;
+      const thr = this._lqiThr;
+      const routerIeees = this._meshRouters().map((d) => normIeee(d.ieee));
+      const pos = (i) => this._meshPos(i, layout);
+      const nameOf = (i) => {
+        const d = this._devices.find((x) => normIeee(x.ieee) === i);
+        return d ? this._deviceLabel(d) : i;
+      };
+      const floorOf = (i) => layout.floors.length ? this._deviceFloor(i) : null;
+      const levelOf = (fid) => {
+        const f = layout.floors.find((x) => x.floor_id === fid);
+        return f ? f.level ?? 0 : 0;
+      };
+      const heat = [];
+      const lines = [];
+      const nodes = [];
+      for (const r of routerIeees) {
+        const p = pos(r);
+        if (!p) continue;
+        const lq = [];
+        for (const l of mesh.links.values()) {
+          if ((l.a === r || l.b === r) && isRouterLike(mesh, l.a === r ? l.b : l.a) && typeof l.lqi === "number") lq.push(l.lqi);
+        }
+        lq.sort((a, b) => b - a);
+        const cov = lq.length ? lq[Math.min(1, lq.length - 1)] : null;
+        if (cov != null) heat.push(`<circle cx="${p.x}" cy="${p.y}" r="${W * 0.11}" fill="url(#mesh-heat-${rateLqi(cov, thr)})"/>`);
+      }
+      const showMode = this._meshShowMode();
+      const drawn = showMode === "all" ? [...mesh.links.values()] : showMode === "strongest" ? visibleRouterLinks(mesh, thr, 3) : [];
+      if (this._meshHighlight) {
+        const hl = mesh.links.get(this._meshHighlight);
+        if (hl && !drawn.includes(hl)) drawn.push(hl);
+      }
+      for (const l of drawn) {
+        if (!isRouterLike(mesh, l.a) || !isRouterLike(mesh, l.b) || typeof l.lqi !== "number") continue;
+        const pa = pos(l.a);
+        const pb = pos(l.b);
+        if (!pa || !pb) continue;
+        const level = rateLqi(l.lqi, thr);
+        const hi = this._meshHighlight === `${l.a}|${l.b}`;
+        lines.push(
+          `<g class="mesh-link" data-link="${escapeHtml(l.a)}|${escapeHtml(l.b)}"><line x1="${pa.x}" y1="${pa.y}" x2="${pb.x}" y2="${pb.y}" stroke="${this._lqiColor(level)}" style="--sw:${(hi ? 3 : 1) * (1 + l.lqi / 255 * 3) * (W / 1200)}" stroke-opacity="${hi ? 1 : level === "weak" ? 0.9 : 0.55}" ${level === "weak" ? `stroke-dasharray="${6 * (W / 1200)} ${4 * (W / 1200)}"` : ""}/><line class="mesh-link-hit" x1="${pa.x}" y1="${pa.y}" x2="${pb.x}" y2="${pb.y}" style="--sw:${16 * (W / 1200)}"><title>${escapeHtml(this._meshLinkTitle(l, nameOf))}</title></line></g>`
+        );
+      }
+      const r0 = 11 * (W / 1200);
+      const k = W / 1200;
+      if (showMode === "routes") {
+        const hops = /* @__PURE__ */ new Map();
+        for (const r of this._meshBindingRoutes(mesh)) {
+          for (const h of r.path.hops) {
+            const key = `${h.from}>${h.to}`;
+            if (!hops.has(key)) hops.set(key, { ...h, uses: [] });
+            hops.get(key).uses.push(r.label);
+          }
+        }
+        for (const h of hops.values()) {
+          const pa = pos(h.from);
+          const pb = pos(h.to);
+          if (!pa || !pb) continue;
+          const level = rateLqi(h.lqi, thr);
+          const linkKey2 = h.from < h.to ? `${h.from}|${h.to}` : `${h.to}|${h.from}`;
+          const title = `${nameOf(h.from)} \u2192 ${nameOf(h.to)}: ${level}${typeof h.lqi === "number" ? ` ${h.lqi}` : ""}
+Used by: ${h.uses.join("; ")}`;
+          lines.push(
+            `<g class="mesh-link mesh-route" data-link="${escapeHtml(linkKey2)}"><line x1="${pa.x}" y1="${pa.y}" x2="${pb.x}" y2="${pb.y}" stroke="${this._lqiColor(level)}" style="--sw:${(2 + Math.min(3, h.uses.length)) * k}" stroke-opacity="0.9" marker-end="url(#mesh-arrow-${level})" ${level === "weak" ? `stroke-dasharray="${6 * k} ${4 * k}"` : ""}/><line class="mesh-link-hit" x1="${pa.x}" y1="${pa.y}" x2="${pb.x}" y2="${pb.y}" style="--sw:${16 * k}"><title>${escapeHtml(title)}</title></line></g>`
+          );
+        }
+      }
+      const batteryNodes = [];
+      if (this._meshShowBattery !== false) {
+        for (const d of this._devices) {
+          if (d.device_type !== "EndDevice") continue;
+          const i = normIeee(d.ieee);
+          const p = pos(i);
+          if (!p) continue;
+          const parent = mesh.parentOf.get(i);
+          const pp = parent ? pos(parent.parent) : null;
+          const level = parent ? rateLqi(parent.lqi, thr) : "unknown";
+          if (parent && pp && showMode !== "routes") {
+            lines.push(
+              `<g class="mesh-link mesh-parent-link" data-link="${escapeHtml(i < parent.parent ? `${i}|${parent.parent}` : `${parent.parent}|${i}`)}"><line x1="${p.x}" y1="${p.y}" x2="${pp.x}" y2="${pp.y}" stroke="${this._lqiColor(level)}" style="--sw:${1.2 * k}" stroke-opacity="0.8" stroke-dasharray="${2 * k} ${2 * k}"/><line class="mesh-link-hit" x1="${p.x}" y1="${p.y}" x2="${pp.x}" y2="${pp.y}" style="--sw:${12 * k}"><title>${escapeHtml(
+                `${nameOf(i)} \u2192 parent ${nameOf(parent.parent)}: ${level}${typeof parent.lqi === "number" ? ` ${parent.lqi}` : ""}`
+              )}</title></line></g>`
+            );
+          }
+          const tip = parent ? `${nameOf(i)} (battery): parent ${nameOf(parent.parent)}, ${level}${typeof parent.lqi === "number" ? ` ${parent.lqi}` : ""}` : `${nameOf(i)} (battery): parent unknown. No router listed it as a child in the last scan; it may have been asleep or moved.`;
+          batteryNodes.push(`<g class="mesh-node mesh-battery ${parent ? "" : "orphan"}" data-ieee="${escapeHtml(i)}" transform="translate(${p.x},${p.y})"><g class="mesh-zs">
+          <circle r="${r0 * 0.5}" style="stroke:${this._lqiColor(level)}"/><title>${escapeHtml(tip)}</title>
+          <text class="mesh-label mesh-battery-label" y="${r0 * 0.5 + 10 * k}" font-size="${9 * k}" text-anchor="middle">${escapeHtml(nameOf(i))}</text>
+        </g></g>`);
+        }
+      }
+      const placedLabels = [];
+      const labelY = (p) => {
+        const below = p.y + r0 + 13 * k;
+        const clash = (y2) => placedLabels.some((q) => Math.abs(q.x - p.x) < 110 * k && Math.abs(q.y - y2) < 13 * k);
+        const y = clash(below) ? p.y - r0 - 5 * k : below;
+        placedLabels.push({ x: p.x, y });
+        return y - p.y;
+      };
+      const ordered = routerIeees.filter((i) => pos(i)).sort((a, b) => pos(a).y - pos(b).y || pos(a).x - pos(b).x);
+      for (const i of ordered) {
+        const p = pos(i);
+        if (!p) continue;
+        const d = this._devices.find((x) => normIeee(x.ieee) === i);
+        const isCoord = d && d.device_type === "Coordinator";
+        const kids = mesh.children.get(i) || 0;
+        const unread = !this._meshSnapshot[i] || !this._meshSnapshot[i].ok;
+        let up = [];
+        let down = [];
+        let sameFloorOk = 0;
+        if (mode === "plan" && layout.floor) {
+          for (const l of mesh.links.values()) {
+            if (l.a !== i && l.b !== i || typeof l.lqi !== "number") continue;
+            const other = l.a === i ? l.b : l.a;
+            if (!isRouterLike(mesh, other)) continue;
+            const of = floorOf(other);
+            if (of && of !== layout.floor) {
+              (levelOf(of) > levelOf(layout.floor) ? up : down).push(`${levelOf(of) > levelOf(layout.floor) ? "\u2191" : "\u2193"} ${nameOf(other)} (${this._floorName(of)}): ${rateLqi(l.lqi, thr)} ${l.lqi}`);
+            } else if (rateLqi(l.lqi, thr) !== "weak") sameFloorOk++;
+          }
+        }
+        const viaCeiling = mode === "plan" && layout.floor && !sameFloorOk && up.length + down.length > 0;
+        const floorBadge = up.length || down.length ? `<text class="mesh-floor-badge" x="${-r0 * 1.15}" y="${-r0 * 0.6}" text-anchor="end" font-size="${15 * (W / 1200)}">${up.length ? `\u2191${up.length}` : ""}${down.length ? `\u2193${down.length}` : ""}<title>${escapeHtml(
+          [...up, ...down].join("\n")
+        )}</title></text>` : "";
+        nodes.push(`<g class="mesh-node" data-ieee="${escapeHtml(i)}" transform="translate(${p.x},${p.y})"><g class="mesh-zs">
+        ${viaCeiling ? `<circle r="${r0 * 1.6}" class="via-ceiling"><title>${escapeHtml(`${nameOf(i)}: no usable link on this floor, only to other floors`)}</title></circle>` : ""}
+        ${isCoord ? `<rect x="${-r0}" y="${-r0}" width="${2 * r0}" height="${2 * r0}" rx="${r0 / 3}"/>` : `<circle r="${r0}" class="${unread ? "unread" : ""}"/>`}
+        ${floorBadge}
+        ${kids && this._meshShowBattery === false ? `<text class="mesh-kids" x="${r0 * 1.1}" y="${-r0 * 0.9}" font-size="${10 * (W / 1200)}">+${kids}</text>` : ""}
+        ${unread ? `<title>${escapeHtml(
+          this._meshSnapshot[i] ? `${nameOf(i)}: didn't answer${this._meshSnapshot[i].error ? ` (${this._meshSnapshot[i].error})` : ""}. Open it to read it again.` : `${nameOf(i)}: not read yet. Open it to read it.`
+        )}</title>` : ""}
+        <text class="mesh-label" y="${labelY(p)}" font-size="${11 * (W / 1200)}" text-anchor="middle">${escapeHtml(d ? this._deviceLabel(d) : i)}${unread ? " (not read)" : ""}</text>
+      </g></g>`);
+      }
+      const img = mode === "plan" ? `<image href="${escapeHtml(this._fpPlanFor(layout.floor).imageUrl)}" x="0" y="0" width="${W}" height="${H}" opacity="0.55"/>` : "";
+      const grad = (lvl) => `<radialGradient id="mesh-heat-${lvl}"><stop offset="0" stop-color="${this._lqiColor(lvl)}" stop-opacity="0.32"/><stop offset="1" stop-color="${this._lqiColor(lvl)}" stop-opacity="0"/></radialGradient>`;
+      const missingIeees = routerIeees.filter((i) => !pos(i) && (!layout.floor || floorOf(i) === layout.floor || !floorOf(i)));
+      const missing = missingIeees.length;
+      const missingNames = missingIeees.map((i) => {
+        const d = this._devices.find((x) => normIeee(x.ieee) === i);
+        return d ? this._deviceLabel(d) : i;
+      });
+      this._meshViews = this._meshViews || {};
+      const vk = `${layout.value}|${W}x${H}`;
+      if (!this._meshViews[vk]) this._meshViews[vk] = { x: 0, y: 0, w: W, h: H, full: { w: W, h: H } };
+      this._meshViewKey = vk;
+      const vb = this._meshViews[vk];
+      return `<div class="mesh-zoom"><button class="btn btn-small" id="mesh-zoom-out" title="Zoom out">\uFF0D</button><button class="btn btn-small" id="mesh-zoom-fit" title="Show the whole plan">Fit</button><button class="btn btn-small" id="mesh-zoom-in" title="Zoom in">\uFF0B</button></div>
+      <svg class="mesh-svg" style="--mz:${vb.w / vb.full.w}" viewBox="${vb.x} ${vb.y} ${vb.w} ${vb.h}" preserveAspectRatio="xMidYMid meet"><defs>${grad("good")}${grad("fair")}${grad("weak")}${["good", "fair", "weak", "unknown"].map((lvl) => `<marker id="mesh-arrow-${lvl}" viewBox="0 0 10 10" refX="16" refY="5" markerWidth="5" markerHeight="5" orient="auto"><path d="M0 0L10 5L0 10z" fill="${this._lqiColor(lvl)}"/></marker>`).join("")}</defs>${img}<g>${heat.join("")}</g><g>${lines.join("")}</g><g>${batteryNodes.join("")}</g><g>${nodes.join("")}</g></svg>
+      ${missing ? `<details class="mesh-unplaced muted"><summary>${missing} router${missing === 1 ? "" : "s"} not on this layout</summary>${escapeHtml(missingNames.join(", "))}. ${mode === "plan" ? `Place them on the Floor Plan tab${layout.floor ? ` (${escapeHtml(this._floorName(layout.floor))})` : ""} to include them.` : "Open the Map tab once to lay them out."} They're still part of the suggestions and route checks.</details>` : ""}`;
+    }
+    _meshShowMode() {
+      return ["strongest", "all", "routes"].includes(this._meshShow) ? this._meshShow : "strongest";
+    }
+    _meshShowHint() {
+      const base = "A link means two routers can hear each other. A route is the way a command actually travels; routes use only some of the links.";
+      const mode = {
+        strongest: " Showing each router's 3 strongest links.",
+        all: " Showing every pair of routers that can hear each other, however weakly.",
+        routes: " Showing the predicted route of each binding, with arrows in the direction a command travels. Group bindings are broadcast, so only the remote's hop to its parent is drawn."
+      }[this._meshShowMode()];
+      return base + mode;
+    }
+    /** Every control binding's predicted route (device targets) or parent hop
+     *  (group bindings). Reporting and coordinator bindings are left out. */
+    _meshBindingRoutes(mesh) {
+      const coord = normIeee(this._coordinatorIeee() || "");
+      const seen = /* @__PURE__ */ new Set();
+      const out = [];
+      for (const b of this._rawBindings()) {
+        if (this._classifyBinding(b) === "reporting") continue;
+        const src = normIeee(b.sourceIeee);
+        if (b.isGroup) {
+          const key2 = `${src}|g${b.groupId}`;
+          if (seen.has(key2)) continue;
+          seen.add(key2);
+          const p = mesh.parentOf.get(src);
+          const hops = p ? [{ from: src, to: p.parent, lqi: p.lqi }] : [];
+          out.push({ label: `${this._ieeeLabel(src, { plain: true })} \u2192 group ${this._groupName(b.groupId)}`, source: src, group: b.groupId, path: { status: p || mesh.snapshot[src] ? "ok" : "none", hops, note: null } });
+          continue;
+        }
+        const tgt = normIeee(b.targetIeee);
+        if (!tgt || tgt === coord || tgt === src) continue;
+        const key = `${src}|${tgt}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        out.push({ label: `${this._ieeeLabel(src, { plain: true })} \u2192 ${this._ieeeLabel(tgt, { plain: true })}`, source: src, target: tgt, path: routePath(mesh, src, tgt) });
+      }
+      return out;
+    }
+    _meshRoutesListHtml(mesh, nameOf) {
+      const thr = this._lqiThr;
+      const routes = this._meshBindingRoutes(mesh).map((r) => ({ ...r, verdict: pathVerdict(r.path, thr) }));
+      if (!routes.length) return `<div class="drawer-section-title">Binding routes</div><p class="muted">No bindings between devices to route.</p>`;
+      const rank = { weak: 0, none: 1, unknown: 2, good: 3 };
+      routes.sort((a, b) => rank[a.verdict.level] - rank[b.verdict.level] || a.label.localeCompare(b.label));
+      const text = (r) => r.verdict.level === "weak" ? `weak hop ${nameOf(r.verdict.weakest.from)} \u2192 ${nameOf(r.verdict.weakest.to)} (${r.verdict.weakest.lqi})` : r.verdict.level === "none" ? "no route found" : r.verdict.level === "unknown" ? "partly known" : "looks good";
+      return `<div class="drawer-section-title">Binding routes</div>
+      <ul class="mesh-routes">${routes.map((r) => `<li class="route-${r.verdict.level}"><strong>${escapeHtml(r.label)}</strong>: ${escapeHtml(text(r))}</li>`).join("")}</ul>`;
+    }
+    /** Reads one router's tables again (side panel, "Didn't answer" list). */
+    async _meshReadOne(ieee) {
+      if (this._meshReading || this._meshScanning) return;
+      const id = normIeee(ieee);
+      this._meshReading = id;
+      if (this._view === "mesh") this._renderMesh();
+      this._refreshDrawer();
+      try {
+        const entry = await this._api.meshRead(id);
+        if (!this._meshSnapshot) this._meshSnapshot = {};
+        this._meshSnapshot[id] = entry;
+        this._meshVersion = (this._meshVersion || 0) + 1;
+        this._setStatus(entry.ok ? "success" : "warning", entry.ok ? `Read ${this._ieeeLabel(id, { plain: true })}'s tables.` : `${this._ieeeLabel(id, { plain: true })} didn't answer${entry.error ? `: ${entry.error}` : ""}.`);
+      } catch (err) {
+        this._setStatus("error", `Couldn't read ${this._ieeeLabel(id, { plain: true })}: ${err && err.message || err}`);
+      } finally {
+        this._meshReading = null;
+        if (this._view === "mesh") this._renderMesh();
+        this._refreshDrawer();
+      }
+    }
+    /** Network section of the side panel (experimental). */
+    _drawerMeshHtml(d) {
+      if (!this._experimental) return "";
+      if (!this._meshSnapshot) {
+        this._meshEnsureLoaded();
+        return "";
+      }
+      const id = normIeee(d.ieee);
+      const mesh = this._meshModel();
+      const busy = this._meshReading === id;
+      const isRouter = d.device_type === "Router" || d.device_type === "Coordinator";
+      if (isRouter) {
+        const e = this._meshSnapshot[id];
+        const state2 = !e ? "Its routing and neighbour tables haven't been read yet." : e.ok ? `Tables read ${relTime(e.at)}: ${(e.neighbours || []).length} neighbours, ${(e.routes || []).length} routes.` : `It didn't answer when last read${e.error ? ` (${e.error})` : ""}.`;
+        return `<div class="drawer-section"><div class="drawer-section-title">Network</div>
+        <p class="hint">${escapeHtml(state2)}</p>
+        <button class="btn btn-small" id="drawer-mesh-read" ${busy || this._meshScanning ? "disabled" : ""}>${busy ? "Reading\u2026" : "Read this router"}</button></div>`;
+      }
+      const p = mesh && mesh.parentOf.get(id);
+      const state = p ? `Battery device: it talks through its parent ${this._ieeeLabel(p.parent, { plain: true })} (${rateLqi(p.lqi, this._lqiThr)}${typeof p.lqi === "number" ? ` ${p.lqi}` : ""}).` : "Battery device: its parent isn't known. No router listed it as a child in the last scan.";
+      return `<div class="drawer-section"><div class="drawer-section-title">Network</div>
+      <p class="hint">${escapeHtml(state)} A battery device keeps no tables of its own: what we know comes from its parent's table. Press a button on it to wake it, then read its parent again.</p>
+      ${p ? `<button class="btn btn-small" id="drawer-mesh-read-parent" data-parent="${escapeHtml(p.parent)}" ${this._meshReading || this._meshScanning ? "disabled" : ""}>${this._meshReading === p.parent ? "Reading\u2026" : "Read its parent again"}</button>` : `<button class="btn btn-small" id="drawer-mesh-scan">Scan network</button>`}
+    </div>`;
+    }
+    _meshSelectedLinkHtml(mesh, nameOf) {
+      if (!this._meshHighlight) return "";
+      const l = mesh.links.get(this._meshHighlight);
+      if (!l) return "";
+      const ha = l.heard[l.a];
+      const hb = l.heard[l.b];
+      const line = (x, y, v) => typeof v === "number" ? `<li>${escapeHtml(nameOf(x))} hears ${escapeHtml(nameOf(y))} at ${this._lqiChip(v)}</li>` : `<li class="muted">${escapeHtml(nameOf(x))} didn't report ${escapeHtml(nameOf(y))}</li>`;
+      const endA = !isRouterLike(mesh, l.a);
+      const endB = !isRouterLike(mesh, l.b);
+      if (endA !== endB) {
+        const dev = endA ? l.a : l.b;
+        const router = endA ? l.b : l.a;
+        const v = l.heard[router];
+        return `<div class="mesh-selected">
+      <div class="drawer-section-title">Selected link</div>
+      <div>${escapeHtml(nameOf(dev))} \u2192 parent ${escapeHtml(nameOf(router))} ${this._lqiChip(typeof v === "number" ? v : l.lqi)}</div>
+      <p class="muted">${escapeHtml(nameOf(dev))} runs on battery and talks only through its parent router. ${escapeHtml(nameOf(router))} hears it at ${typeof v === "number" ? v : "an unreported level"}. A battery device keeps no tables of its own, so only this direction is known.</p>
+      <button class="btn btn-small" id="mesh-link-clear">Clear</button>
+    </div>`;
+      }
+      return `<div class="mesh-selected">
+      <div class="drawer-section-title">Selected link</div>
+      <div>${escapeHtml(nameOf(l.a))} \u2194 ${escapeHtml(nameOf(l.b))} ${this._lqiChip(l.lqi)}</div>
+      <ul>${line(l.a, l.b, ha)}${line(l.b, l.a, hb)}</ul>
+      <p class="muted">The weaker direction counts, because a message has to get through both ways (it's acknowledged).</p>
+      <button class="btn btn-small" id="mesh-link-clear">Clear</button>
+    </div>`;
+    }
+    _meshApplyView() {
+      const svg = this._q("#view-mesh .mesh-svg");
+      const vb = this._meshViews && this._meshViews[this._meshViewKey];
+      if (svg && vb) {
+        svg.setAttribute("viewBox", `${vb.x} ${vb.y} ${vb.w} ${vb.h}`);
+        svg.style.setProperty("--mz", String(vb.w / vb.full.w));
+      }
+    }
+    /** Zoom by `factor` (>1 = in) around a point in plan units (default: centre). */
+    _meshZoom(factor, cx, cy) {
+      const vb = this._meshViews && this._meshViews[this._meshViewKey];
+      if (!vb) return;
+      const px = cx ?? vb.x + vb.w / 2;
+      const py = cy ?? vb.y + vb.h / 2;
+      const w = clamp(vb.w / factor, vb.full.w / 12, vb.full.w * 1.5);
+      const h = w / vb.w * vb.h;
+      vb.x = px - (px - vb.x) * w / vb.w;
+      vb.y = py - (py - vb.y) * h / vb.h;
+      vb.w = w;
+      vb.h = h;
+      this._meshApplyView();
+    }
+    _meshSvgPoint(svg, clientX, clientY) {
+      const pt = svg.createSVGPoint();
+      pt.x = clientX;
+      pt.y = clientY;
+      return pt.matrixTransform(svg.getScreenCTM().inverse());
+    }
+    _wireMeshZoom() {
+      const svg = this._q("#view-mesh .mesh-svg");
+      if (!svg) return;
+      const on = (sel, fn) => {
+        const e = this._q(sel);
+        if (e) e.addEventListener("click", fn);
+      };
+      on("#mesh-zoom-in", () => this._meshZoom(1.4));
+      on("#mesh-zoom-out", () => this._meshZoom(1 / 1.4));
+      on("#mesh-zoom-fit", () => {
+        const vb = this._meshViews[this._meshViewKey];
+        Object.assign(vb, { x: 0, y: 0, w: vb.full.w, h: vb.full.h });
+        this._meshApplyView();
+      });
+      svg.addEventListener(
+        "wheel",
+        (e) => {
+          e.preventDefault();
+          const p = this._meshSvgPoint(svg, e.clientX, e.clientY);
+          this._meshZoom(e.deltaY < 0 ? 1.15 : 1 / 1.15, p.x, p.y);
+        },
+        { passive: false }
+      );
+      const pointers = /* @__PURE__ */ new Map();
+      let pan = null;
+      let pinch = null;
+      svg.addEventListener("pointerdown", (e) => {
+        pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+        if (pointers.size === 1) pan = { x: e.clientX, y: e.clientY, moved: false };
+        if (pointers.size === 2) {
+          const [a, b] = [...pointers.values()];
+          pinch = { d: Math.hypot(a.x - b.x, a.y - b.y) };
+          pan = null;
+        }
+      });
+      svg.addEventListener("pointermove", (e) => {
+        if (!pointers.has(e.pointerId)) return;
+        pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+        const vb = this._meshViews[this._meshViewKey];
+        if (pinch && pointers.size === 2) {
+          const [a, b] = [...pointers.values()];
+          const d = Math.hypot(a.x - b.x, a.y - b.y);
+          const mid = this._meshSvgPoint(svg, (a.x + b.x) / 2, (a.y + b.y) / 2);
+          if (pinch.d > 0) this._meshZoom(d / pinch.d, mid.x, mid.y);
+          pinch.d = d;
+          this._meshDragged = true;
+          return;
+        }
+        if (!pan) return;
+        const dx = e.clientX - pan.x;
+        const dy = e.clientY - pan.y;
+        if (!pan.moved && Math.hypot(dx, dy) < 5) return;
+        if (!pan.moved) {
+          pan.moved = true;
+          try {
+            svg.setPointerCapture(e.pointerId);
+          } catch (err) {
+          }
+        }
+        const rect = svg.getBoundingClientRect();
+        const scale = Math.max(vb.w / rect.width, vb.h / rect.height);
+        vb.x -= dx * scale;
+        vb.y -= dy * scale;
+        pan.x = e.clientX;
+        pan.y = e.clientY;
+        this._meshDragged = true;
+        this._meshApplyView();
+      });
+      const end = (e) => {
+        pointers.delete(e.pointerId);
+        if (pointers.size < 2) pinch = null;
+        if (!pointers.size) {
+          pan = null;
+          setTimeout(() => this._meshDragged = false, 0);
+        }
+      };
+      svg.addEventListener("pointerup", end);
+      svg.addEventListener("pointercancel", end);
+    }
+    /** Router links between floors, weakest first (1.5.0 local b4). */
+    _meshBetweenFloorsHtml(mesh, nameOf) {
+      const floors = this._haFloors();
+      if (!floors.length) return "";
+      const rows = [];
+      for (const l of mesh.links.values()) {
+        if (typeof l.lqi !== "number" || !isRouterLike(mesh, l.a) || !isRouterLike(mesh, l.b)) continue;
+        const fa = this._deviceFloor(l.a);
+        const fb = this._deviceFloor(l.b);
+        if (fa && fb && fa !== fb) rows.push({ l, fa, fb });
+      }
+      if (!rows.length) {
+        return `<div class="drawer-section-title">Between floors</div><p class="muted">No links between floors were found. Check that devices' areas are assigned to floors.</p>`;
+      }
+      rows.sort((x, y) => x.l.lqi - y.l.lqi);
+      const good = rows.filter((r) => rateLqi(r.l.lqi, this._lqiThr) !== "weak").length;
+      return `<div class="drawer-section-title">Between floors</div>
+      <p class="muted">${good} usable link${good === 1 ? "" : "s"} between floors${good <= 1 ? ": the floors hang on very few links, a router near the stairs would help." : "."}</p>
+      <table class="detail-table mesh-links">${rows.slice(0, 12).map(
+        (r) => `<tr data-link="${escapeHtml(r.l.a)}|${escapeHtml(r.l.b)}" title="${escapeHtml(this._meshLinkTitle(r.l, nameOf))}"><td>${escapeHtml(nameOf(r.l.a))} <span class="muted">(${escapeHtml(this._floorName(r.fa))})</span> \u2194 ${escapeHtml(nameOf(r.l.b))} <span class="muted">(${escapeHtml(this._floorName(r.fb))})</span></td><td>${this._lqiChip(r.l.lqi)}</td></tr>`
+      ).join("")}</table>`;
+    }
+    _meshFloorsHelpHtml() {
+      if (this._haFloors().length) return "";
+      return `<details class="mesh-floors-help"><summary>House on more than one floor?</summary>
+      One plan can't show a link that goes through a ceiling, so it's drawn as a long line across the plan. Give each floor its own plan:
+      <ol>
+        <li>In Home Assistant, <strong>Settings \u2192 Areas, labels &amp; zones \u2192 Floors</strong>: add a floor for each level, with its level number (0 = ground, 1 = first, \u2026).</li>
+        <li>In the same place, under <strong>Areas</strong>, open each area and choose its floor. Devices take their floor from their area.</li>
+        <li>Reload this page. On the <strong>Floor Plan</strong> tab, pick each floor, set its image and place its devices. Your current plan becomes the lowest floor's.</li>
+        <li>Back here, the <strong>Layout</strong> list has one entry per floor. Links to the floor above or below are marked \u2191 and \u2193, and a <strong>Between floors</strong> list shows how well the floors are connected.</li>
+      </ol>
+      The suggestions and route checks don't depend on this: they use only the radio data.</details>`;
+    }
+    _wireMesh() {
+      const on = (sel, ev, fn) => {
+        const e = this._q(sel);
+        if (e) e.addEventListener(ev, fn);
+      };
+      on("#mesh-scan", "click", () => this._meshScan());
+      on("#mesh-stop", "click", () => {
+        if (this._meshScanning) this._meshScanning.stop = true;
+      });
+      on("#mesh-show", "change", (e) => {
+        this._meshShow = e.target.value;
+        this._renderMesh();
+      });
+      on("#mesh-battery", "change", (e) => {
+        this._meshShowBattery = e.target.checked;
+        this._renderMesh();
+      });
+      this._qa("#view-mesh [data-mesh-read]").forEach((b) => b.addEventListener("click", () => this._meshReadOne(b.dataset.meshRead)));
+      on("#mesh-layout", "change", (e) => {
+        this._meshLayoutChoice = e.target.value;
+        this._renderMesh();
+      });
+      this._qa("#view-mesh .mesh-node").forEach(
+        (g) => g.addEventListener("click", () => {
+          if (this._meshDragged) return;
+          this._openDeviceDrawer(this._devices.find((x) => normIeee(x.ieee) === g.dataset.ieee));
+        })
+      );
+      this._qa("#view-mesh .mesh-link").forEach(
+        (g) => g.addEventListener("click", () => {
+          if (this._meshDragged) return;
+          this._meshHighlight = this._meshHighlight === g.dataset.link ? null : g.dataset.link;
+          this._renderMesh();
+        })
+      );
+      const clear = this._q("#mesh-link-clear");
+      if (clear)
+        clear.addEventListener("click", () => {
+          this._meshHighlight = null;
+          this._renderMesh();
+        });
+      this._wireMeshZoom();
+      this._qa("#view-mesh tr[data-link]").forEach(
+        (tr) => tr.addEventListener("click", () => {
+          this._meshHighlight = this._meshHighlight === tr.dataset.link ? null : tr.dataset.link;
+          this._renderMesh();
+        })
+      );
+    }
+    /** Route check section for the side panel (experimental). */
+    _drawerRouteHtml(d, rel) {
+      if (!this._drawerRouteOpen) return "";
+      if (!this._meshSnapshot || this._meshLoading) {
+        this._meshEnsureLoaded();
+        return `<div class="drawer-share"><p class="muted">Loading the last network scan\u2026</p></div>`;
+      }
+      if (!Object.keys(this._meshSnapshot).length) {
+        return `<div class="drawer-share"><p>No network scan yet. A route check uses the routing and neighbour tables of your routers.</p>
+        <div class="dialog-actions"><button class="btn btn-primary btn-small" id="drawer-route-scan">Scan network</button></div></div>`;
+      }
+      const mesh = this._meshModel();
+      const thr = this._lqiThr;
+      const nameOf = (i) => {
+        const x = this._devices.find((dd) => normIeee(dd.ieee) === normIeee(i));
+        return x ? this._deviceLabel(x) : i;
+      };
+      const chain = (path) => path.hops.length ? `${escapeHtml(nameOf(path.hops[0].from))}${path.hops.map((h) => ` <span class="route-arrow">\u2192</span> ${this._lqiChip(h.lqi)} ${escapeHtml(nameOf(h.to))}`).join("")}` : "";
+      const items = rel.controls.map((c) => {
+        if (c.kind === "group") {
+          const g = this._groups.find((x) => Number(x.group_id) === Number(c.groupId));
+          const members = (g && g.members || []).map((m) => m.device && m.device.ieee).filter(Boolean).filter((i) => normIeee(i) !== normIeee(this._coordinatorIeee() || ""));
+          const gc = groupCheck(mesh, d.ieee, members);
+          const parent = gc.sourceIsRouter ? `${escapeHtml(nameOf(d.ieee))} is a router and sends the group command itself.` : gc.parent ? `Sends through its parent ${escapeHtml(nameOf(gc.parent.parent))} ${this._lqiChip(gc.parent.lqi)}` : `Its parent router isn't known yet (scan again with it awake).`;
+          const weakMembers = gc.members.filter((m) => !m.best || rateLqi(m.best.lqi, thr) === "weak");
+          return `<li><strong>\u{1F465} ${escapeHtml(c.name)}</strong> <span class="muted">group: sent as a broadcast, so there's no single route</span>
+          <div>${parent}</div>
+          <ul class="route-members">${gc.members.map((m) => `<li>${escapeHtml(nameOf(m.ieee))}: best router link ${m.best ? `${this._lqiChip(m.best.lqi)} via ${escapeHtml(nameOf(m.best.other))}` : `<span class="muted">not seen in any table</span>`}</li>`).join("")}</ul>
+          ${weakMembers.length ? `<div class="route-verdict route-weak">${weakMembers.length} light${weakMembers.length === 1 ? " hears" : "s hear"} the mesh poorly and may miss commands.</div>` : `<div class="route-verdict route-good">Every light hears the mesh well enough.</div>`}</li>`;
+        }
+        const path = routePath(mesh, d.ieee, c.ieee);
+        const v = pathVerdict(path, thr);
+        const verdict = v.level === "good" ? `<div class="route-verdict route-good">Likely path looks good.</div>` : v.level === "weak" ? `<div class="route-verdict route-weak">Weak link: ${escapeHtml(nameOf(v.weakest.from))} to ${escapeHtml(nameOf(v.weakest.to))} (LQI ${v.weakest.lqi}). A router between them, or moving one of them, would help.</div>` : v.level === "none" ? `<div class="route-verdict route-none">No route found. ${escapeHtml(path.note || "")}</div>` : `<div class="route-verdict route-unknown">Partly known. ${escapeHtml(path.note || "Some link qualities weren't reported.")}</div>`;
+        return `<li><strong>${escapeHtml(c.name)}</strong><div class="route-chain">${chain(path)}</div>${verdict}${path.hops.length ? `<button class="btn btn-small" data-route-map="${escapeHtml(c.ieee)}" title="Opens the Map with this route drawn on it">Show on the Map</button>` : ""}</li>`;
+      });
+      return `<div class="drawer-share route-check">
+      <p class="muted">Likely paths from the routing tables (snapshot ${escapeHtml(this._meshAgeText() || "")}). Zigbee can't trace a real press, so this is a prediction.</p>
+      ${items.length ? `<ul class="route-list">${items.join("")}</ul>` : `<p class="muted">It doesn't control anything, so there's no route to check.</p>`}
+      <div class="dialog-actions"><button class="btn btn-small" id="drawer-route-rescan">Scan network again</button><button class="btn btn-small" id="drawer-route-close">Close</button></div>
+    </div>`;
     }
     /** Runs "Check supported commands" on every endpoint in turn. */
     async _checkAllEndpoints(d) {
@@ -7134,17 +8660,28 @@ a.btn { display:inline-block; text-decoration:none; }
         <tr><td>Cluster</td><td>${clusterName(binding.clusterId)} (${hex4(binding.clusterId)})</td></tr>
         <tr><td>Type</td><td>${typeText}</td></tr>
       </table>
+      ${this._experimental && !binding.isGroup && cls !== "reporting" ? `<p class="hint">Network (beta): show the way this binding's commands likely travel through your routers, from the last network scan.</p>` : this._experimental && binding.isGroup ? `<p class="hint">Group bindings are sent as a broadcast, so there's no single route to show. <strong>Check route\u2026</strong> in the remote's side panel shows how well each light hears the mesh.</p>` : ""}
       <div class="dialog-actions">
+        ${this._experimental && !binding.isGroup && cls !== "reporting" ? `<button class="btn" id="unbind-route">Show route on the Map</button>` : ""}
         <button class="btn btn-danger" id="unbind-confirm">Remove binding</button>
         <button class="btn" id="unbind-cancel">Close</button>
       </div>`;
       this._q("#dialog").classList.add("open");
       this._q("#unbind-cancel").addEventListener("click", () => this._closeDialog());
+      const routeBtn = this._q("#unbind-route");
+      if (routeBtn)
+        routeBtn.addEventListener("click", () => {
+          this._closeDialog();
+          this._mapRoute = { sourceIeee: binding.sourceIeee, targetIeee: binding.targetIeee };
+          if (this._view !== "graph") this._switchView("graph");
+          else this._renderGraph();
+        });
       this._q("#unbind-confirm").addEventListener("click", async () => {
         this._closeDialog();
         this._setStatus("info", "Removing binding\u2026", 0);
         const bindTarget = binding.isGroup ? { isGroup: true, groupId: binding.groupId } : { isGroup: false, ieee: binding.targetIeee, endpoint: binding.targetEndpoint };
         const before = this._bindingPresent(binding.sourceIeee, binding.sourceEndpoint, binding.clusterId, bindTarget);
+        let unbindError = null;
         const rescanTargets = binding.isGroup ? [binding.sourceIeee] : this._impactedIeees(binding.sourceIeee, binding.targetIeee);
         try {
           if (binding.isGroup) {
@@ -7158,6 +8695,7 @@ a.btn { display:inline-block; text-decoration:none; }
             });
           }
         } catch (err) {
+          unbindError = toolkitErrorText(err);
           console.warn("[ZHA Bindings Manager] unbind call raised, verifying against rescan anyway", err);
         } finally {
           const scan = await this._scanBindings(rescanTargets, { tries: this._retryCount });
@@ -7172,7 +8710,15 @@ a.btn { display:inline-block; text-decoration:none; }
             scan,
             before
           );
-          this._setStatus(res.level, res.message, res.level === "success" ? void 0 : 0, res.action);
+          let message = res.message;
+          if (res.level !== "success") {
+            const why = explainUnbindFailure({
+              errors: unbindError ? [unbindError] : [],
+              targetRemoved: !binding.isGroup && this._isRemovedDevice(binding.targetIeee)
+            });
+            if (why) message = `${message} ${why}`;
+          }
+          this._setStatus(res.level, message, res.level === "success" ? void 0 : 0, res.action);
         }
       });
     }
@@ -7522,6 +9068,7 @@ a.btn { display:inline-block; text-decoration:none; }
         return;
       }
       const sources = [...new Map(dead.map((b) => [normIeee(b.sourceIeee), b.sourceIeee])).values()];
+      const errors = [];
       for (let i = 0; i < dead.length; i++) {
         const b = dead[i];
         this._setStatus("info", `Unbinding ${i + 1} of ${dead.length}\u2026`, 0);
@@ -7531,6 +9078,7 @@ a.btn { display:inline-block; text-decoration:none; }
             dstEndpoint: b.targetEndpoint
           });
         } catch (err) {
+          errors.push(toolkitErrorText(err));
           console.warn("[ZHA Bindings Manager] unbind call raised, verifying against rescan anyway", err);
         }
       }
@@ -7549,7 +9097,7 @@ a.btn { display:inline-block; text-decoration:none; }
         const unreadable = sources.filter((s) => this._scanFailures.has(normIeee(s))).length;
         this._setStatus(
           "error",
-          `Removed ${removed} of ${dead.length}. ${stillThere.length} still present${unreadable ? ` (${unreadable} device${unreadable === 1 ? "" : "s"} didn't respond to the check, probably asleep)` : ""}. Wake those devices and click "Unbind all" again.`,
+          `Removed ${removed} of ${dead.length}. ${stillThere.length} still present${unreadable ? ` (${unreadable} device${unreadable === 1 ? "" : "s"} didn't respond to the check, probably asleep)` : ""}. ${explainUnbindFailure({ errors, targetRemoved: true }) || 'Wake those devices and click "Unbind all" again.'}`,
           0
         );
       }
@@ -7761,6 +9309,311 @@ a.btn { display:inline-block; text-decoration:none; }
       </div>`
       };
     }
+    // -------------------------------------------------------------------
+    // Groups tab (1.5.0): ZHA groups, their lights and the remotes bound to
+    // them. Membership changes use ZHA's own websocket commands (what Home
+    // Assistant's Groups page uses); bindings use zha-toolkit as elsewhere.
+    // -------------------------------------------------------------------
+    _renderGroupsTab() {
+      const el = this._q("#view-groups");
+      if (!el) return;
+      if (!this._loaded) {
+        el.innerHTML = `<p class="muted">Loading groups\u2026</p>`;
+        return;
+      }
+      this._ensureHealthData();
+      const coord = this._coordinatorIeee();
+      const rows = groupRows({ groups: this._groups, bindings: this._rawBindings(), classify: (b) => this._classifyBinding(b), coordinatorIeee: coord });
+      const busy = this._groupsBusy != null;
+      const dis = busy ? "disabled" : "";
+      const devLink = (ieee, extra = "") => {
+        const d = this._devices.find((x) => normIeee(x.ieee) === normIeee(ieee));
+        const name = escapeHtml(this._ieeeLabel(ieee, { plain: true }));
+        return d ? `<a href="#" class="src-link groups-dev" data-ieee="${escapeHtml(d.ieee)}">${name}</a>${extra}` : `<span>${name} <span class="muted">(not in ZHA)</span></span>${extra}`;
+      };
+      const head = `<div class="groups-head">
+        <p>A ZHA group is a set of lights that switch together. A remote bound to a group controls all of them with one command,
+          and you can change which lights are in it without touching the remote.</p>
+        <button class="btn btn-primary" id="groups-new" ${dis} title="Pick a remote and the lights it should control. The card makes or reuses a group, binds the remote to it and checks it works.">New group for a remote\u2026</button>
+      </div>`;
+      if (!rows.length) {
+        el.innerHTML = `${head}<p class="muted">No ZHA groups yet. <strong>New group for a remote\u2026</strong> creates one.</p>`;
+        this._wireGroupsTab(rows);
+        return;
+      }
+      const cards = rows.map((r) => {
+        const area = (ieee) => {
+          const d = this._devices.find((x) => normIeee(x.ieee) === ieee);
+          return d && d.area_id ? ` <span class="muted">${escapeHtml(this._areaName(d.area_id))}</span>` : "";
+        };
+        const members = r.members.length ? `<ul class="groups-list">${r.members.map(
+          (m) => `<li>${devLink(m.ieee, ` <span class="muted">ep ${m.endpoint}</span>${area(m.ieee)}`)}
+                <button class="btn btn-small" data-group-remove="${r.groupId}|${escapeHtml(m.ieee)}|${m.endpoint}" ${dis} title="Take this light out of the group (ZHA tells the light straight away)">Remove</button></li>`
+        ).join("")}</ul>` : `<p class="muted">No lights in it.</p>`;
+        const controllers = r.controllers.length ? `<ul class="groups-list">${r.controllers.map((c) => `<li>${devLink(c.sourceIeee, ` <span class="muted">ep ${c.endpoint}: ${escapeHtml(c.clusters.map(clusterName).join(", "))}</span>`)}</li>`).join("")}</ul>` : `<p class="muted">No remote is bound to it${this._rawBindings().length ? "" : " (or bindings haven't been scanned yet)"}.</p>`;
+        const others = r.others ? `<p class="hint">${r.others} other binding${r.others === 1 ? "" : "s"} to this group ${r.others === 1 ? "is a device" : "are devices"} reporting ${r.others === 1 ? "its" : "their"} own state, not control.</p>` : "";
+        return `<section class="group-card ${this._groupsFocus === r.groupId ? "group-focus" : ""}" data-gid="${r.groupId}">
+        <div class="group-card-head">
+          <strong>\u{1F465} ${escapeHtml(r.name)}</strong>
+          <span class="muted">${groupIdHex(r.groupId)} \xB7 ${r.members.length} light${r.members.length === 1 ? "" : "s"}</span>
+          <span class="spacer"></span>
+          <button class="btn btn-small" data-group-add="${r.groupId}" ${dis}>Add lights\u2026</button>
+          <button class="btn btn-small" data-group-remote="${r.groupId}" ${dis} title="Bind a remote to this group, step by step">Add a remote\u2026</button>
+          <button class="btn btn-small btn-danger" data-group-delete="${r.groupId}" ${dis}>Delete group\u2026</button>
+        </div>
+        <div class="group-cols">
+          <div><div class="drawer-section-title">Lights</div>${members}</div>
+          <div><div class="drawer-section-title">Controlled by</div>${controllers}${others}</div>
+        </div>
+        ${this._groupsAddOpen === r.groupId ? this._groupsAddHtml(r) : ""}
+        ${this._groupsDeleteOpen === r.groupId ? this._groupsDeleteHtml(r) : ""}
+      </section>`;
+      });
+      el.innerHTML = head + cards.join("");
+      this._wireGroupsTab(rows);
+      if (this._groupsFocus != null) {
+        const sec = this._q(`#view-groups .group-card[data-gid="${this._groupsFocus}"]`);
+        if (sec && sec.scrollIntoView) sec.scrollIntoView({ block: "nearest" });
+        this._groupsFocus = null;
+      }
+    }
+    _groupsAddHtml(r) {
+      if (!this._groupsCandidatesReady) {
+        return `<div class="drawer-share"><p class="muted">Finding lights\u2026</p></div>`;
+      }
+      const coord = normIeee(this._coordinatorIeee() || "");
+      const inGroup = new Set(r.members.map((m) => `${m.ieee}:${m.endpoint}`));
+      const list2 = candidateTargets({
+        devices: this._devices.filter((d) => !this._isRemovedDevice(d.ieee)).map((d) => ({ ieee: d.ieee, name: this._deviceLabel(d), isCoordinator: normIeee(d.ieee) === coord || d.device_type === "Coordinator" })),
+        clustersFor: (ieee) => this._clusterCache.get(ieee),
+        sourceIeee: "",
+        clusterIds: FLOW_CLUSTERS
+      }).filter((t) => !inGroup.has(`${normIeee(t.ieee)}:${t.endpoint}`));
+      if (!list2.length) {
+        return `<div class="drawer-share"><p>Every light that accepts On/Off, Level or Colour commands is already in this group.</p>
+        <div class="dialog-actions"><button class="btn btn-small" id="groups-add-cancel">Close</button></div></div>`;
+      }
+      return `<div class="drawer-share groups-add">
+      <p>Choose the lights to add. ZHA adds each one to the group straight away; the remotes bound to the group control them from then on.</p>
+      <div class="groups-pick">${list2.map((t) => `<label class="row"><input type="checkbox" data-add-key="${escapeHtml(t.ieee)}|${t.endpoint}"> ${escapeHtml(t.name)} <span class="muted">${escapeHtml(t.clusters.map(clusterName).join(", "))}</span></label>`).join("")}</div>
+      <div class="dialog-actions"><button class="btn btn-primary btn-small" id="groups-add-go" disabled>Add</button><button class="btn btn-small" id="groups-add-cancel">Cancel</button></div>
+    </div>`;
+    }
+    _groupsDeletePlan(gid) {
+      return groupUnbindPlan(gid, this._rawBindings(), { clustersFor: (ieee) => this._clusterCache.get(ieee) });
+    }
+    _groupsDeleteHtml(r) {
+      const plan = this._groupsDeletePlan(r.groupId);
+      const sources = [...new Set(plan.map((p) => p.sourceIeee))];
+      const nameOf = (i) => escapeHtml(this._ieeeLabel(i, { plain: true }));
+      const battery = sources.filter((i) => {
+        const d = this._devices.find((x) => normIeee(x.ieee) === i);
+        return d && this._isBatteryDevice(d);
+      });
+      const common = `<p>The lights stay in Home Assistant; only the group goes, and with it the group's light entity in Home Assistant.
+      Check that no automation or dashboard uses it.</p>`;
+      const result = this._groupsDeleteResult && this._groupsDeleteResult.gid === r.groupId ? this._groupsDeleteResult : null;
+      if (!plan.length) {
+        return `<div class="drawer-share groups-delete">${common}
+        <div class="dialog-actions"><button class="btn btn-danger btn-small" id="groups-delete-anyway">Delete group</button><button class="btn btn-small" id="groups-delete-cancel">Cancel</button></div></div>`;
+      }
+      const leftNames = result ? result.left.map(nameOf).join(", ") : sources.map(nameOf).join(", ");
+      const reporting = plan.filter((p) => p.method !== "group");
+      return `<div class="drawer-share groups-delete">
+      ${result ? `<p><strong>Not deleted yet: ${result.left.length === 1 ? "1 device still has" : `${result.left.length} devices still have`} bindings to this group.</strong></p>
+             <ul class="groups-reasons">${result.reasons.map((t) => `<li>${escapeHtml(t)}</li>`).join("")}</ul>` : `<p><strong>${plan.length} binding${plan.length === 1 ? "" : "s"} still point${plan.length === 1 ? "s" : ""} to this group</strong>, from
+              ${sources.map(nameOf).join(", ")}. Deleted on its own, the group leaves them on ${sources.length === 1 ? "that device" : "those devices"},
+              sending commands to nobody and using up binding slots.</p>
+             ${reporting.length ? `<p class="hint">${[...new Set(reporting.map((p) => p.sourceIeee))].map(nameOf).join(", ")} only report${reporting.length === 1 ? "s" : ""} ${reporting.length === 1 ? "its" : "their"} own state to the group; those bindings are removed too.</p>` : ""}
+             ${battery.length ? `<p class="hint"><strong>Wake ${battery.map(nameOf).join(", ")} first</strong> (press a button): battery devices only listen just after they're used.</p>` : ""}`}
+      ${common}
+      <div class="dialog-actions">
+        <button class="btn btn-primary btn-small" id="groups-delete-clean">${result ? "Try again" : "Unbind them, then delete"}</button>
+        <button class="btn btn-danger btn-small" id="groups-delete-anyway" title="Deletes the group and leaves these bindings on the devices">${result ? `Delete and leave ${result.left.length === 1 ? "this binding" : "these bindings"}` : "Delete anyway"}</button>
+        <button class="btn btn-small" id="groups-delete-cancel">Cancel</button>
+      </div>
+      ${result ? `<p class="hint">Leaving them: ${leftNames} keep${result.left.length === 1 ? "s" : ""} a binding to a group that no longer exists. You can remove it later from the Bindings tab once ${result.left.length === 1 ? "it's" : "they're"} back online.</p>` : ""}
+    </div>`;
+    }
+    _wireGroupsTab(rows) {
+      const root = this._q("#view-groups");
+      if (!root) return;
+      const on = (sel, fn) => root.querySelectorAll(sel).forEach((b) => b.addEventListener("click", fn));
+      on("#groups-new", () => this._openGroupFlowPickRemote());
+      on(".groups-dev", (e) => {
+        e.preventDefault();
+        const d = this._devices.find((x) => x.ieee === e.currentTarget.dataset.ieee);
+        if (d) this._openDeviceDrawer(d);
+      });
+      on("[data-group-remote]", (e) => this._openGroupFlowPickRemote({ groupId: Number(e.currentTarget.dataset.groupRemote) }));
+      on("[data-group-add]", async (e) => {
+        const gid = Number(e.currentTarget.dataset.groupAdd);
+        this._groupsDeleteOpen = null;
+        this._groupsAddOpen = this._groupsAddOpen === gid ? null : gid;
+        this._renderGroupsTab();
+        if (this._groupsAddOpen != null && !this._groupsCandidatesReady) {
+          await Promise.all(this._devices.map((d) => this._ensureClusters(d.ieee).catch(() => {
+          })));
+          this._groupsCandidatesReady = true;
+          if (this._view === "groups") this._renderGroupsTab();
+        }
+      });
+      on("[data-group-delete]", (e) => {
+        const gid = Number(e.currentTarget.dataset.groupDelete);
+        this._groupsAddOpen = null;
+        this._groupsDeleteResult = null;
+        this._groupsDeleteOpen = this._groupsDeleteOpen === gid ? null : gid;
+        this._renderGroupsTab();
+      });
+      on("[data-group-remove]", (e) => {
+        const [gid, ieee, ep] = e.currentTarget.dataset.groupRemove.split("|");
+        this._groupsRemoveMember(Number(gid), ieee, Number(ep));
+      });
+      on("#groups-add-cancel", () => {
+        this._groupsAddOpen = null;
+        this._renderGroupsTab();
+      });
+      const boxes = [...root.querySelectorAll("[data-add-key]")];
+      const go = root.querySelector("#groups-add-go");
+      boxes.forEach(
+        (b) => b.addEventListener("change", () => {
+          const n = boxes.filter((x) => x.checked).length;
+          if (go) {
+            go.disabled = !n;
+            go.textContent = n ? `Add ${n}` : "Add";
+          }
+        })
+      );
+      if (go)
+        go.addEventListener("click", () => {
+          const members = boxes.filter((x) => x.checked).map((x) => {
+            const [ieee, ep] = x.dataset.addKey.split("|");
+            return { ieee, endpoint: Number(ep) };
+          });
+          this._groupsAddMembers(this._groupsAddOpen, members);
+        });
+      on("#groups-delete-cancel", () => {
+        this._groupsDeleteOpen = null;
+        this._groupsDeleteResult = null;
+        this._renderGroupsTab();
+      });
+      on("#groups-delete-anyway", () => this._groupsDelete(this._groupsDeleteOpen, { unbindFirst: false }));
+      on("#groups-delete-clean", () => this._groupsDelete(this._groupsDeleteOpen, { unbindFirst: true }));
+    }
+    _groupsLabel(gid) {
+      const g = (this._groups || []).find((x) => Number(x.group_id) === Number(gid));
+      return g ? g.name || `Group ${gid}` : `Group ${gid}`;
+    }
+    async _groupsRefresh() {
+      await this._reloadDevices({ quiet: true });
+      this._render();
+    }
+    async _groupsAddMembers(gid, members) {
+      if (gid == null || !members.length || this._groupsBusy != null) return;
+      const name = this._groupsLabel(gid);
+      this._groupsBusy = gid;
+      this._setStatus("info", `Adding ${members.length} light${members.length === 1 ? "" : "s"} to ${name}\u2026`, 0);
+      try {
+        await this._api.addGroupMembers(gid, members);
+        this._groupsAddOpen = null;
+        await this._groupsRefresh();
+        const g = this._groups.find((x) => Number(x.group_id) === gid);
+        const have = new Set((g && g.members || []).map((m) => `${normIeee(m.device && m.device.ieee)}:${Number(m.endpoint_id)}`));
+        const missing = members.filter((m) => !have.has(`${normIeee(m.ieee)}:${m.endpoint}`));
+        if (missing.length) {
+          this._setStatus("error", `ZHA didn't list ${missing.map((m) => this._ieeeLabel(m.ieee, { plain: true })).join(", ")} in ${name} afterwards. Check the light is online and try again.`, 0);
+        } else {
+          this._setStatus("success", `Added ${members.map((m) => this._ieeeLabel(m.ieee, { plain: true })).join(", ")} to ${name}.`);
+        }
+      } catch (err) {
+        this._setStatus("error", `Couldn't add to ${name}: ${toolkitErrorText(err)}`, 0);
+      } finally {
+        this._groupsBusy = null;
+        this._renderGroupsTab();
+      }
+    }
+    async _groupsRemoveMember(gid, ieee, endpoint) {
+      if (this._groupsBusy != null) return;
+      const name = this._groupsLabel(gid);
+      const who = this._ieeeLabel(ieee, { plain: true });
+      this._groupsBusy = gid;
+      this._renderGroupsTab();
+      this._setStatus("info", `Removing ${who} from ${name}\u2026`, 0);
+      try {
+        await this._api.removeGroupMembers(gid, [{ ieee, endpoint }]);
+        await this._groupsRefresh();
+        this._setStatus("success", `Removed ${who} from ${name}. Remotes bound to ${name} no longer control it.`);
+      } catch (err) {
+        this._setStatus("error", `Couldn't remove ${who} from ${name}: ${toolkitErrorText(err)}`, 0);
+      } finally {
+        this._groupsBusy = null;
+        this._renderGroupsTab();
+      }
+    }
+    async _groupsDelete(gid, { unbindFirst }) {
+      if (gid == null || this._groupsBusy != null) return;
+      const name = this._groupsLabel(gid);
+      this._groupsBusy = gid;
+      this._renderGroupsTab();
+      try {
+        if (unbindFirst) {
+          await Promise.all(
+            [...new Set(this._rawBindings().filter((b) => b.isGroup && Number(b.groupId) === gid).map((b) => normIeee(b.sourceIeee)))].map(
+              (i) => this._ensureClusters(i).catch(() => {
+              })
+            )
+          );
+          const plan = this._groupsDeletePlan(gid);
+          const sources = [...new Set(plan.map((p) => p.sourceIeee))];
+          const errors = new Map(sources.map((i) => [i, []]));
+          this._setStatus("info", `Unbinding ${plan.length} binding${plan.length === 1 ? "" : "s"} from ${name}\u2026`, 0);
+          for (const op of plan) {
+            if (op.method === "skip") continue;
+            try {
+              if (op.method === "remove") await this._api.removeBindingsOnCluster(op.sourceIeee, op.endpoint, op.clusterId);
+              else await this._api.unbindGroup(op.sourceIeee, gid, [op.clusterId], { endpoint: op.endpoint });
+            } catch (err) {
+              errors.get(op.sourceIeee).push(toolkitErrorText(err).replace(/^unbind_group failed:\s*/i, ""));
+            }
+          }
+          const scan = await this._scanBindings(sources, { tries: this._retryCount });
+          const read = scan && scan.read || /* @__PURE__ */ new Set();
+          const left = groupUnbindPlan(gid, this._rawBindings());
+          if (left.length) {
+            const leftSources = [...new Set(left.map((p) => p.sourceIeee))];
+            const skipped = new Set(plan.filter((p) => p.method === "skip").map((p) => p.sourceIeee));
+            const reasons = groupDeleteReasons(
+              leftSources.map((i) => {
+                const d = this._devices.find((x) => normIeee(x.ieee) === i);
+                return {
+                  ieee: i,
+                  name: this._ieeeLabel(i, { plain: true }),
+                  battery: !!(d && this._isBatteryDevice(d)),
+                  skipped: skipped.has(i) && !(errors.get(i) || []).length,
+                  errors: errors.get(i) || [],
+                  answered: read.has(i)
+                };
+              })
+            );
+            this._groupsDeleteResult = { gid, left: leftSources, reasons };
+            this._setStatus("error", `${name} wasn't deleted: ${leftSources.length === 1 ? "1 device still has" : `${leftSources.length} devices still have`} bindings to it. The reasons are under the group.`, 0);
+            return;
+          }
+        }
+        this._setStatus("info", `Deleting ${name}\u2026`, 0);
+        await this._api.removeGroups([gid]);
+        this._groupsDeleteOpen = null;
+        this._groupsDeleteResult = null;
+        await this._groupsRefresh();
+        const gone = !this._groups.some((x) => Number(x.group_id) === gid);
+        this._setStatus(gone ? "success" : "error", gone ? `Deleted ${name}.` : `ZHA still lists ${name} after deleting it. Try again.`, gone ? void 0 : 0);
+      } catch (err) {
+        this._setStatus("error", `Couldn't delete ${name}: ${toolkitErrorText(err)}`, 0);
+      } finally {
+        this._groupsBusy = null;
+        this._renderGroupsTab();
+      }
+    }
     _renderDevicesTab() {
       const wrap = this._q("#devices-table-body");
       if (!wrap) return;
@@ -7830,21 +9683,130 @@ a.btn { display:inline-block; text-decoration:none; }
     // image's natural size, so they stay correct if the image is swapped for
     // a different resolution later.
     // -------------------------------------------------------------------
+    // 1.5.0 (local b4): one plan per Home Assistant floor. The top-level
+    // imageUrl/positions stay the original plan (older cards keep reading it)
+    // and belong to `legacyFloor`; other floors live in `floors[floorId]`.
+    // Without HA floors everything behaves exactly as before.
     async _loadFloorplan() {
+      let raw = null;
       try {
-        const raw = await this._storage.getItem(this._config.id, "floorplan");
-        if (raw) {
-          this._fpImageUrl = raw.imageUrl || "";
-          this._fpPositions = raw.positions || {};
-        }
+        raw = await this._storage.getItem(this._config.id, "floorplan");
       } catch (e) {
       }
+      const obj = (v) => v && typeof v === "object" && !Array.isArray(v) ? v : {};
+      raw = obj(raw);
+      const floors = {};
+      for (const [fid, plan] of Object.entries(obj(raw.floors))) {
+        const p = obj(plan);
+        floors[fid] = { imageUrl: typeof p.imageUrl === "string" ? p.imageUrl : "", positions: obj(p.positions) };
+      }
+      this._fpData = {
+        imageUrl: typeof raw.imageUrl === "string" ? raw.imageUrl : "",
+        positions: obj(raw.positions),
+        floors,
+        legacyFloor: typeof raw.legacyFloor === "string" ? raw.legacyFloor : null
+      };
+      const floorsNow = this._haFloors();
+      this._fpFloor = typeof raw.activeFloor === "string" && floorsNow.some((f) => f.floor_id === raw.activeFloor) ? raw.activeFloor : this._fpLegacyFloor();
+      this._fpBind();
     }
     async _saveFloorplan() {
+      if (!this._fpData) this._fpData = { imageUrl: "", positions: {}, floors: {}, legacyFloor: null };
+      const plan = this._fpPlanFor(this._fpFloor);
+      plan.imageUrl = this._fpImageUrl || "";
+      plan.positions = this._fpPositions;
+      const legacy = this._fpLegacyFloor();
       await this._storage.setItem(this._config.id, "floorplan", {
-        imageUrl: this._fpImageUrl,
-        positions: this._fpPositions
+        imageUrl: this._fpData.imageUrl,
+        positions: this._fpData.positions,
+        floors: this._fpData.floors,
+        legacyFloor: legacy,
+        activeFloor: this._fpFloor || null
       });
+    }
+    /** Home Assistant floors (Settings → Areas, labels & zones → Floors),
+     *  lowest level first. Empty when none are set up. */
+    _haFloors() {
+      const floors = this._hass && this._hass.floors || {};
+      return Object.values(floors).filter((f) => f && f.floor_id).sort((a, b) => (a.level ?? 0) - (b.level ?? 0) || String(a.name).localeCompare(String(b.name)));
+    }
+    _floorName(fid) {
+      const f = this._haFloors().find((x) => x.floor_id === fid);
+      return f ? f.name : "";
+    }
+    /** The floor the original single plan belongs to: as saved, else the
+     *  lowest floor. null without HA floors. */
+    _fpLegacyFloor() {
+      const floors = this._haFloors();
+      if (!floors.length) return null;
+      const saved = this._fpData && this._fpData.legacyFloor;
+      return saved && floors.some((f) => f.floor_id === saved) ? saved : floors[0].floor_id;
+    }
+    _fpPlanFor(fid) {
+      if (!this._fpData) this._fpData = { imageUrl: "", positions: {}, floors: {}, legacyFloor: null };
+      if (!fid || fid === this._fpLegacyFloor()) return this._fpData;
+      if (!this._fpData.floors[fid]) this._fpData.floors[fid] = { imageUrl: "", positions: {} };
+      return this._fpData.floors[fid];
+    }
+    _fpBind() {
+      const plan = this._fpPlanFor(this._fpFloor);
+      if (!plan.positions || typeof plan.positions !== "object") plan.positions = {};
+      this._fpImageUrl = plan.imageUrl || "";
+      this._fpPositions = plan.positions;
+    }
+    _fpSwitchFloor(fid) {
+      if (fid === this._fpFloor) return;
+      const plan = this._fpPlanFor(this._fpFloor);
+      plan.imageUrl = this._fpImageUrl || "";
+      this._fpFloor = fid;
+      this._fpBind();
+      this._fpImageSize = null;
+      this._fpViewbox = null;
+      this._saveFloorplan();
+      this._loadFpImage(this._fpImageUrl);
+    }
+    /** Floor of a device, strongest signal first: placed on a floor's own
+     *  plan; its area's floor in Home Assistant; placed on the original plan
+     *  (made before floors existed, so it's only a fallback). null if none. */
+    _deviceFloor(ieee) {
+      const id = normIeee(ieee);
+      const floors = this._haFloors();
+      if (!floors.length) return null;
+      if (this._fpData) {
+        for (const [fid, plan] of Object.entries(this._fpData.floors || {})) {
+          if (fid !== this._fpLegacyFloor() && plan.positions && plan.positions[id] && floors.some((f) => f.floor_id === fid)) return fid;
+        }
+      }
+      const d = this._devices.find((x) => normIeee(x.ieee) === id);
+      const area = d && d.area_id && this._hass && this._hass.areas && this._hass.areas[d.area_id];
+      if (area && area.floor_id) return area.floor_id;
+      if (this._fpData && this._fpData.positions && this._fpData.positions[id]) return this._fpLegacyFloor();
+      return null;
+    }
+    /** A device sits on one plan only: placing it on this floor removes it elsewhere. */
+    _fpForgetElsewhere(ieee) {
+      if (!this._fpData) return;
+      const plans = [this._fpData, ...Object.values(this._fpData.floors || {})];
+      for (const plan of plans) {
+        if (plan.positions !== this._fpPositions && plan.positions) delete plan.positions[ieee];
+      }
+    }
+    /** Natural size of any floor's image (cached; loads it if needed). */
+    _imgSize(url, onLoad) {
+      if (!url) return null;
+      this._imgSizes = this._imgSizes || {};
+      if (this._imgSizes[url]) return this._imgSizes[url] === "loading" || this._imgSizes[url] === "error" ? null : this._imgSizes[url];
+      this._imgSizes[url] = "loading";
+      const img = new Image();
+      img.onload = () => {
+        this._imgSizes[url] = { w: img.naturalWidth, h: img.naturalHeight };
+        if (onLoad) onLoad();
+      };
+      img.onerror = () => {
+        this._imgSizes[url] = "error";
+      };
+      img.src = url;
+      return null;
     }
     _loadFpImage(url) {
       if (!url) {
@@ -7872,6 +9834,7 @@ a.btn { display:inline-block; text-decoration:none; }
       this._ensureHealthData();
       const urlInput = this._q("#fp-image-url");
       if (urlInput && document.activeElement !== urlInput) urlInput.value = this._fpImageUrl || "";
+      this._renderFpFloorPicker();
       while (svg.firstChild) svg.removeChild(svg.firstChild);
       this._fpEdgesLayer = null;
       this._fpNodesLayer = null;
@@ -8002,6 +9965,33 @@ a.btn { display:inline-block; text-decoration:none; }
         el.setAttribute("d", `M ${from.x} ${from.y} Q ${mx} ${my} ${ex} ${ey}`);
       });
     }
+    /** Floor picker + setup help on the Floor Plan tab (1.5.0 local b4). */
+    _renderFpFloorPicker() {
+      const wrap = this._q("#fp-floor-wrap");
+      const help = this._q("#fp-floor-help");
+      if (!wrap || !help) return;
+      const floors = this._haFloors();
+      if (!floors.length) {
+        wrap.style.display = "none";
+        help.innerHTML = `<details><summary>House on more than one floor?</summary>
+        You can give each floor its own plan. Set up floors in Home Assistant first:
+        <ol>
+          <li><strong>Settings \u2192 Areas, labels &amp; zones \u2192 Floors</strong>: add a floor for each level (for example Ground floor and First floor), with its level number (0, 1, \u2026).</li>
+          <li><strong>Settings \u2192 Areas, labels &amp; zones \u2192 Areas</strong>: open each area and choose its floor.</li>
+          <li>Reload this page. A <strong>Floor</strong> picker appears here: choose a floor, set its image, and place its devices.</li>
+        </ol>
+        Your current plan becomes the lowest floor's plan, so nothing is lost. A device's floor comes from its area; placing it on a floor's plan overrides that.</details>`;
+        return;
+      }
+      wrap.style.display = "";
+      const sel = this._q("#fp-floor");
+      if (sel && document.activeElement !== sel) {
+        sel.innerHTML = floors.map((f) => `<option value="${escapeHtml(f.floor_id)}" ${f.floor_id === this._fpFloor ? "selected" : ""}>${escapeHtml(f.name)}</option>`).join("");
+      }
+      const noArea = this._devices.filter((d) => !this._deviceFloor(d.ieee)).length;
+      help.innerHTML = `<span class="muted">Each floor has its own image and placements. A device's floor comes from its area's floor in Home Assistant
+      (Settings \u2192 Areas, labels &amp; zones); placing it on a floor's plan overrides that.${noArea ? ` ${noArea} device${noArea === 1 ? " has" : "s have"} no floor yet: ${noArea === 1 ? "it's" : "they're"} listed on every floor until placed.` : ""}</span>`;
+    }
     _renderFpUnplacedList() {
       const list2 = this._q("#fp-unplaced-list");
       if (!list2) return;
@@ -8010,12 +10000,19 @@ a.btn { display:inline-block; text-decoration:none; }
         return;
       }
       const placed = new Set(Object.keys(this._fpPositions));
-      const unplaced = this._devices.filter((d) => !placed.has(d.ieee));
-      if (!unplaced.length) {
-        list2.innerHTML = `<span class="muted">All devices placed.</span>`;
+      const floors = this._haFloors();
+      const unplaced = this._devices.filter((d) => {
+        if (placed.has(d.ieee)) return false;
+        if (!floors.length) return true;
+        const f = this._deviceFloor(d.ieee);
+        return !f || f === this._fpFloor;
+      });
+      const misplaced = floors.length ? this._devices.filter((d) => placed.has(d.ieee) && this._deviceFloor(d.ieee) && this._deviceFloor(d.ieee) !== this._fpFloor) : [];
+      if (!unplaced.length && !misplaced.length) {
+        list2.innerHTML = `<span class="muted">All devices ${floors.length ? "on this floor " : ""}placed.</span>`;
         return;
       }
-      list2.innerHTML = unplaced.map((d) => `<div class="fp-chip" data-ieee="${escapeHtml(d.ieee)}">${escapeHtml(this._deviceLabel(d))}</div>`).join("");
+      list2.innerHTML = unplaced.map((d) => `<div class="fp-chip" data-ieee="${escapeHtml(d.ieee)}">${escapeHtml(this._deviceLabel(d))}</div>`).join("") + (misplaced.length ? `<p class="hint">On this plan but on another floor in Home Assistant: ${misplaced.map((d) => `${escapeHtml(this._deviceLabel(d))} (${escapeHtml(this._floorName(this._deviceFloor(d.ieee)))})`).join(", ")}. Click one on the plan to remove it, then place it on its own floor's plan.</p>` : "");
       list2.querySelectorAll(".fp-chip").forEach((el) => {
         el.addEventListener("pointerdown", (e) => this._onFpListPointerDown(e, el.dataset.ieee));
       });
@@ -8062,6 +10059,7 @@ a.btn { display:inline-block; text-decoration:none; }
         x: clamp(svgPt.x / this._fpImageSize.w, 0, 1),
         y: clamp(svgPt.y / this._fpImageSize.h, 0, 1)
       };
+      this._fpForgetElsewhere(ieee);
       this._saveFloorplan();
       this._renderFloorplan();
     }
@@ -8224,6 +10222,7 @@ a.btn { display:inline-block; text-decoration:none; }
       }).finally(() => {
         this._capExpLoading = false;
         this._renderCapExpBody();
+        if (this._drawerIeee && this._q("#drawer-body")) this._renderDrawer();
         if (this._explodedDeviceIeee && this._q("#dialog").classList.contains("open")) {
           const d = this._devices.find((x) => x.ieee === this._explodedDeviceIeee);
           if (d) this._renderExplodedView(d);
@@ -9022,8 +11021,8 @@ a.btn { display:inline-block; text-decoration:none; }
       el.innerHTML = `
       <div class="advanced-form-wrap">
         <div class="advanced-form">
-          <p class="adv-guided-hint">Want a remote to control some lights? <button type="button" class="btn btn-small" id="adv-open-guided">Control lights with a remote\u2026</button>
-            does it step by step, including creating the group.</p>
+          <p class="adv-guided-hint">Want a remote to control some lights? The <a href="#" class="src-link" id="adv-open-guided">Groups tab</a>
+            does it step by step with <strong>New group for a remote\u2026</strong>, including creating the group.</p>
           <p class="muted">Direct access to <code>zha_toolkit.bind_ieee</code> / <code>binds_remove_all</code> /
             <code>bind_group</code> for edge cases (specific endpoints, clusters not auto-detected, etc).</p>
           <label>Source device
@@ -9078,7 +11077,10 @@ a.btn { display:inline-block; text-decoration:none; }
       </div>`;
       this._populateAdvancedSelects();
       this._q("#adv-target-type").addEventListener("change", (e) => this._advApplyTargetType(e.target.value));
-      this._q("#adv-open-guided").addEventListener("click", () => this._openGroupFlowPickRemote());
+      this._q("#adv-open-guided").addEventListener("click", (e) => {
+        e.preventDefault();
+        this._switchView("groups");
+      });
       this._q("#adv-source").addEventListener("change", () => this._advPopulateSourceEndpoints());
       this._q("#adv-src-ep").addEventListener("change", () => {
         this._advPopulateClusterOptions();

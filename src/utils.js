@@ -78,6 +78,9 @@ export function extractErrorMessage(err) {
   }
   if (err.message) return err.message;
   if (err.error && err.error.message) return err.error.message;
+  // Home Assistant's {"code":"unknown_error","message":""}: no details. From
+  // zha-toolkit this usually means the device didn't answer.
+  if (err.code && !err.message) return `${String(err.code).replace(/_/g, " ")} (no details)`;
   try {
     const s = JSON.stringify(err);
     if (s && s !== "{}") return s;

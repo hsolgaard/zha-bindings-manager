@@ -18,6 +18,23 @@ export class ZhaApi {
     return this.hass.callWS({ type: "zha/groups" });
   }
 
+  /** Experimental (integration only): read one router's routing and
+   *  neighbour tables; returns the stored entry. */
+  async meshRead(ieee) {
+    return this.hass.callWS({ type: "zha_bindings_manager/mesh_read", ieee });
+  }
+
+  /** Binding tables the integration read itself (1.5.0):
+   *  {scans: {ieee: {at, bindings, partial}}}. */
+  async deviceScans() {
+    return this.hass.callWS({ type: "zha_bindings_manager/device_scans" });
+  }
+
+  /** Experimental: every stored entry, {devices: {ieee: entry}}. */
+  async meshGet() {
+    return this.hass.callWS({ type: "zha_bindings_manager/mesh_get" });
+  }
+
   async fetchClusters(ieee) {
     return this.hass.callWS({ type: "zha/devices/clusters", ieee });
   }
@@ -236,6 +253,28 @@ export class ZhaApi {
       group_id: Number(groupId),
       members: members.map((m) => ({ ieee: m.ieee, endpoint_id: Number(m.endpoint) })),
     });
+  }
+
+  /** binds_remove_all limited to one source endpoint and cluster, with no
+   *  target filter: removes every binding on that endpoint and cluster,
+   *  group bindings included. Used for a light's reporting binding to a
+   *  group, which unbind_group can't remove (see groups.js). */
+  async removeBindingsOnCluster(sourceIeee, endpoint, clusterId) {
+    return this.callToolkit("binds_remove_all", { ieee: sourceIeee, endpoint: Number(endpoint), cluster: [Number(clusterId)] });
+  }
+
+  /** Removes [{ieee, endpoint}] from a ZHA group (ZHA's own websocket). */
+  async removeGroupMembers(groupId, members) {
+    return this.hass.callWS({
+      type: "zha/group/members/remove",
+      group_id: Number(groupId),
+      members: members.map((m) => ({ ieee: m.ieee, endpoint_id: Number(m.endpoint) })),
+    });
+  }
+
+  /** Deletes ZHA groups (ZHA's own websocket, as the Groups page uses). */
+  async removeGroups(groupIds) {
+    return this.hass.callWS({ type: "zha/group/remove", group_ids: groupIds.map(Number) });
   }
 
   async unbindGroup(sourceIeee, groupId, clusterIds, opts = {}) {

@@ -51,7 +51,7 @@ export class HaStorageProvider extends StorageProvider {
    *  - bundledCardVersion: the card version the integration ships (1.0.0+).
    *  Unknown values are null. */
   static async probe(hass) {
-    const none = { installed: false, available: false, version: null, bundledCardVersion: null };
+    const none = { installed: false, available: false, version: null, bundledCardVersion: null, experimental: false, lqi: null };
     try {
       const res = await hass.connection.sendMessagePromise({ type: WS_GET_CAPABILITIES });
       if (!res || !res.available) return none;
@@ -62,6 +62,12 @@ export class HaStorageProvider extends StorageProvider {
         available: !storageOff,
         version: str(res.version),
         bundledCardVersion: str(res.bundled_card_version),
+        // 1.5.0 (local build): experimental features + link-quality thresholds.
+        experimental: !!(res.features && res.features.experimental_features === true),
+        lqi:
+          res.lqi_thresholds && Number.isInteger(res.lqi_thresholds.good) && Number.isInteger(res.lqi_thresholds.weak)
+            ? { good: res.lqi_thresholds.good, weak: res.lqi_thresholds.weak }
+            : null,
       };
     } catch (e) {
       return none;

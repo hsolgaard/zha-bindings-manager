@@ -3,6 +3,52 @@
 All notable changes to ZHA Bindings Manager are documented here.
 
 
+## [1.5.0]
+
+### Added
+
+- **Groups tab.** Every ZHA group with its lights and the remotes bound to it. Add or remove lights, bind another
+  remote to a group (**Add a remote…**), start **New group for a remote…**, and delete a group, with the option to
+  unbind the remotes still pointing to it first so they don't keep dead bindings. A light's binding reporting its own
+  state to the group is removed too, and when a device can't be reached the card says why for each one and offers
+  **Try again** or **Delete and leave these bindings**. Thanks to John_smith for the suggestion.
+- **Network tab (beta, needs the integration with Experimental features on).** Reads your routers' routing and
+  neighbour tables with zha-toolkit when you click **Scan network**, and shows link quality on your floor plan.
+  - **Show** picks what's drawn: *Strongest links*, *Every link heard*, or *Routes my bindings use* (arrowed hops
+    for each binding, with a list of the weakest). A short explanation of links versus routes sits under it.
+  - Battery devices are drawn as dots joined to their parent router, or marked *parent unknown*.
+  - Routers that haven't been read are labelled *(not read)*; routers that didn't answer are listed with **Read
+    again**. Any router can be read on its own from its side panel (**Read this router**).
+  - Tap a link for both directions' readings, or a battery device's line for its parent link; zoom and pan on phones
+    (devices and labels keep their size). Suggestions point at weak spots.
+- **Check route…** in a remote's side panel: the likely path of each binding through the mesh and its weakest hop.
+- **Show route on the Map** (beta) in a binding's details, or **Show on the Map** in a remote's Check route…: draws
+  the binding's likely route over the Map, hop by hop, coloured by link quality. The hint under the Map mentions it.
+- **Floors.** With floors set up in Home Assistant, each floor gets its own floor-plan image and placements, and the
+  Network tab shows one floor at a time plus the links between floors. Your existing plan becomes the lowest floor's.
+- **Community database status in the side panel:** whether the device's model is in the capability database yet,
+  with a link to check and share it if not.
+- **Unconfirmed binds on the Map.** A bind that couldn't be confirmed yet (usually a sleeping battery remote) is
+  drawn as a dashed line; click it to check again. Unconfirmed changes are remembered across a reload for 14 days.
+- **Newer reads from the integration are used.** When the integration has read a device's bindings more recently
+  than the card (device-page Rescan, nightly check), the card uses that read when it opens.
+
+### Changed
+
+- **Swipe right to close the side panel** on phones and tablets.
+- **The guided setup moved to the Groups tab** (**New group for a remote…**). The toolbar button is gone; remotes'
+  side panels still have **Control lights with this…**. Group membership details on the Map now link to the Groups
+  tab.
+
+### Fixed
+
+- **Tabs update after a dialog changes something.** A group made in the guided setup, for example, only appeared on
+  the Groups tab after switching tabs.
+- **Clearer unbind errors.** A failed unbind or **Unbind all** now shows zha-toolkit's own error. Unbinding from a
+  device that's already been removed from ZHA hits a known zha-toolkit bug; the card now explains it and the
+  workaround (pair the removed device again, then unbind it normally). An error with no details from Home Assistant
+  now reads "unknown error (no details)" instead of raw JSON.
+
 ## [1.4.2]
 
 ### Fixed

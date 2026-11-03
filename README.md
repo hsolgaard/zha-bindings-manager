@@ -110,7 +110,7 @@ No other configuration is required.
 4. Select a map connection to inspect or remove it.
 5. Drag a controller device onto a target device to start creating a binding.
 6. Click any device (a Map node, a name in the Devices or Bindings view) to open its side panel: what it controls, what controls it, and its actions. **Show endpoints…** there gives the endpoint-by-endpoint breakdown.
-7. To make a remote control some lights, click **Control lights with a remote…** in the toolbar and follow the steps.
+7. To make a remote control some lights, open the **Groups** tab, click **New group for a remote…** and follow the steps.
 8. **Check and share capabilities…** in a device's side panel checks which commands its firmware actually implements, and lets you share the result with the community database.
 9. Open the **Zigbee Capability Explorer** view to see what your own devices — or a device you're considering buying — are confirmed to support, based on scans shared by the community.
 
@@ -128,6 +128,7 @@ Supported-command discovery is a separate, on-demand live-device scan. It is int
 - Hide coordinator/reporting noise to focus on direct control relationships.
 - Filter by role, entity type, manufacturer or Home Assistant area.
 - Place devices over your own floor-plan image.
+- Give each floor its own plan when your house has more than one level (uses Home Assistant's floors; see [Floors](#floors)).
 
 ### Diagnose bindings
 
@@ -138,6 +139,7 @@ Supported-command discovery is a separate, on-demand live-device scan. It is int
 - Flag duplicates and bindings to groups that no longer exist.
 - Explain each health finding in plain English.
 - Rescan the relevant device directly from a health finding.
+- Each device's side panel says whether its model is in the community capability database yet, with a link to check and share it if not.
 - Export the filtered data as CSV or JSON, or print/save it as PDF.
 
 Binding Health is a **structural check**. It verifies that the objects referenced by a binding still exist in ZHA; it does not prove that the devices can currently communicate over the air.
@@ -186,7 +188,7 @@ Coverage is limited to devices someone has scanned and shared. A missing or empt
 
 ### Create and remove bindings
 
-- **Control lights with a remote…** (toolbar, or **Control lights with this…** in a remote's side panel) does it step by step: pick the remote, pick the lights, choose a new or existing ZHA group, and the card creates or updates the group, binds the remote to it, checks the binding was stored and asks you to test it.
+- **New group for a remote…** (Groups tab, or **Control lights with this…** in a remote's side panel) does it step by step: pick the remote, pick the lights, choose a new or existing ZHA group, and the card creates or updates the group, binds the remote to it, checks the binding was stored and asks you to test it.
 - Drag a source device onto a target device to pre-select a likely binding.
 - Choose the exact source endpoint, target endpoint and cluster before committing.
 - Remove bindings directly from the map or table.
@@ -195,6 +197,45 @@ Coverage is limited to devices someone has scanned and shared. A missing or empt
 - Enter a custom cluster ID for firmware-specific expert use cases.
 
 After a bind or unbind operation, ZHA Bindings Manager rescans the affected device and compares the result. Confirmation is therefore based on the resulting binding table, not only on the raw response returned by `zha-toolkit`.
+
+- A battery remote that was asleep can't be read straight away, so its change stays **not confirmed yet**. Unconfirmed binds are drawn as dashed lines on the Map (click one to check again) and are remembered across a page reload for up to 14 days.
+- When **Unbind all** or an unbind fails, the card shows zha-toolkit's own error. Unbinding from a device that's already been removed from ZHA fails with a known zha-toolkit error; the card explains it and the workaround (pair the removed device again, then unbind it normally).
+
+### Manage groups
+
+The **Groups** tab lists every ZHA group with its lights and the remotes bound to it.
+
+- **Add lights…** and **Remove** change a group's members straight away, using ZHA's own group commands. Every remote bound to the group controls the new set of lights without being touched.
+- **Add a remote…** binds a remote to that group, step by step (the same guided setup, with the group already chosen).
+- **New group for a remote…** picks a remote and its lights, and creates or reuses a group.
+- **Delete group…** first lists any bindings that still point to the group. **Unbind them, then delete** removes those bindings (wake battery remotes first) and only deletes the group once they're gone; **Delete anyway** skips that. If some can't be removed, it says why for each device (a battery device asleep, a mains device offline) and offers **Try again** or **Delete and leave these bindings**. Deleting a group also removes its light entity in Home Assistant.
+- A light reporting its own state to the group is bound on a cluster it receives, which zha-toolkit's `unbind_group` can't remove. The card removes that binding with `binds_remove_all` limited to its endpoint and cluster, but only when the light has no other binding on that endpoint and cluster (which would be removed too); otherwise it's left and the card says so.
+- Bindings where a device only reports its own state to the group are counted separately, not listed as control.
+
+### Floors
+
+If your house has more than one level, give each floor its own floor-plan image:
+
+1. In Home Assistant, **Settings → Areas, labels & zones → Floors**: add a floor for each level, with its level number (0 = ground, 1 = first, …).
+2. In the same place, under **Areas**, open each area and choose its floor. Devices take their floor from their area.
+3. Reload the card. A **Floor** picker appears on the Floor Plan tab: choose a floor, set its image and place its devices.
+
+Your existing plan becomes the lowest floor's plan, so nothing is lost. Placing a device on a floor's plan overrides the floor its area gives it.
+
+### Check your Zigbee network (beta, needs the integration)
+
+With the [integration](https://github.com/hsolgaard/zha-bindings-manager-integration) installed and **Experimental features** turned on under its Configure, a **Network** tab (marked *beta*) appears. **Scan network** reads each router's routing and neighbour tables with `zha_toolkit.get_routes_and_neighbours`, one router at a time. Nothing on your network is changed.
+
+- **Map:** routers on your floor plan (or in a circle without one), with lines coloured by link quality (LQI): green good, amber fair, red weak. Thresholds are 150 and 80 by default and can be changed under the integration's Configure. Tap a line for its details (both directions' readings, or a battery device's link to its parent); zoom and pan on a phone. Devices and labels keep their size as you zoom in.
+- **Show:** *Strongest links* (each router's best few links, the default), *Every link heard* (everything in the neighbour tables), or *Routes my bindings use*. A **link** is two devices that can hear each other. A **route** is the way a command actually travels: for each binding the card follows the routing tables hop by hop and draws arrows, weakest first in a list.
+- **Battery devices** don't route, so they're drawn as small dots joined to their parent router. One shown as *parent unknown* hasn't been heard by any router read so far.
+- **Routers that didn't answer** are listed with **Read again**. Routers that haven't been read are drawn with *(not read)*; open one's side panel and choose **Read this router**.
+- **Floors:** with Home Assistant floors set up, the map shows one floor at a time and lists the links between floors.
+- **Suggestions and weakest links** point at devices that hang on a single weak link and places where an extra router would help.
+- **Show route on the Map:** click a device-to-device binding on the Map, then **Show route on the Map** (or use **Show on the Map** next to a binding in a remote's **Check route…**). Each hop is drawn over the Map in its link-quality colour with its LQI, and a banner names the path and its weakest hop. **Clear route** removes it.
+- **Check route…** in a remote's side panel shows the likely path of each of its bindings and the weakest hop. Group bindings are broadcast, so only the first hop to its parent is shown.
+
+These tables are a snapshot: Zigbee re-chooses routes all the time, and an end device is only known through its parent. Treat the map as a guide, not proof.
 
 ## Screenshots
 

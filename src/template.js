@@ -8,12 +8,13 @@ export const SHELL_HTML = `
       <button class="tab" data-view="floorplan">Floor Plan</button>
       <button class="tab" data-view="table">Bindings</button>
       <button class="tab" data-view="devices">Devices</button>
+      <button class="tab" data-view="groups">Groups</button>
       <button class="tab" data-view="capexplorer">Zigbee Capability Explorer</button>
       <button class="tab" data-view="advanced">Advanced</button>
+      <button class="tab" data-view="mesh" id="tab-mesh" style="display:none" title="Beta: link quality and routes in your Zigbee mesh. Still being tested; it may change.">Network<sup class="tab-beta">beta</sup></button>
     </div>
     <input id="search" class="search" placeholder="Search devices…">
     <span id="storage-mode-badge" class="storage-mode-badge muted"></span>
-    <button class="btn" id="btn-control-lights" title="Guided setup: pick a remote and the lights it should control. The card makes or reuses a ZHA group, binds the remote to it and checks it works.">Control lights with a remote…</button>
     <button class="btn" id="btn-refresh-devices" title="Reload device list">⟳ Devices</button>
     <button class="btn btn-primary" id="btn-scan" title="Read current bindings from your Zigbee devices">Scan bindings</button>
     <button class="btn btn-small" id="btn-rescan-settings" title="Scan settings">⚙</button>
@@ -96,11 +97,12 @@ export const SHELL_HTML = `
       </div>
       <button class="btn btn-small" id="btn-clear-filters">Clear type / manufacturer / area filters</button>
     </div>
+    <div id="map-route-banner" class="map-route-banner" style="display:none"></div>
     <div class="graph-wrap">
       <svg id="graph-svg" viewBox="0 0 1200 840" preserveAspectRatio="xMidYMid meet"></svg>
       <div id="graph-empty" class="graph-empty"></div>
     </div>
-    <p class="hint">Drag a device onto another device (or onto a group) to create a binding. Click a line to inspect / remove it.</p>
+    <p class="hint">Drag a device onto another device (or onto a group) to create a binding. Click a line to inspect / remove it<span id="map-route-hint" style="display:none">, or to show the route its commands take through your routers (Network, beta)</span>.</p>
     <p id="graph-role-legend" class="hint" style="display:none">🕹 badge = this device also has its own Light/Switch/Cover/Fan role, in addition to what's shown by the edges here (e.g. a wired/local load alongside a Zigbee-bound one) — click the device, then Show endpoints…, to see the per-endpoint breakdown.</p>
   </div>
 
@@ -140,6 +142,7 @@ export const SHELL_HTML = `
     </div>
   </div>
 
+  <div id="view-groups" class="view"></div>
   <div id="view-devices" class="view">
     <div class="table-scroll">
     <table class="bindings-table">
@@ -160,6 +163,7 @@ export const SHELL_HTML = `
 
   <div id="view-floorplan" class="view">
     <div class="graph-toolbar">
+      <label class="row" id="fp-floor-wrap" style="display:none">Floor <select id="fp-floor"></select></label>
       <label class="row fp-image-row">Image URL
         <input type="text" id="fp-image-url" placeholder="/local/floorplan.png">
       </label>
@@ -172,6 +176,7 @@ export const SHELL_HTML = `
         <input type="number" id="fp-marker-scale" min="40" max="200" step="10" style="width:4.5em; margin-left:6px;">%
       </label>
     </div>
+    <div id="fp-floor-help" class="fp-floor-help hint"></div>
     <div class="floorplan-layout">
       <div class="fp-sidebar">
         <div class="filter-group-title">Unplaced devices</div>
@@ -189,6 +194,8 @@ export const SHELL_HTML = `
   <div id="view-capexplorer" class="view"></div>
 
   <div id="view-advanced" class="view"></div>
+
+  <div id="view-mesh" class="view"></div>
 
   <div id="drawer" class="drawer" aria-hidden="true">
     <div class="drawer-header">

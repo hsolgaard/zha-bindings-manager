@@ -43,7 +43,7 @@ describe("HaStorageProvider.probe", () => {
   it("returns the backend's version alongside availability", async () => {
     const connection = makeFakeConnection();
     connection.on("zha_bindings_manager/get_capabilities", async () => ({ available: true, version: "0.1.0" }));
-    expect(await HaStorageProvider.probe({ connection })).toEqual({
+    expect(await HaStorageProvider.probe({ connection })).toMatchObject({
       installed: true,
       available: true,
       version: "0.1.0",
@@ -54,7 +54,7 @@ describe("HaStorageProvider.probe", () => {
   it("returns a null version when the backend doesn't report one", async () => {
     const connection = makeFakeConnection();
     connection.on("zha_bindings_manager/get_capabilities", async () => ({ available: true }));
-    expect(await HaStorageProvider.probe({ connection })).toEqual({
+    expect(await HaStorageProvider.probe({ connection })).toMatchObject({
       installed: true,
       available: true,
       version: null,
@@ -64,7 +64,7 @@ describe("HaStorageProvider.probe", () => {
 
   it("returns unavailable with no version when the integration isn't installed", async () => {
     const connection = makeFakeConnection();
-    expect(await HaStorageProvider.probe({ connection })).toEqual({
+    expect(await HaStorageProvider.probe({ connection })).toMatchObject({
       installed: false,
       available: false,
       version: null,
@@ -80,7 +80,7 @@ describe("HaStorageProvider.probe", () => {
       bundled_card_version: "1.0.0",
       features: { shared_storage: false },
     }));
-    expect(await HaStorageProvider.probe({ connection })).toEqual({
+    expect(await HaStorageProvider.probe({ connection })).toMatchObject({
       installed: true,
       available: false,
       version: "1.0.0",
@@ -246,5 +246,22 @@ describe("HaStorageProvider — debounced save", () => {
     expect(lastSaved.state.items.floorplan.imageUrl).toBe("/local/plan.png");
 
     vi.useRealTimers();
+  });
+});
+
+describe("HaStorageProvider.probe experimental (1.5.0 local)", () => {
+  it("reports experimental features and LQI thresholds", async () => {
+    const connection = {
+      sendMessagePromise: async () => ({ available: true, version: "1.5.0", features: { experimental_features: true }, lqi_thresholds: { good: 160, weak: 70 } }),
+    };
+    const p = await HaStorageProvider.probe({ connection });
+    expect(p.experimental).toBe(true);
+    expect(p.lqi).toEqual({ good: 160, weak: 70 });
+  });
+  it("defaults to off with no thresholds", async () => {
+    const connection = { sendMessagePromise: async () => ({ available: true, version: "1.4.2", features: {} }) };
+    const p = await HaStorageProvider.probe({ connection });
+    expect(p.experimental).toBe(false);
+    expect(p.lqi).toBeNull();
   });
 });

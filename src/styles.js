@@ -335,6 +335,7 @@ a.btn { display:inline-block; text-decoration:none; }
 .mesh-legend { display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-top:6px; font-size:0.85em; }
 .mesh-tips { padding-left:18px; margin:0 0 12px; }
 .mesh-tips li { margin-bottom:6px; }
+.mesh-tip-error { color: var(--error-color, #db4437); font-weight: 500; }
 .mesh-tip-warning { color: var(--primary-text-color); }
 .mesh-tip-info { color: var(--secondary-text-color); }
 .mesh-links tr { cursor:pointer; }

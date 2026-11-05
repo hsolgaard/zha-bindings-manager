@@ -142,3 +142,35 @@ describe("1.5.0b3: hangs on one link", () => {
     expect(single.some((t) => t.startsWith("0b has only one usable link (to 0a"))).toBe(true);
   });
 });
+
+describe("address conflicts (1.5.2)", () => {
+  const C = "00:12:4b:00:00:00:00:01";
+  const R1 = "aa:00:00:00:00:00:00:01";
+  const P = "bb:00:00:00:00:00:00:02";
+  const L = "cc:00:00:00:00:00:00:03";
+  const devices = [
+    { ieee: C, nwk: "0x0000", device_type: "Coordinator" },
+    { ieee: R1, nwk: "0x1234", device_type: "Router" },
+    { ieee: P, nwk: "0x5555", device_type: "Router" },
+    { ieee: L, nwk: "0x7777", device_type: "Router" },
+  ];
+  const nb = (ieee, nwk, lqi = 200) => ({ ieee, nwk, type: "Router", rel: "Sibling", lqi });
+  it("finds a device using the coordinator's address", () => {
+    const snap = { [R1]: { ok: true, routes: [], neighbours: [nb(C, 0), nb(P, 0)] } };
+    const mesh = buildMesh(snap, devices);
+    expect(mesh.conflicts).toEqual([{ nwk: 0, ieees: [C, P], coordinator: true }]);
+    const tips = meshSuggestions(mesh, { nameOf: (i) => (i === P ? "Plug" : i), routers: [C, R1, P, L] });
+    expect(tips[0].kind).toBe("coordinator_address");
+    expect(tips[0].level).toBe("error");
+    expect(tips[0].text).toMatch(/^Plug is using the coordinator's network address \(0x0000\)/);
+  });
+  it("finds two devices sharing an address, and ignores stale entries", () => {
+    const snap = { [R1]: { ok: true, routes: [], neighbours: [nb(L, 0x5555), nb(P, 0x7777, 0)] } };
+    const mesh = buildMesh(snap, devices);
+    expect(mesh.conflicts).toEqual([{ nwk: 0x5555, ieees: [P, L].sort(), coordinator: false }]);
+  });
+  it("no conflicts on a healthy network", () => {
+    const snap = { [R1]: { ok: true, routes: [], neighbours: [nb(C, 0), nb(P, 0x5555), nb(L, 0x7777)] } };
+    expect(buildMesh(snap, devices).conflicts).toEqual([]);
+  });
+});

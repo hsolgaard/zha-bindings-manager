@@ -78,7 +78,48 @@ export function buildMesh(snapshot, devices = []) {
     const vals = Object.values(l.heard).filter((v) => typeof v === "number");
     l.lqi = vals.length ? Math.min(...vals) : null;
   }
-  return { snapshot: snap, nwkToIeee, typeOf, links, parentOf, children, staleEntries };
+  const conflicts = addressConflicts(snap, devices);
+  return { snapshot: snap, nwkToIeee, typeOf, links, parentOf, children, staleEntries, conflicts };
+}
+
+/**
+ * 1.5.2: network addresses claimed by more than one device. Every device has a
+ * 16-bit network address (the coordinator is always 0x0000); two devices
+ * sharing one confuses routing, and a device claiming the coordinator's
+ * address can swamp the network (forum, tube0013: an innr SP234 plug
+ * "advertising itself as 0x0000"). Sources: the address ZHA has for each
+ * device, and the addresses routers list for their neighbours (stale
+ * entries, LQI 0, are left out).
+ * Returns [{nwk, ieees:[...], coordinator: bool}], coordinator address first.
+ */
+export function addressConflicts(snapshot, devices = []) {
+  const claims = new Map(); // nwk -> Set(ieee)
+  const claim = (nwk, ieee) => {
+    if (nwk == null || !ieee) return;
+    if (!claims.has(nwk)) claims.set(nwk, new Set());
+    claims.get(nwk).add(ieee);
+  };
+  let coord = null;
+  for (const d of devices) {
+    const ieee = normIeee(d.ieee);
+    if (d.device_type === "Coordinator") coord = ieee;
+    claim(nwkNumber(d.nwk), ieee);
+  }
+  for (const [rawReporter, entry] of Object.entries(snapshot || {})) {
+    const reporter = normIeee(rawReporter);
+    for (const n of (entry && entry.neighbours) || []) {
+      const ieee = normIeee(n.ieee);
+      if (!ieee || ieee === reporter || !(typeof n.lqi === "number" && n.lqi > 0)) continue;
+      claim(nwkNumber(n.nwk), ieee);
+    }
+  }
+  const out = [];
+  for (const [nwk, set] of claims.entries()) {
+    if (set.size < 2) continue;
+    const ieees = [...set].sort((a, b) => (a === coord ? -1 : b === coord ? 1 : a.localeCompare(b)));
+    out.push({ nwk, ieees, coordinator: nwk === 0 });
+  }
+  return out.sort((a, b) => a.nwk - b.nwk);
 }
 
 export function linkBetween(mesh, a, b) {
@@ -224,6 +265,19 @@ export function weakestLinks(mesh, limit = 10) {
 /** Plain suggestions. areaOf(ieee) → area name or "" ; nameOf(ieee) → label. */
 export function meshSuggestions(mesh, { thr = LQI_RECOMMENDED, areaOf = () => "", nameOf = (i) => i, routers = [] } = {}) {
   const out = [];
+  // 1.5.2: address conflicts come first: they can disrupt the whole network.
+  for (const c of mesh.conflicts || []) {
+    const hex = `0x${c.nwk.toString(16).padStart(4, "0")}`;
+    const others = c.coordinator ? c.ieees.filter((i) => mesh.typeOf.get(i) !== "Coordinator") : c.ieees;
+    out.push({
+      kind: c.coordinator ? "coordinator_address" : "address_conflict",
+      level: "error",
+      ieees: c.ieees,
+      text: c.coordinator
+        ? `${others.map(nameOf).join(", ")} ${others.length === 1 ? "is" : "are"} using the coordinator's network address (${hex}). A device doing this can flood or confuse the whole network: lights responding late or not at all, timeouts. Unplug it (or remove its battery), check whether the network recovers, then reset and pair it again.`
+        : `${c.ieees.map(nameOf).join(" and ")} are using the same network address (${hex}). Messages for one may go to the other. Scan again to confirm; if it stays, reset and pair one of them again.`,
+    });
+  }
   const routerSet = new Set(routers.map(normIeee));
   // Weak parent links.
   for (const [child, p] of mesh.parentOf.entries()) {
@@ -314,6 +368,6 @@ export function meshSuggestions(mesh, { thr = LQI_RECOMMENDED, areaOf = () => ""
       out.push({ kind: "area_without_router", level: "info", ieees: [], text: `${area} has ${e.devices} Zigbee device${e.devices === 1 ? "" : "s"} but no router.` });
     }
   }
-  const order = { warning: 0, info: 1 };
+  const order = { error: 0, warning: 1, info: 2 };
   return out.sort((x, y) => order[x.level] - order[y.level]);
 }

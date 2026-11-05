@@ -52,7 +52,7 @@ import {
 } from "./stale-bindings.js";
 import { aboutIntegrationText } from "./about.js";
 import { summarizeScan, toolkitAvailable } from "./scan-summary.js";
-import { unusualDeviceBindingRule } from "./health-rules.js";
+import { isManufacturerSpecific, manufacturerSpecificRule, unusualDeviceBindingRule } from "./health-rules.js";
 import { deepLinkIeee, withoutDeviceParam } from "./deep-link.js";
 import { groupClusterSupport, groupSupportSummary, groupSupportHealth } from "./group-support.js";
 import {
@@ -1666,6 +1666,9 @@ export class ZhaBindingMapCard extends HTMLElement {
    *    either, same as "control" — the fix is honesty about what we know,
    *    not a new way to hide things. */
   _classifyBinding(b) {
+    // 1.5.1: manufacturer-specific clusters are out of scope (see
+    // isManufacturerSpecific): never shown as control, never checked.
+    if (isManufacturerSpecific(b.clusterId)) return "manufacturer";
     const clusters = this._clusterCache.get(b.sourceIeee);
     if (!clusters) return "unknown";
     const matches = (type) =>
@@ -1686,7 +1689,7 @@ export class ZhaBindingMapCard extends HTMLElement {
    *  can never silently drift apart on what "unknown" looks like. */
   _edgeClassFor(b) {
     const cls = this._classifyBinding(b);
-    if (cls === "reporting") return "edge edge-reporting";
+    if (cls === "reporting" || cls === "manufacturer") return "edge edge-reporting";
     if (cls === "unknown") return "edge edge-unknown";
     return "edge";
   }
@@ -1704,7 +1707,7 @@ export class ZhaBindingMapCard extends HTMLElement {
   _graphBindings() {
     const all = this._allBindings();
     if (this._filters.showReportingBindings) return all;
-    return all.filter((b) => this._classifyBinding(b) !== "reporting");
+    return all.filter((b) => !["reporting", "manufacturer"].includes(this._classifyBinding(b)));
   }
 
   /** Synthetic group -> member edges, sourced entirely from real ZCL group
@@ -1936,7 +1939,9 @@ export class ZhaBindingMapCard extends HTMLElement {
           // folded into "reports to" — we genuinely don't know what this one
           // does yet, and saying so is more honest than guessing either way.
           const cls = this._classifyBinding(b);
-          if (cls === "control") {
+          if (cls === "manufacturer") {
+            // out of scope (1.5.1)
+          } else if (cls === "control") {
             (b.isGroup ? out.controlsGroup : out.controlsDevice).push(b);
           } else if (cls === "unknown") {
             out.unknown.push(b);
@@ -2135,6 +2140,7 @@ export class ZhaBindingMapCard extends HTMLElement {
           recommendation: "Recreate the group or remove the binding.",
         };
       }
+      if (isManufacturerSpecific(b.clusterId)) return manufacturerSpecificRule(b.clusterId);
       // Can anything in the group act on this cluster?
       const support = groupSupportHealth(
         this._groupSupport(b.groupId, b.clusterId),
@@ -2186,6 +2192,7 @@ export class ZhaBindingMapCard extends HTMLElement {
           recommendation: "Recreate the binding using a valid endpoint.",
         };
       }
+      if (isManufacturerSpecific(b.clusterId)) return manufacturerSpecificRule(b.clusterId);
       const hasCluster = targetClusters.some(
         (c) => c.type === "in" && c.endpoint_id === Number(b.targetEndpoint) && c.id === b.clusterId
       );
@@ -3724,9 +3731,14 @@ export class ZhaBindingMapCard extends HTMLElement {
       if (f.step === "run" && f.awaitWake) {
         tail = `<p class="flow-callout">Press a button on <strong>${escapeHtml(srcName)}</strong> to wake it, then click Bind straight away.</p>
           <div class="dialog-actions"><button class="btn btn-primary" id="flow-bind-now">Bind now</button><button class="btn" id="flow-cancel">Cancel</button></div>`;
+      } else if (f.step === "run" && f.verifying) {
+        tail = `<p class="flow-callout">If ${escapeHtml(srcName)} runs on battery, <strong>press a button on it now</strong> so it answers the check.
+          If the lights already respond to it, you can skip the check and go straight to the button test.</p>
+          <div class="dialog-actions"><button class="btn" id="flow-skip-check">It already works: skip the check</button></div>`;
       } else if (f.step === "run" && f.unconfirmed) {
-        tail = `<p class="flow-callout">${escapeHtml(srcName)} didn't answer the check, so the bindings aren't confirmed yet. Press a button on it, then click Check again.</p>
-          <div class="dialog-actions"><button class="btn btn-primary" id="flow-check">Check again</button><button class="btn" id="flow-cancel">Close</button></div>`;
+        tail = `<p class="flow-callout">${escapeHtml(srcName)} didn't answer the check, so the bindings aren't confirmed yet. Press a button on it, then click Check again.
+          If the lights already respond to it, go straight to the button test instead.</p>
+          <div class="dialog-actions"><button class="btn btn-primary" id="flow-check">Check again</button><button class="btn" id="flow-skip-check">It already works: test it</button><button class="btn" id="flow-cancel">Close</button></div>`;
       } else if (f.step === "test") {
         const dims = [...f.clustersChosen].includes(0x0008);
         tail = `<p class="flow-callout"><strong>Now test it.</strong> Press on/off on ${escapeHtml(srcName)}${dims ? ", then hold to dim" : ""}. Did the lights respond?</p>
@@ -3916,6 +3928,15 @@ export class ZhaBindingMapCard extends HTMLElement {
     on("#flow-run", "click", () => this._flowRun());
     on("#flow-bind-now", "click", () => this._flowBind());
     on("#flow-check", "click", () => this._flowCheckAgain());
+    on("#flow-skip-check", "click", () => {
+      f.skippedCheck = true;
+      f.verifying = false;
+      f.unconfirmed = false;
+      f.log = f.log.filter((l) => l.state !== "wait");
+      f.log.push({ state: "info", text: "Check skipped: testing with the buttons instead." });
+      f.step = "test";
+      this._renderGroupFlow();
+    });
     this._qa("[data-flow-test]").forEach((b) => b.addEventListener("click", () => this._flowAnswerTest(b.dataset.flowTest)));
     on("#flow-direct", "click", () => {
       f.mode = "direct";
@@ -4057,8 +4078,29 @@ export class ZhaBindingMapCard extends HTMLElement {
   async _flowVerify() {
     const f = this._flow;
     const src = this._flowSource();
-    const scan = await this._scanBindings([src.ieee], { tries: this._retryCount });
-    if (!this._flow) return;
+    // 1.5.1: one attempt, not the rescan retry count. A battery remote that
+    // has gone back to sleep made each retry wait ~45 s, so the check took
+    // minutes while the binding already worked (forum, John_smith #22). The
+    // user can wake it, or skip straight to the button test.
+    f.verifying = true;
+    f.log = f.log.filter((l) => l.state !== "wait");
+    this._flowLog("wait", `Checking that ${this._deviceLabel(src)} stored the bindings…`);
+    this._renderGroupFlow();
+    const scan = await this._scanBindings([src.ieee], { tries: 1 });
+    if (!this._flow || this._flow !== f) return;
+    f.verifying = false;
+    if (f.skippedCheck) {
+      // The user went on to the button test while this ran: just record what
+      // the check found, without moving the flow back.
+      f.items.forEach((item) => {
+        item.outcome = this._settleChange(
+          "bind",
+          { sourceIeee: src.ieee, sourceEndpoint: Number(f.endpoint), clusterId: item.clusterId, target: item.target },
+          scan
+        ).outcome;
+      });
+      return;
+    }
     f.items.forEach((item) => {
       const res = this._settleChange(
         "bind",
@@ -4087,6 +4129,7 @@ export class ZhaBindingMapCard extends HTMLElement {
 
   async _flowCheckAgain() {
     const f = this._flow;
+    f.skippedCheck = false;
     this._flowLog("wait", "Checking again…");
     f.log = f.log.filter((l) => !/: (confirmed|not confirmed yet|not accepted)$/.test(l.text));
     await this._flowVerify();
@@ -4094,8 +4137,18 @@ export class ZhaBindingMapCard extends HTMLElement {
 
   async _flowAnswerTest(answer) {
     const f = this._flow;
+    // After a skipped check, lights responding prove the bindings are there.
+    const outcomes = f.items.map((i) => (f.skippedCheck && answer !== "none" && i.outcome !== "failed" ? "confirmed" : i.outcome || "unconfirmed"));
+    if (f.skippedCheck && answer === "none" && flowResult(outcomes, answer) === "unconfirmed") {
+      f.log.push({ state: "warn", text: "Button test: no lights responded, and the bindings aren't confirmed yet." });
+      f.step = "run";
+      f.unconfirmed = true;
+      f.skippedCheck = false;
+      this._renderGroupFlow();
+      return;
+    }
     f.test = answer;
-    f.result = flowResult(f.items.map((i) => i.outcome), answer);
+    f.result = flowResult(outcomes, answer);
     f.log.push({ state: "info", text: `Button test: ${answer === "all" ? "all lights responded" : answer === "some" ? "some lights responded" : "no lights responded"}.` });
     f.step = "done";
     await this._flowCheckDb();
@@ -4239,6 +4292,7 @@ export class ZhaBindingMapCard extends HTMLElement {
       const cls = this._classifyBinding(b);
       return cls === "reporting" || (cls === "unknown" && Number(b.clusterId) === 0);
     };
+    const isManufacturer = (b) => this._classifyBinding(b) === "manufacturer";
     const problems = [];
     const add = (map, key, entry, cluster) => {
       if (!map.has(key)) map.set(key, { ...entry, clusters: new Set() });
@@ -4248,6 +4302,7 @@ export class ZhaBindingMapCard extends HTMLElement {
       const h = health.get(b.id);
       const mine = normIeee(b.sourceIeee) === id || (!b.isGroup && normIeee(b.targetIeee) === id);
       if (mine && h && (h.level === "error" || h.level === "warning")) problems.push(h);
+      if (isManufacturer(b)) continue;
       if (normIeee(b.sourceIeee) === id && isReporting(b)) {
         if (normIeee(b.targetIeee || "") === coord) continue;
         const key = b.isGroup ? `g:${b.groupId}` : `d:${normIeee(b.targetIeee)}`;
@@ -4269,7 +4324,7 @@ export class ZhaBindingMapCard extends HTMLElement {
     const memberOf = this._groups.filter((g) => (g.members || []).some((m) => m.device && normIeee(m.device.ieee) === id));
     for (const g of memberOf) {
       for (const b of this._rawBindings()) {
-        if (b.isGroup && Number(b.groupId) === Number(g.group_id) && normIeee(b.sourceIeee) !== id && !isReporting(b)) {
+        if (b.isGroup && Number(b.groupId) === Number(g.group_id) && normIeee(b.sourceIeee) !== id && !isReporting(b) && !isManufacturer(b)) {
           const src = this._devices.find((x) => normIeee(x.ieee) === normIeee(b.sourceIeee));
           add(controlledBy, `d:${normIeee(b.sourceIeee)}`, { kind: "device", ieee: b.sourceIeee, name: src ? this._deviceLabel(src) : b.sourceIeee, missing: !src, via: g.name }, b.clusterId);
         }
@@ -4981,7 +5036,7 @@ export class ZhaBindingMapCard extends HTMLElement {
     const seen = new Set();
     const out = [];
     for (const b of this._rawBindings()) {
-      if (this._classifyBinding(b) === "reporting") continue;
+      if (["reporting", "manufacturer"].includes(this._classifyBinding(b))) continue;
       const src = normIeee(b.sourceIeee);
       if (b.isGroup) {
         const key = `${src}|g${b.groupId}`;
@@ -6342,6 +6397,7 @@ export class ZhaBindingMapCard extends HTMLElement {
     const typeText = {
       control: "Control &mdash; the source uses this to command the target",
       reporting: "Reporting &mdash; the source uses this to report its own state; not a control relationship",
+      manufacturer: "Manufacturer-specific &mdash; a cluster outside the Zigbee standard, usually set up by the device itself. The card doesn't check it.",
       unknown:
         "Unknown &mdash; the source device hasn't been cluster-scanned yet, so this can't be classified as control or reporting. Shown either way rather than guessing.",
     }[cls];
@@ -6355,14 +6411,14 @@ export class ZhaBindingMapCard extends HTMLElement {
         <tr><td>Type</td><td>${typeText}</td></tr>
       </table>
       ${
-        this._experimental && !binding.isGroup && cls !== "reporting"
+        this._experimental && !binding.isGroup && cls !== "reporting" && cls !== "manufacturer"
           ? `<p class="hint">Network (beta): show the way this binding's commands likely travel through your routers, from the last network scan.</p>`
           : this._experimental && binding.isGroup
           ? `<p class="hint">Group bindings are sent as a broadcast, so there's no single route to show. <strong>Check route…</strong> in the remote's side panel shows how well each light hears the mesh.</p>`
           : ""
       }
       <div class="dialog-actions">
-        ${this._experimental && !binding.isGroup && cls !== "reporting" ? `<button class="btn" id="unbind-route">Show route on the Map</button>` : ""}
+        ${this._experimental && !binding.isGroup && cls !== "reporting" && cls !== "manufacturer" ? `<button class="btn" id="unbind-route">Show route on the Map</button>` : ""}
         <button class="btn btn-danger" id="unbind-confirm">Remove binding</button>
         <button class="btn" id="unbind-cancel">Close</button>
       </div>`;
@@ -7223,7 +7279,7 @@ export class ZhaBindingMapCard extends HTMLElement {
             .join("")}</ul>`
         : `<p class="muted">No remote is bound to it${this._rawBindings().length ? "" : " (or bindings haven't been scanned yet)"}.</p>`;
       const others = r.others
-        ? `<p class="hint">${r.others} other binding${r.others === 1 ? "" : "s"} to this group ${r.others === 1 ? "is a device" : "are devices"} reporting ${r.others === 1 ? "its" : "their"} own state, not control.</p>`
+        ? `<p class="hint">${r.others} other binding${r.others === 1 ? " to this group isn't" : "s to this group aren't"} control: a device reporting its own state, or a manufacturer-specific cluster the device set up itself.</p>`
         : "";
       return `<section class="group-card ${this._groupsFocus === r.groupId ? "group-focus" : ""}" data-gid="${r.groupId}">
         <div class="group-card-head">

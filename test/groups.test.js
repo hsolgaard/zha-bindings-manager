@@ -73,3 +73,16 @@ describe("groupDeleteReasons", () => {
 });
 
 it("groupIdHex", () => expect(groupIdHex(5)).toBe("0x0005"));
+
+describe("manufacturer-specific clusters (1.5.1)", () => {
+  it("are counted with the non-control bindings, not as a controller", () => {
+    const rows = groupRows({
+      groups: [{ group_id: 7, name: "Spots", members: [{ device: { ieee: L1 }, endpoint_id: 1 }] }],
+      bindings: [gb(L1, 1, 0xfffd, 7), gb(R, 1, 6, 7)],
+      classify: (b) => (b.clusterId >= 0xfc00 ? "manufacturer" : "control"),
+      coordinatorIeee: C,
+    });
+    expect(rows[0].controllers).toEqual([{ sourceIeee: R, endpoint: 1, clusters: [6] }]);
+    expect(rows[0].others).toBe(1);
+  });
+});

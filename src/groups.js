@@ -23,7 +23,8 @@ export function groupRows({ groups, bindings, classify, coordinatorIeee }) {
       let others = 0;
       for (const b of bindings || []) {
         if (!b || !b.isGroup || Number(b.groupId) !== groupId) continue;
-        if (classify(b) === "reporting") {
+        const cls = classify(b);
+        if (cls === "reporting" || cls === "manufacturer") {
           others++;
           continue;
         }

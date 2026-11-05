@@ -4,6 +4,28 @@
 
 export const BASIC_CLUSTER = 0x0000;
 
+/** Clusters 0xFC00-0xFFFF are manufacturer-specific: not part of the Zigbee
+ *  standard, so what they do (and who should receive them) is unknown.
+ *  Out of scope for the card's checks since 1.5.1 (forum report, ozaz:
+ *  IKEA TRADFRI bulbs bound to their own group on 0xFFFD were warned about). */
+export function isManufacturerSpecific(clusterId) {
+  const id = Number(clusterId);
+  return id >= 0xfc00 && id <= 0xffff;
+}
+
+/** Health result for a binding on a manufacturer-specific cluster. */
+export function manufacturerSpecificRule(clusterId) {
+  const hex = `0x${Number(clusterId).toString(16).padStart(4, "0")}`;
+  return {
+    level: "info",
+    code: "manufacturer_specific",
+    message: `Manufacturer-specific cluster (${hex}), not checked.`,
+    why:
+      "Clusters from 0xFC00 up aren't part of the Zigbee standard: each manufacturer uses them for its own features, and devices usually set these bindings up themselves. The card can't tell what they do, so it doesn't check them.",
+    recommendation: "Leave it in place unless you know the device doesn't need it.",
+  };
+}
+
 /**
  * Flags device-to-device bindings that are structurally valid but almost
  * certainly not what anyone meant. Called only for bindings whose target is

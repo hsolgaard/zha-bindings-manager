@@ -3,6 +3,22 @@
 All notable changes to ZHA Bindings Manager are documented here.
 
 
+## [1.5.1]
+
+### Changed
+
+- **Manufacturer-specific clusters are no longer checked.** Clusters from 0xFC00 up aren't part of the Zigbee standard:
+  each manufacturer uses them for its own features, and devices usually set these bindings up themselves. The card
+  can't tell what they do, so it no longer warns about them (IKEA TRÅDFRI bulbs bound to their own group on 0xFFFD,
+  for example, were each shown as a warning with advice to remove the binding). They're listed in the Bindings tab
+  with an info note, left off the Map unless reporting bindings are shown, and not counted as control in the side
+  panel or the Groups tab. Thanks to ozaz for reporting it.
+- **The check after the guided setup is quicker.** It reads the remote's binding table once instead of retrying, and
+  while it checks it asks you to press a button on a battery remote. If the lights already respond, **It already
+  works: skip the check** goes straight to the button test; lights responding there confirm the bindings. Before,
+  a remote that had gone back to sleep could keep the check waiting for several minutes, even though the binding
+  already worked. Thanks to John_smith for reporting it.
+
 ## [1.5.0]
 
 ### Added

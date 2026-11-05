@@ -3,6 +3,17 @@
 All notable changes to ZHA Bindings Manager are documented here.
 
 
+## [1.5.2]
+
+### Added
+
+- **Network tab (beta): devices using another device's network address are flagged.** Every Zigbee device has a
+  network address, and the coordinator's is always 0x0000. A device that claims the coordinator's address, or two
+  devices sharing one, can confuse or flood the whole network: lights responding late or not at all, and timeouts.
+  The Network tab now lists these first, in red, naming the devices, and the device's side panel says so too. Found
+  from the routers' neighbour tables the Network tab already reads. Prompted by tube0013's "WTH did my ZHA light
+  turn on 40 seconds after I toggled it?" (an innr SP234 plug advertising itself as 0x0000).
+
 ## [1.5.1]
 
 ### Changed

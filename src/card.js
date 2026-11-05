@@ -5101,6 +5101,25 @@ export class ZhaBindingMapCard extends HTMLElement {
 
   /** Network section of the side panel (experimental). */
   _drawerMeshHtml(d) {
+    const html = this._drawerMeshInnerHtml(d);
+    if (!html || !this._meshSnapshot) return html;
+    // 1.5.2: say so when this device shares its network address.
+    const id = normIeee(d.ieee);
+    const mesh = this._meshModel();
+    const c = mesh && (mesh.conflicts || []).find((x) => x.ieees.includes(id));
+    if (!c) return html;
+    const hex = `0x${c.nwk.toString(16).padStart(4, "0")}`;
+    const others = c.ieees.filter((i) => i !== id).map((i) => this._ieeeLabel(i, { plain: true }));
+    const text =
+      c.coordinator && d.device_type !== "Coordinator"
+        ? `This device is using the coordinator's network address (${hex}). That can flood or confuse the whole network. Unplug it, check whether the network recovers, then reset and pair it again.`
+        : c.coordinator
+        ? `Another device (${others.join(", ")}) is using this coordinator's network address (${hex}).`
+        : `Shares its network address (${hex}) with ${others.join(", ")}.`;
+    return html.replace('<div class="drawer-section-title">Network</div>', `<div class="drawer-section-title">Network</div><p class="mesh-tip-error">${escapeHtml(text)}</p>`);
+  }
+
+  _drawerMeshInnerHtml(d) {
     if (!this._experimental) return "";
     if (!this._meshSnapshot) {
       this._meshEnsureLoaded();

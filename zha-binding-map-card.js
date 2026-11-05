@@ -21,7 +21,7 @@
  * zha_toolkit MUST be installed (via HACS) and working for bind/unbind/scan
  * to function. See README.md for details.
  *
- * Version: 1.5.1
+ * Version: 1.5.2
  */
 (() => {
   // src/capexplorer-constants.js
@@ -78,7 +78,7 @@
 
   // src/constants.js
   var ZTK_DOMAIN = "zha_toolkit";
-  var CARD_VERSION = "1.5.1";
+  var CARD_VERSION = "1.5.2";
   var CHANGELOG_URL = "https://github.com/hsolgaard/zha-bindings-manager/blob/main/CHANGELOG.md";
   var DEFAULT_BINDABLE_OUT_CLUSTERS = [5, 6, 8, 258, 768];
   var MEMBERSHIP_EDGE_COLOR = "#8e24aa";
@@ -2187,6 +2187,7 @@ a.btn { display:inline-block; text-decoration:none; }
 .mesh-legend { display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-top:6px; font-size:0.85em; }
 .mesh-tips { padding-left:18px; margin:0 0 12px; }
 .mesh-tips li { margin-bottom:6px; }
+.mesh-tip-error { color: var(--error-color, #db4437); font-weight: 500; }
 .mesh-tip-warning { color: var(--primary-text-color); }
 .mesh-tip-info { color: var(--secondary-text-color); }
 .mesh-links tr { cursor:pointer; }
@@ -2554,7 +2555,37 @@ a.btn { display:inline-block; text-decoration:none; }
       const vals = Object.values(l.heard).filter((v) => typeof v === "number");
       l.lqi = vals.length ? Math.min(...vals) : null;
     }
-    return { snapshot: snap, nwkToIeee, typeOf, links, parentOf, children, staleEntries };
+    const conflicts = addressConflicts(snap, devices);
+    return { snapshot: snap, nwkToIeee, typeOf, links, parentOf, children, staleEntries, conflicts };
+  }
+  function addressConflicts(snapshot, devices = []) {
+    const claims = /* @__PURE__ */ new Map();
+    const claim = (nwk, ieee) => {
+      if (nwk == null || !ieee) return;
+      if (!claims.has(nwk)) claims.set(nwk, /* @__PURE__ */ new Set());
+      claims.get(nwk).add(ieee);
+    };
+    let coord = null;
+    for (const d of devices) {
+      const ieee = normIeee(d.ieee);
+      if (d.device_type === "Coordinator") coord = ieee;
+      claim(nwkNumber(d.nwk), ieee);
+    }
+    for (const [rawReporter, entry] of Object.entries(snapshot || {})) {
+      const reporter = normIeee(rawReporter);
+      for (const n of entry && entry.neighbours || []) {
+        const ieee = normIeee(n.ieee);
+        if (!ieee || ieee === reporter || !(typeof n.lqi === "number" && n.lqi > 0)) continue;
+        claim(nwkNumber(n.nwk), ieee);
+      }
+    }
+    const out = [];
+    for (const [nwk, set] of claims.entries()) {
+      if (set.size < 2) continue;
+      const ieees = [...set].sort((a, b) => a === coord ? -1 : b === coord ? 1 : a.localeCompare(b));
+      out.push({ nwk, ieees, coordinator: nwk === 0 });
+    }
+    return out.sort((a, b) => a.nwk - b.nwk);
   }
   function linkBetween(mesh, a, b) {
     return mesh.links.get(linkKey(normIeee(a), normIeee(b))) || null;
@@ -2674,6 +2705,16 @@ a.btn { display:inline-block; text-decoration:none; }
   }
   function meshSuggestions(mesh, { thr = LQI_RECOMMENDED, areaOf = () => "", nameOf = (i) => i, routers = [] } = {}) {
     const out = [];
+    for (const c of mesh.conflicts || []) {
+      const hex2 = `0x${c.nwk.toString(16).padStart(4, "0")}`;
+      const others = c.coordinator ? c.ieees.filter((i) => mesh.typeOf.get(i) !== "Coordinator") : c.ieees;
+      out.push({
+        kind: c.coordinator ? "coordinator_address" : "address_conflict",
+        level: "error",
+        ieees: c.ieees,
+        text: c.coordinator ? `${others.map(nameOf).join(", ")} ${others.length === 1 ? "is" : "are"} using the coordinator's network address (${hex2}). A device doing this can flood or confuse the whole network: lights responding late or not at all, timeouts. Unplug it (or remove its battery), check whether the network recovers, then reset and pair it again.` : `${c.ieees.map(nameOf).join(" and ")} are using the same network address (${hex2}). Messages for one may go to the other. Scan again to confirm; if it stays, reset and pair one of them again.`
+      });
+    }
     const routerSet = new Set(routers.map(normIeee));
     for (const [child, p] of mesh.parentOf.entries()) {
       if (rateLqi(p.lqi, thr) === "weak") {
@@ -2756,7 +2797,7 @@ a.btn { display:inline-block; text-decoration:none; }
         out.push({ kind: "area_without_router", level: "info", ieees: [], text: `${area} has ${e.devices} Zigbee device${e.devices === 1 ? "" : "s"} but no router.` });
       }
     }
-    const order = { warning: 0, info: 1 };
+    const order = { error: 0, warning: 1, info: 2 };
     return out.sort((x, y) => order[x.level] - order[y.level]);
   }
 
@@ -7654,6 +7695,18 @@ Used by: ${h.uses.join("; ")}`;
     }
     /** Network section of the side panel (experimental). */
     _drawerMeshHtml(d) {
+      const html = this._drawerMeshInnerHtml(d);
+      if (!html || !this._meshSnapshot) return html;
+      const id = normIeee(d.ieee);
+      const mesh = this._meshModel();
+      const c = mesh && (mesh.conflicts || []).find((x) => x.ieees.includes(id));
+      if (!c) return html;
+      const hex2 = `0x${c.nwk.toString(16).padStart(4, "0")}`;
+      const others = c.ieees.filter((i) => i !== id).map((i) => this._ieeeLabel(i, { plain: true }));
+      const text = c.coordinator && d.device_type !== "Coordinator" ? `This device is using the coordinator's network address (${hex2}). That can flood or confuse the whole network. Unplug it, check whether the network recovers, then reset and pair it again.` : c.coordinator ? `Another device (${others.join(", ")}) is using this coordinator's network address (${hex2}).` : `Shares its network address (${hex2}) with ${others.join(", ")}.`;
+      return html.replace('<div class="drawer-section-title">Network</div>', `<div class="drawer-section-title">Network</div><p class="mesh-tip-error">${escapeHtml(text)}</p>`);
+    }
+    _drawerMeshInnerHtml(d) {
       if (!this._experimental) return "";
       if (!this._meshSnapshot) {
         this._meshEnsureLoaded();

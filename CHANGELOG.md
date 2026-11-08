@@ -3,6 +3,43 @@
 All notable changes to ZHA Bindings Manager are documented here.
 
 
+## [1.9.0]
+
+Rolls up what was tested at home as 1.7.0, 1.8.0 and 1.9.0 betas. Lost bindings, Replace a device and the Messages
+count need the [integration](https://github.com/hsolgaard/zha-bindings-manager-integration) 1.9.0.
+
+### Added
+
+- **Lost bindings.** The integration remembers which bindings each device had and notices straight away when one
+  disappears (a reset, a firmware update, a full binding table), on any scan, the nightly check or a button press.
+  A red banner above the Bindings table lists them with **Put all back**, **Check again** and, per binding,
+  **Removed on purpose**; Binding Health gets a **Lost** chip; the Map draws them as dashed red lines. Battery
+  devices that are asleep are put back at their next button press. Unbinding in the card is never reported as lost.
+  Requested by HarvsG.
+- **Per device: Off, Tell me or Put back automatically** in the side panel. Automatic put-back stops after 3 times a
+  day and tells you instead. Optional per remote: **Switch the lights from Home Assistant if a press doesn't reach
+  them** (On, Off and Toggle on direct bindings; not groups). A **What to expect** block lists the pitfalls.
+- **Replace this device…** in the side panel (and **Move to a new device…** on the removed-devices banner): choose
+  the new device, see whether it can do everything the old one did (each binding checked in the right role, with an
+  endpoint mapping for multi-gang devices and the community database's commands where known), copy bindings and
+  group memberships with a read-back of each, then clean up the old ones.
+- **How does it behave?** in every device's side panel: a few questions with preset answers about what a scan can't
+  show (whether it stays connected, what a press really sends, power-cut behaviour, batteries…), starting with what
+  you use the device for, plus an optional rating. Answers are kept per firmware in the community
+  [zigbee-capabilities](https://github.com/hsolgaard/zigbee-capabilities) database (CC0) and shown to everyone with
+  that model. Nothing is sent until you submit the pre-filled GitHub issue.
+- **Messages to Home Assistant** (Network tab, Experimental features): how many messages each device sends a minute
+  now and over the hour, with chatty devices flagged and the coordinator's own counters, to find a device flooding
+  the network. Prompted by tube0013's WTH thread.
+- **Groups only on devices** in the Groups tab: group IDs that bindings use but ZHA doesn't know (made by Find & Bind,
+  say), with **Add to Home Assistant**.
+
+### Changed
+
+- A binding to a group Home Assistant doesn't know is now **Info**, not a warning: devices that joined it still
+  receive the commands.
+- The side panel wraps long values instead of running off its edge.
+
 ## [1.6.1]
 
 ### Fixed

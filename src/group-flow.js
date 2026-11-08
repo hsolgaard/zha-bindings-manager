@@ -221,6 +221,24 @@ export function buildBehaviourReport({ manufacturer, model, firmware, mode, endp
   };
 }
 
+/** Adds up the by_clusters groups whose cluster list shares a cluster with
+ *  `clusterIds`. Each report sits in exactly one group, so none is counted
+ *  twice. Returns {counts, by_firmware} or null when none match. */
+export function reportsForClusters(byClusters, clusterIds) {
+  const want = new Set([...clusterIds].map(hex));
+  let out = null;
+  for (const [key, group] of Object.entries(byClusters || {})) {
+    if (!key.split(",").some((c) => want.has(c.trim().toLowerCase()))) continue;
+    out = out || { counts: {}, by_firmware: {} };
+    for (const [r, n] of Object.entries(group.counts || {})) out.counts[r] = (out.counts[r] || 0) + n;
+    for (const [fw, counts] of Object.entries(group.by_firmware || {})) {
+      const t = (out.by_firmware[fw] = out.by_firmware[fw] || {});
+      for (const [r, n] of Object.entries(counts)) t[r] = (t[r] || 0) + n;
+    }
+  }
+  return out;
+}
+
 export const RESULT_TEXT = {
   works: "works",
   partial: "works for some lights",
@@ -236,12 +254,20 @@ export function firmwareKey(fw) {
 
 /**
  * What the community has reported for a remote, from data/behaviour.json:
- * { "<manufacturer_slug>/<model_slug>": { group_binding: { counts, by_firmware: { fw: counts } }, ... } }
+ * { "<manufacturer_slug>/<model_slug>": { group_binding: { counts, by_firmware: { fw: counts },
+ *     by_clusters: { "0x0006,0x0008": { counts, by_firmware } } }, ... } }
+ * With `clusterIds`, only reports that bound at least one of those clusters
+ * count, so e.g. Level Control reports for an open/close remote don't count
+ * against setting it up with a blind (zigbee-capabilities#387). Older files
+ * without `by_clusters` fall back to all reports.
  * Returns {state, total, counts, firmwareCounts, firmwareMatched, text}.
  * state: "unknown" | "works" | "problems" | "mixed".
  */
-export function knownBehaviour(doc, slugKey, behaviour, firmware) {
-  const entry = doc && doc[slugKey] && doc[slugKey][behaviour];
+export function knownBehaviour(doc, slugKey, behaviour, firmware, clusterIds = null) {
+  let entry = doc && doc[slugKey] && doc[slugKey][behaviour];
+  if (entry && entry.by_clusters && clusterIds && [...clusterIds].length) {
+    entry = reportsForClusters(entry.by_clusters, clusterIds);
+  }
   if (!entry || !entry.counts) {
     return {
       state: "unknown",

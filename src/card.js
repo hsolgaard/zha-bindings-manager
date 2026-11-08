@@ -58,6 +58,7 @@ import {
 const LOST_EDGE_COLOR = "#db4437";
 import { replacementCandidates, commandGaps, VERDICT, RESULT_LABEL, defaultSelection, runSummary } from "./replace.js";
 import BUNDLED_QUESTIONS from "./questions.json";
+import { changedDevices, historyLines, addressFact, noticeSummary, buildNetworkReport, reportIssue } from "./evidence.js";
 import { lostSummary, lostFor, putBackMessage, sinceText, NOTICED_BY, POLICIES, POLICY_LABELS, POLICY_HINTS } from "./lost.js";
 import { SHELL_HTML } from "./template.js";
 import { LocalStorageProvider } from "./storage/local-storage-provider.js";
@@ -641,6 +642,7 @@ export class ZhaBindingMapCard extends HTMLElement {
     this._experimental = probe.experimental;
     this._watchEnabled = !!probe.watch;
     this._replaceEnabled = !!probe.replace;
+    this._evidenceEnabled = !!probe.evidence;
     if (this._api) this._api.watchEnabled = this._watchEnabled;
     this._lqiThr = probe.lqi || { ...LQI_RECOMMENDED };
     this._toggleExperimentalUi();
@@ -1117,6 +1119,7 @@ export class ZhaBindingMapCard extends HTMLElement {
     this._openDeepLinkedDevice();
     this._pickUpIntegrationScans();
     this._lostLoad();
+    this._evidenceLoad();
   }
 
   // -------------------------------------------------------------------
@@ -1276,6 +1279,180 @@ export class ZhaBindingMapCard extends HTMLElement {
         if (d) this._openDeviceDrawer(d);
       })
     );
+  }
+
+  // -------------------------------------------------------------------
+  // Address changes and missed presses (1.10.0, integration)
+  // -------------------------------------------------------------------
+
+  async _evidenceLoad() {
+    if (!this._evidenceEnabled || !this._api) return;
+    try {
+      this._evidence = await this._api.evidenceGet();
+    } catch (e) {
+      this._evidence = null;
+    }
+    this._renderEvidenceBanner();
+    if (this._drawerIeee) this._renderDrawer();
+  }
+
+  _evidenceName(ieee) {
+    const d = this._devices.find((x) => normIeee(x.ieee) === normIeee(ieee));
+    return d ? this._deviceLabel(d) : (this._evidence && this._evidence.names && this._evidence.names[ieee]) || ieee;
+  }
+
+  _drawerAddressFact(d) {
+    const f = this._evidence ? addressFact(this._evidence, d.ieee) : null;
+    const nwk = f ? f.nwk : d.nwk != null && d.nwk !== "" ? (typeof d.nwk === "string" ? d.nwk : `0x${Number(d.nwk).toString(16).padStart(4, "0")}`) : null;
+    if (!nwk) return null;
+    if (!f || !f.changes) return escapeHtml(nwk);
+    return `${escapeHtml(nwk)} <span class="health-warning">changed ${f.changes}× since recording started</span> <a href="#" class="src-link" id="drawer-evidence-link">Details</a>`;
+  }
+
+  _renderEvidenceBanner() {
+    const el = this._q("#evidence-banner");
+    if (!el) return;
+    const sum = this._evidenceEnabled && this._evidence ? noticeSummary(this._evidence, (i) => this._evidenceName(i)) : null;
+    let dismissed = null;
+    try {
+      dismissed = localStorage.getItem("zbm-evidence-dismissed");
+    } catch (e) {
+      /* private window: always shown */
+    }
+    if (!sum || dismissed === sum.key) {
+      el.style.display = "none";
+      el.innerHTML = "";
+      return;
+    }
+    const parts = [];
+    if (sum.changed) parts.push(`<strong>${sum.changed} device${sum.changed === 1 ? "" : "s"} changed ${sum.changed === 1 ? "its" : "their"} network address</strong>`);
+    if (sum.misses)
+      parts.push(
+        `<strong>${sum.misses} press${sum.misses === 1 ? "" : "es"} didn't reach a light</strong>${
+          sum.afterChange ? ` (${sum.afterChange} after that light's address changed)` : ""
+        }`
+      );
+    el.innerHTML = `<div class="stale-row">
+        <span>${parts.join(", and ")}. A battery remote can keep sending to a light's old address, so it stops working even though
+          its binding is still there. Sharing an anonymised report helps find out how often this happens, and why.</span>
+        <button class="btn btn-small" id="btn-evidence-show">Show</button>
+        <button class="btn btn-small btn-primary" id="btn-evidence-share">Share anonymously…</button>
+        <button class="btn btn-small" id="btn-evidence-dismiss" title="Hide until something else changes">Dismiss</button>
+      </div>`;
+    el.style.display = "";
+    const on = (sel, fn) => {
+      const b = this._q(sel);
+      if (b) b.addEventListener("click", fn);
+    };
+    on("#btn-evidence-show", () => this._openEvidence(false));
+    on("#btn-evidence-share", () => this._openEvidence(true));
+    on("#btn-evidence-dismiss", () => {
+      try {
+        localStorage.setItem("zbm-evidence-dismissed", sum.key);
+      } catch (e) {
+        /* not remembered */
+      }
+      el.style.display = "none";
+    });
+  }
+
+  _firmwareOf(d) {
+    const reg = d && d.ieee ? this._haDeviceRegistryEntry(d.ieee) : null;
+    return (reg && reg.sw_version) || "";
+  }
+
+  _openEvidence(share) {
+    this._evidenceShare = !!share;
+    this._closeDrawer();
+    this._q("#dialog-title").textContent = "Address changes and missed presses";
+    const panel = this._q(".dialog-panel");
+    if (panel) panel.classList.add("wide");
+    this._q("#dialog").classList.add("open");
+    this._renderEvidence();
+  }
+
+  _renderEvidence() {
+    const body = this._q("#dialog-body");
+    const res = this._evidence || { addresses: {}, misses: [], pairs: {} };
+    const since = res.since ? new Date(res.since).toLocaleDateString() : "";
+    if (this._evidenceShare) {
+      const record = buildNetworkReport(res, this._devices.filter((d) => !this._isRemovedDevice(d.ieee)), {
+        firmwareOf: (d) => this._firmwareOf(d),
+        cardVersion: CARD_VERSION,
+      });
+      const issue = reportIssue(record);
+      body.innerHTML = `<div class="flow">
+        <p>This is exactly what would be shared with the community
+          <a href="https://github.com/${CAPABILITY_DB_REPO}" target="_blank" rel="noopener">zigbee-capabilities</a> database: every device's
+          make, model, firmware, power source and role (the coordinator too), how often its network address changed, and the presses
+          that didn't reach a light. Devices are numbered d1, d2…: <strong>no addresses, names, areas or times of day.</strong></p>
+        <p class="hint">Nothing is sent until you press <em>Submit new issue</em> on GitHub. It's public once the database merges it.</p>
+        <textarea class="ep-cmd-share-json" readonly rows="12">${escapeHtml(issue.body)}</textarea>
+        <div class="dialog-actions">
+          <a class="btn btn-primary" id="evidence-open" href="${escapeHtml(issue.url)}" target="_blank" rel="noopener">${
+            issue.tooLong ? "Copy and open GitHub issue" : "Open GitHub issue"
+          }</a>
+          <button class="btn" id="evidence-back">Back</button>
+        </div>
+        ${issue.tooLong ? `<p class="hint">It's too long to fill in the issue for you: the button copies it, so paste it into the new issue.</p>` : ""}
+      </div>`;
+      const open = this._q("#evidence-open");
+      if (open)
+        open.addEventListener("click", async () => {
+          if (issue.tooLong) await this._copyShareText(issue.body);
+        });
+      const back = this._q("#evidence-back");
+      if (back)
+        back.addEventListener("click", () => {
+          this._evidenceShare = false;
+          this._renderEvidence();
+        });
+      return;
+    }
+    const changed = changedDevices(res, (i) => this._evidenceName(i));
+    const changedHtml = changed.length
+      ? `<table class="detail-table">${changed
+          .map(
+            (c) => `<tr><td><strong>${escapeHtml(c.name)}</strong><br><span class="muted">${c.changes} change${c.changes === 1 ? "" : "s"}</span></td><td>${historyLines(
+              c.history
+            )
+              .map((l) => `${escapeHtml(l.nwk)} <span class="muted">${escapeHtml(l.when)} · ${escapeHtml(l.how)}</span>`)
+              .join("<br>")}</td></tr>`
+          )
+          .join("")}</table>`
+      : `<p class="muted">No device has changed its address since ${escapeHtml(since)}.</p>`;
+    const misses = [...(res.misses || [])].reverse();
+    const missHtml = misses.length
+      ? `<table class="detail-table">${misses
+          .slice(0, 50)
+          .map(
+            (m) => `<tr><td>${escapeHtml(new Date(m.at).toLocaleString())}</td><td>${escapeHtml(this._evidenceName(m.remote))} → ${escapeHtml(
+              this._evidenceName(m.light)
+            )}</td><td>${
+              m.address_changed_since_last_ok
+                ? `<span class="health-warning">its address changed since the last press that worked (${escapeHtml(m.nwk_at_last_ok || "?")} → ${escapeHtml(
+                    m.nwk_now || "?"
+                  )})</span>`
+                : m.last_ok_at
+                ? "address unchanged since the last press that worked"
+                : "no press that worked recorded yet"
+            }${m.binding_in_last_read ? " · binding still in the remote's table" : ""}</td></tr>`
+          )
+          .join("")}</table>`
+      : `<p class="muted">No missed presses recorded.</p>`;
+    body.innerHTML = `<div class="flow">
+      <p class="hint">Recorded since ${escapeHtml(since)} (turn it off under the integration's Configure). Read-only: nothing is sent to your devices.
+        A missed press is a remote's On, Off or Toggle that a light bound to it directly didn't follow within 2 seconds.</p>
+      <div class="drawer-section-title">Network address changes</div>${changedHtml}
+      <div class="drawer-section-title">Missed presses</div>${missHtml}
+      <div class="dialog-actions"><button class="btn btn-primary" id="evidence-share">Share anonymously…</button></div>
+    </div>`;
+    const share = this._q("#evidence-share");
+    if (share)
+      share.addEventListener("click", () => {
+        this._evidenceShare = true;
+        this._renderEvidence();
+      });
   }
 
   // -------------------------------------------------------------------
@@ -5431,6 +5608,7 @@ export class ZhaBindingMapCard extends HTMLElement {
       ["Community database", this._drawerCommunityStatus(d)],
       this._drawerActivityText(d) != null ? ["Messages to Home Assistant", this._drawerActivityText(d)] : null,
       d.manufacturer || d.model ? ["How it behaves", this._drawerAnswersFact(d)] : null,
+      this._drawerAddressFact(d) ? ["Network address", this._drawerAddressFact(d)] : null,
     ].filter(Boolean);
     const battery = this._isBatteryDevice(d);
     const haUrl = deviceHaUrl(d);
@@ -5462,7 +5640,7 @@ export class ZhaBindingMapCard extends HTMLElement {
         <div>
           ${tags.length ? `<div class="drawer-tags">${tags.map((t) => `<span class="chip">${escapeHtml(t)}</span>`).join("")}</div>` : ""}
           <table class="detail-table drawer-facts">${facts
-            .map(([k, v]) => `<tr><td>${escapeHtml(k)}</td><td>${k === "Bindings read" || k === "Community database" || k === "How it behaves" ? v : escapeHtml(String(v))}</td></tr>`)
+            .map(([k, v]) => `<tr><td>${escapeHtml(k)}</td><td>${k === "Bindings read" || k === "Community database" || k === "How it behaves" || k === "Network address" ? v : escapeHtml(String(v))}</td></tr>`)
             .join("")}</table>
         </div>
       </div>
@@ -5524,6 +5702,12 @@ export class ZhaBindingMapCard extends HTMLElement {
     on("#drawer-show-bindings", showBindings);
     on("#drawer-problems-link", showBindings);
     on("#drawer-lost-put-back", () => this._lostPutBack(d.ieee));
+    const evLink = this._q("#drawer-evidence-link");
+    if (evLink)
+      evLink.addEventListener("click", (e) => {
+        e.preventDefault();
+        this._openEvidence(false);
+      });
     this._wireDrawerAnswers(d);
     const lostForget = this._q("#drawer-lost-forget");
     if (lostForget)
@@ -7873,6 +8057,7 @@ export class ZhaBindingMapCard extends HTMLElement {
     this._renderHealthSummary(healthMap);
     this._renderStaleBanner();
     this._renderLostBanner();
+    this._renderEvidenceBanner();
     this._renderPendingBanner();
 
     this._updateSortIndicators("#view-table", this._tableSort);

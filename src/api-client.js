@@ -14,6 +14,11 @@ export class ZhaApi {
     this.watchEnabled = false;
   }
 
+  /** 1.10.0: short-address history and missed presses. */
+  async evidenceGet() {
+    return this.hass.callWS({ type: "zha_bindings_manager/evidence_get" });
+  }
+
   // --- Replace a device (integration 1.9.0) -----------------------------------
 
   async replacePlan(oldIeee, newIeee, { oldClusters, newClusters, endpointMap } = {}) {

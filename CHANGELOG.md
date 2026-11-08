@@ -3,6 +3,49 @@
 All notable changes to ZHA Bindings Manager are documented here.
 
 
+## [Unreleased]
+
+### Added
+
+- **Remotes can control blinds and curtains.** The guided setup now handles Window Covering, so an open/close remote
+  (IKEA TRÅDFRI open/close remote, for example) can be set up to control a blind, directly or through a group, with a
+  button test asking you to press open, then close. Requested by HarvsG in zigbee-capabilities#387.
+
+### Changed
+
+- **Control lights with this… is now Set up what this controls….** It isn't only for lights any more, and the
+  button now says what it does: choose what this remote or switch controls. The steps talk about devices, not
+  lights.
+- **The guided setup asks how to control the devices: directly or through a group.** After you tick the
+  devices, the card asks **How should it control them?**. **Directly** binds the remote to each light; **Through a
+  group** binds it once to a ZHA group. It suggests one (marked *suggested*) until you pick: directly for a single
+  light, or when a light can't join groups; a group for several lights; and whatever other users reported works for
+  that remote (for example, directly for a remote that rejects group bindings, or a group for one that only sends
+  to groups). The group options only appear when you choose a group. Before, the flow always led with a group and
+  binding directly was tucked away on the review step.
+- **Binding directly is no longer limited to 4 lights.** Some remotes don't support group bindings at all, so a
+  hard limit left no way to control more lights with them (IKEA TRÅDFRI on/off switch, reported by HarvsG in
+  zigbee-capabilities#384). Above 4 lights the card now warns roughly how many binding-table slots it needs; each
+  binding is still checked, so any that don't fit show as failed.
+
+### Fixed
+
+- **The Advanced tab no longer reports a failed bind that worked.** zha_toolkit can report "bind_ieee reported
+  failure" for a bind that's on the device, for example when it picks the endpoints or default clusters itself. The
+  card now judges the result by the device's binding table after the bind: it says the binding is confirmed when a
+  new matching binding is there, and only reports a failure when the device answered and none is. Reported by
+  HarvsG in zigbee-capabilities#387.
+- **A battery remote's capabilities can be shared even when the command check doesn't finish.** A remote often falls
+  asleep before the check completes, which left nothing to share. Once a check has ended, timed out or been
+  stopped, **Share what's known to community database** shares the device's endpoints and clusters, marked as not
+  checked. The hint now says to press a button just before starting and every few seconds until it finishes.
+  Reported by HarvsG in zigbee-capabilities#387.
+- **Lights that can't join a group are no longer offered for one.** A light can only be in a ZHA group if it has
+  the Groups cluster; some don't (SONOFF ZBMINIL2, for example). Adding one used to fail with "ZHA didn't list …
+  afterwards. Check the light is online". The guided setup now tags these lights *can't join groups* and won't
+  use a group for them, the Groups tab's **Add lights…** shows them greyed out with the reason, and the error,
+  if it still happens, says why.
+
 ## [1.5.2]
 
 ### Added

@@ -1,17 +1,45 @@
-// Pure logic for the "Control lights with this remote" flow (1.1.0).
+// Pure logic for the "Set up what this controls" flow (1.1.0; called
+// "Control lights with this" until 1.6.0, when blinds were added).
 // See the project PRD "Group-Based Binding Setup". Nothing here talks to
 // Home Assistant; card.js does the calls and renders.
 
 import { groupClusterSupport } from "./group-support.js";
 
-/** Clusters the flow binds: what a light-control remote sends. */
-export const FLOW_CLUSTERS = [0x0006, 0x0008, 0x0300];
+/** Clusters the flow binds: what a remote sends to lights (On/Off, Level,
+ *  Colour) and to blinds and curtains (Window Covering, zigbee-capabilities#387). */
+export const FLOW_CLUSTERS = [0x0006, 0x0008, 0x0300, 0x0102];
 
-/** Up to this many lights, binding to each light directly is offered as an
- *  alternative to a group (each costs one binding-table slot per cluster). */
+/** What to ask the user to press in the button test, for the clusters bound. */
+export function testInstruction(clusterIds) {
+  const ids = new Set([...(clusterIds || [])].map(Number));
+  const parts = [];
+  if (ids.has(0x0006)) parts.push("press on/off");
+  if (ids.has(0x0008)) parts.push(ids.has(0x0006) ? "then hold to dim" : "hold to dim");
+  if (ids.has(0x0102)) parts.push(parts.length ? "and press open/close" : "press open, then close");
+  if (!parts.length) parts.push("press its buttons");
+  const text = parts.join(", ").replace(/, and /, " and ");
+  return text.charAt(0).toUpperCase() + text.slice(1);
+}
+
+/** Above this many lights, binding to each light directly gets a warning
+ *  (each light costs one binding-table slot per cluster on the remote, and
+ *  many remotes have small tables) and a group is suggested instead. It's not
+ *  a hard limit: some remotes don't support group bindings at all (e.g. the
+ *  IKEA TRÅDFRI on/off switch, zigbee-capabilities#384), and others hold more. */
 export const DIRECT_BINDING_MAX_LIGHTS = 4;
 
 export const RESULTS = ["works", "partial", "stored_ignored", "rejected"];
+
+/** Groups cluster. A light can only join a ZHA group if the endpoint has it
+ *  as an input (server) cluster: ZHA's "add to group" is a Groups command. */
+export const GROUPS_CLUSTER = 0x0004;
+
+/** True when `endpoint` has the Groups cluster as an input cluster. */
+export function endpointHasGroups(clusters, endpoint) {
+  return (clusters || []).some(
+    (c) => c.type === "in" && Number(c.id) === GROUPS_CLUSTER && Number(c.endpoint_id) === Number(endpoint)
+  );
+}
 
 /** Endpoints of a device that send at least one FLOW_CLUSTERS cluster,
  *  as [{endpoint, clusters:[ids]}], sorted by endpoint. */
@@ -33,7 +61,9 @@ export function controllerEndpoints(clusters) {
  * the source device and the coordinator. `devices` are ZHA devices with a
  * display `name` already attached; `clustersFor(ieee)` returns the cached
  * cluster list or undefined.
- * Returns [{ieee, endpoint, name, clusters:[ids it accepts]}], sorted by name.
+ * Returns [{ieee, endpoint, name, clusters:[ids it accepts], groupable}],
+ * sorted by name. `groupable` is false when the endpoint has no Groups
+ * cluster, so it can't be put in a group (e.g. SONOFF ZBMINIL2).
  */
 export function candidateTargets({ devices, clustersFor, sourceIeee, clusterIds }) {
   const out = [];
@@ -55,10 +85,57 @@ export function candidateTargets({ devices, clustersFor, sourceIeee, clusterIds 
         endpoint,
         name: multi ? `${d.name} (ep ${endpoint})` : d.name,
         clusters: [...set].sort((a, b) => a - b),
+        groupable: endpointHasGroups(clusters, endpoint),
       });
     }
   }
   return out.sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: "base" }));
+}
+
+/**
+ * Whether each way of binding is possible for the selected `targets`, and
+ * what to warn about: { direct: {ok, warning}, group: {ok, reason, blocked} }.
+ * Direct is always possible but warns above DIRECT_BINDING_MAX_LIGHTS
+ * (`clusterCount` = clusters to bind, for the slot estimate); group needs
+ * every light to have the Groups cluster.
+ */
+export function modeOptions(targets, { clusterCount = 1 } = {}) {
+  const list = targets || [];
+  const blocked = list.filter((t) => t.groupable === false).map((t) => t.name);
+  const n = list.length;
+  const slots = n * Math.max(1, clusterCount);
+  return {
+    direct: {
+      ok: true,
+      warning:
+        n > DIRECT_BINDING_MAX_LIGHTS
+          ? `Directly, ${n} devices need about ${slots} binding-table slots on the remote. Many remotes run out sooner; the card checks each binding, so any that don't fit will show as failed.`
+          : "",
+    },
+    group: {
+      ok: blocked.length === 0,
+      blocked,
+      reason: blocked.length
+        ? `${blocked.join(", ")} can't join groups (no Groups cluster), so ${blocked.length === 1 ? "it needs" : "they need"} to be controlled directly.`
+        : "",
+    },
+  };
+}
+
+/**
+ * The way of binding to suggest for the selected `targets`, given what the
+ * community reported for this remote (knownBehaviour() results, optional).
+ * Returns "direct" | "group".
+ */
+export function suggestMode(targets, { groupKnown = null, directKnown = null } = {}) {
+  const list = targets || [];
+  if (!modeOptions(list).group.ok) return "direct";
+  const groupBad = !!groupKnown && groupKnown.state === "problems";
+  const directBad = !!directKnown && directKnown.state === "problems";
+  if (groupBad && !directBad) return "direct";
+  if (directBad && !groupBad) return "group";
+  if (list.length > DIRECT_BINDING_MAX_LIGHTS) return "group";
+  return list.length <= 1 ? "direct" : "group";
 }
 
 export const targetKey = (t) => `${String(t.ieee).toLowerCase()}:${Number(t.endpoint)}`;

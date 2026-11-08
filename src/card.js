@@ -36,7 +36,7 @@ import {
   toCsv,
   downloadFile,
 } from "./utils.js";
-import { bindingMatches, isIeee, sanitizeStoredBindings } from "./parser.js";
+import { bindingMatches, bindingMatchesLoose, bindingKey, isIeee, sanitizeStoredBindings } from "./parser.js";
 import { ZhaApi } from "./api-client.js";
 import { SHELL_HTML } from "./template.js";
 import { LocalStorageProvider } from "./storage/local-storage-provider.js";
@@ -70,6 +70,10 @@ import {
   suggestGroupName,
   targetKey,
   RESULT_TEXT,
+  modeOptions,
+  suggestMode,
+  endpointHasGroups,
+  testInstruction,
 } from "./group-flow.js";
 import { COMMAND_CHECK_LIMIT_MS, formatElapsed, shouldApplyResult } from "./command-check.js";
 import { bindOutcome, unbindOutcome, OUTCOME_LEVEL, pendingKey, reconcilePending } from "./action-verify.js";
@@ -3321,7 +3325,7 @@ export class ZhaBindingMapCard extends HTMLElement {
         this._setStatus("error", "You can only bind from a device (not a group).");
         return;
       }
-      // A remote dropped on a group opens the guided "Control lights" flow
+      // A remote dropped on a group opens the guided "Set up what this controls" flow
       // with that group's lights preselected (1.1.0). Anything else, and
       // non-controllers, still go to the Advanced tab.
       if (
@@ -3382,7 +3386,8 @@ export class ZhaBindingMapCard extends HTMLElement {
   }
 
   // -------------------------------------------------------------------
-  // "Control lights with this remote" flow (1.1.0). Pure logic lives in
+  // "Set up what this controls" flow (1.1.0; "Control lights with this" until
+  // 1.6.0). Pure logic lives in
   // src/group-flow.js; see the project PRD "Group-Based Binding Setup".
   // Whether a remote accepts and uses group bindings can't be detected in
   // advance, so the flow shows what others reported, explains the
@@ -3415,7 +3420,7 @@ export class ZhaBindingMapCard extends HTMLElement {
     const clusters = await this._ensureClusters(source.ieee).catch(() => []);
     const eps = controllerEndpoints(clusters);
     if (!eps.length) {
-      this._setStatus("error", `${this._deviceLabel(source)} doesn't send On/Off, Level Control or Colour Control, so it can't control lights.`);
+      this._setStatus("error", `${this._deviceLabel(source)} doesn't send On/Off, Level Control, Colour Control or Window Covering commands, so it can't control other devices.`);
       return;
     }
     this._flow = {
@@ -3428,7 +3433,13 @@ export class ZhaBindingMapCard extends HTMLElement {
       groupChoice: groupId != null ? "existing" : "new",
       startGroupId: groupId != null ? Number(groupId) : null,
       candidates: null,
-      mode: "group",
+      // Direct or group: suggested from the selected lights (and what other
+      // users reported) until the user picks one; starting from a group
+      // (Groups tab "Add a remote…") means group.
+      mode: groupId != null ? "group" : "direct",
+      modeTouched: groupId != null,
+      knownGroup: null,
+      knownDirect: null,
       groupName: suggestGroupName(this._areaName(source.area_id), this._deviceLabel(source)),
       clustersChosen: null,
       known: null,
@@ -3444,11 +3455,13 @@ export class ZhaBindingMapCard extends HTMLElement {
     this._q("#dialog").classList.add("open");
     this._explodedDeviceIeee = null;
     this._renderGroupFlow();
+    this._flowLoadKnown();
     // Every device's cluster list (cheap local reads) to find what can be controlled.
     await Promise.all(this._devices.map((d) => this._ensureClusters(d.ieee).catch(() => {})));
     if (!this._flow) return;
     this._flowRefreshCandidates();
     if (this._flow.startGroupId != null) this._flowSelectGroup(this._flow.startGroupId);
+    this._flowAutoMode();
     this._renderGroupFlow();
   }
 
@@ -3492,7 +3505,50 @@ export class ZhaBindingMapCard extends HTMLElement {
 
   _flowCanReview() {
     const f = this._flow;
-    return !!(f && f.selected.size && !(f.groupChoice === "existing" && f.startGroupId == null));
+    if (!f || !f.selected.size) return false;
+    if (!this._flowModeOptions()[f.mode].ok) return false;
+    return !(f.mode === "group" && f.groupChoice === "existing" && f.startGroupId == null);
+  }
+
+  /** Follows the suggested way of binding until the user picks one. */
+  _flowAutoMode() {
+    const f = this._flow;
+    if (!f || f.modeTouched) return;
+    f.mode = suggestMode(this._flowTargets(), { groupKnown: f.knownGroup, directKnown: f.knownDirect });
+  }
+
+  _flowModeOptions() {
+    const f = this._flow;
+    const clusterCount = f.clustersChosen ? f.clustersChosen.size : this._flowSourceClusters().length;
+    return modeOptions(this._flowTargets(), { clusterCount });
+  }
+
+  /** What other users reported for the way of binding currently chosen. */
+  _flowKnown() {
+    const f = this._flow;
+    return f ? (f.mode === "direct" ? f.knownDirect : f.knownGroup) : null;
+  }
+
+  /** "How should it control them?" — shared by the Choose devices and Review steps. */
+  _flowModeHtml() {
+    const f = this._flow;
+    const targets = this._flowTargets();
+    const opts = this._flowModeOptions();
+    const tag = (m) => (!f.modeTouched && f.mode === m && targets.length ? ' <span class="flow-suggested">suggested</span>' : "");
+    const n = targets.length;
+    const notes = [];
+    if (f.mode === "direct" && opts.direct.warning) notes.push(opts.direct.warning);
+    if (!opts.group.ok) notes.push(opts.group.reason);
+    for (const [label, k] of [["Directly", f.knownDirect], ["Through a group", f.knownGroup]]) {
+      if (k && k.state !== "unknown") notes.push(`${label}: ${k.text}`);
+    }
+    return `<fieldset class="flow-mode"><legend>How should it control them?</legend>
+        <label><input type="radio" name="flow-mode" value="direct" ${f.mode === "direct" ? "checked" : ""}> Directly${tag("direct")}
+          <span class="muted">(${n > 1 ? `one binding per device: uses ${n} binding-table slots per cluster on the remote` : "a binding straight to the device"}; works with devices that can't join groups, and with remotes that don't support groups)</span></label>
+        <label class="${opts.group.ok ? "" : "muted"}"><input type="radio" name="flow-mode" value="group" ${f.mode === "group" ? "checked" : ""} ${opts.group.ok ? "" : "disabled"}> Through a group${tag("group")}
+          <span class="muted">(one binding to a ZHA group: the devices respond together, and you can add more later without touching the remote)</span></label>
+        ${notes.map((t) => `<p class="hint">${escapeHtml(t)}</p>`).join("")}
+      </fieldset>`;
   }
 
   /** One line under the group choice saying what will happen to the group. */
@@ -3502,16 +3558,16 @@ export class ZhaBindingMapCard extends HTMLElement {
     const targets = this._flowTargets();
     if (f.groupChoice === "existing") {
       const g = f.startGroupId != null ? this._groups.find((x) => Number(x.group_id) === f.startGroupId) : null;
-      if (!g) return "Pick a group: its lights are ticked below, and you can tick more to add them to it.";
+      if (!g) return "Pick a group: its devices are ticked below, and you can tick more to add them to it.";
       const add = missingMembers(g, targets);
       return add.length
-        ? `${add.length} ticked light${add.length === 1 ? " isn't" : "s aren't"} in ${g.name} yet and will be added.`
+        ? `${add.length} ticked device${add.length === 1 ? " isn't" : "s aren't"} in ${g.name} yet and will be added.`
         : `Uses ${g.name} as it is.`;
     }
-    if (!targets.length) return "Tick the lights below. The card creates this group in ZHA and adds them to it.";
+    if (!targets.length) return "Tick the devices below. The card creates this group in ZHA and adds them to it.";
     const match = findMatchingGroup(this._groups, targets, this._coordinatorIeee());
-    if (match) return `These lights are already the group ${match.name}, so that group will be reused instead.`;
-    return `The card creates this group in ZHA with the ${targets.length} ticked light${targets.length === 1 ? "" : "s"}.`;
+    if (match) return `These devices are already the group ${match.name}, so that group will be reused instead.`;
+    return `The card creates this group in ZHA with the ${targets.length} ticked device${targets.length === 1 ? "" : "s"}.`;
   }
 
   _flowTargets() {
@@ -3543,19 +3599,21 @@ export class ZhaBindingMapCard extends HTMLElement {
   }
 
   async _flowLoadKnown() {
+    const flow = this._flow;
+    if (!flow) return;
     let doc = null;
     try {
       doc = await fetchBehaviourDoc();
     } catch (e) {
-      this._flow.knownError = e.message || String(e);
+      flow.knownError = e.message || String(e);
     }
-    if (!this._flow) return;
-    this._flow.known = knownBehaviour(doc, this._flowSlugKey(), "group_binding", this._flowFirmware());
-    // Remotes others found don't use group bindings default to direct
-    // binding, when that's on offer.
-    if (this._flow.known.state === "problems" && this._flowTargets().length <= DIRECT_BINDING_MAX_LIGHTS) {
-      this._flow.mode = "direct";
-    }
+    if (this._flow !== flow) return;
+    const fw = this._flowFirmware();
+    flow.knownGroup = knownBehaviour(doc, this._flowSlugKey(), "group_binding", fw);
+    flow.knownDirect = knownBehaviour(doc, this._flowSlugKey(), "direct_binding", fw);
+    // Suggest the way other users found works (e.g. a remote that only sends
+    // to groups), unless the user already picked one.
+    this._flowAutoMode();
     this._renderGroupFlow();
   }
 
@@ -3563,10 +3621,10 @@ export class ZhaBindingMapCard extends HTMLElement {
     return `<details class="flow-pitfalls" ${open ? "open" : ""}>
       <summary>Group bindings: what to expect</summary>
       <ul>
-        <li><strong>Not every remote supports them.</strong> Some only bind to individual lights, some only to a single group. There's no way to ask a device in advance, so the card tries it and checks.</li>
+        <li><strong>Not every remote supports them.</strong> Some only bind to individual devices, some only to a single group. There's no way to ask a device in advance, so the card tries it and checks.</li>
         <li><strong>"Stored" isn't the same as "working".</strong> A few remotes accept a group binding but never send to it. That's why you'll be asked to press a button at the end.</li>
         <li><strong>Battery remotes need to be awake.</strong> Press a button on the remote just before binding, and again if the card says "not confirmed yet".</li>
-        <li><strong>Lights hold the group membership.</strong> If a light is replaced or re-paired, add it to the group again.</li>
+        <li><strong>The devices hold the group membership.</strong> If one is replaced or re-paired, add it to the group again.</li>
         <li><strong>Firmware matters.</strong> The same model can behave differently on different firmware.</li>
       </ul>
     </details>`;
@@ -3577,8 +3635,8 @@ export class ZhaBindingMapCard extends HTMLElement {
     if (!f) return;
     const body = this._q("#dialog-body");
     const names = f.fromToolbar
-      ? ["remote", "Choose remote", "pick", "Choose lights", "plan", "Review", "run", "Set up", "test", "Test", "done", "Result"]
-      : ["pick", "Choose lights", "plan", "Review", "run", "Set up", "test", "Test", "done", "Result"];
+      ? ["remote", "Choose remote", "pick", "Choose devices", "plan", "Review", "run", "Set up", "test", "Test", "done", "Result"]
+      : ["pick", "Choose devices", "plan", "Review", "run", "Set up", "test", "Test", "done", "Result"];
     const stepList = [];
     for (let i = 0; i < names.length; i += 2) stepList.push([names[i], `${i / 2 + 1}. ${names[i + 1]}`]);
     const steps = `<ol class="flow-steps">${stepList
@@ -3587,12 +3645,12 @@ export class ZhaBindingMapCard extends HTMLElement {
     let html = "";
 
     if (f.step === "remote") {
-      this._q("#dialog-title").textContent = "Control lights with a remote";
+      this._q("#dialog-title").textContent = "Set up what a remote controls";
       const list =
         f.remotes == null
           ? `<p class="muted">Finding remotes and switches…</p>`
           : !f.remotes.length
-          ? `<p class="muted">No device sends On/Off, Level Control or Colour Control commands, so there's nothing that can control lights. If you've just paired a remote, click ⟳ Devices and try again.</p>`
+          ? `<p class="muted">No device sends On/Off, Level Control, Colour Control or Window Covering commands, so there's nothing that can control other devices. If you've just paired a remote, click ⟳ Devices and try again.</p>`
           : `<div class="flow-targets">${f.remotes
               .map(
                 (r) => `<label class="flow-target"><input type="radio" name="flow-remote" value="${escapeHtml(r.ieee)}" ${r.ieee === f.sourceIeee ? "checked" : ""}>
@@ -3600,12 +3658,12 @@ export class ZhaBindingMapCard extends HTMLElement {
               )
               .join("")}</div>`;
       body.innerHTML = `${steps}<div class="flow">
-        <p>Pick the remote or wireless switch that should control your lights. The card then helps you choose the lights,
-          puts them in a ZHA group (creating one if needed), binds the remote to it and checks that it works.
-          The lights switch even when Home Assistant is down.</p>
+        <p>Pick the remote or wireless switch to set up. Then choose what it should control (lights, blinds or other
+          devices) and whether it controls them directly or through a ZHA group. The card binds it and checks that it
+          works. Either way, they keep responding to it when Home Assistant is down.</p>
         <p><strong>Remotes and switches</strong></p>${list}
         <div class="dialog-actions">
-          <button class="btn btn-primary" id="flow-remote-next" ${f.sourceIeee ? "" : "disabled"}>Next: choose lights</button>
+          <button class="btn btn-primary" id="flow-remote-next" ${f.sourceIeee ? "" : "disabled"}>Next: choose devices</button>
           <button class="btn" id="flow-cancel">Cancel</button>
         </div></div>`;
       this._qa('input[name="flow-remote"]').forEach((r) =>
@@ -3630,7 +3688,7 @@ export class ZhaBindingMapCard extends HTMLElement {
 
     const src = this._flowSource();
     const srcName = this._deviceLabel(src);
-    this._q("#dialog-title").textContent = `Control lights with ${srcName}`;
+    this._q("#dialog-title").textContent = `Set up what ${srcName} controls`;
 
     if (f.step === "pick") {
       const epSel =
@@ -3642,7 +3700,7 @@ export class ZhaBindingMapCard extends HTMLElement {
           : `<p class="muted">Sends ${escapeHtml(f.endpoints[0].clusters.map(clusterName).join(", "))} from endpoint ${f.endpoints[0].endpoint}.</p>`;
       const sortedGroups = [...this._groups].sort((a, b) => (a.name || "").localeCompare(b.name || ""));
       const existing = f.groupChoice === "existing";
-      const groupSel = `<fieldset class="flow-mode flow-group-choice"><legend>Group</legend>
+      const groupSel = f.mode !== "group" ? "" : `<fieldset class="flow-mode flow-group-choice"><legend>Group</legend>
           <label><input type="radio" name="flow-group-choice" value="new" ${existing ? "" : "checked"}> New group
             <input type="text" id="flow-group-name" value="${escapeHtml(f.groupName)}" ${existing ? "disabled" : ""} aria-label="New group name"></label>
           <label class="${sortedGroups.length ? "" : "muted"}"><input type="radio" name="flow-group-choice" value="existing" ${existing ? "checked" : ""} ${sortedGroups.length ? "" : "disabled"}> Existing group
@@ -3653,17 +3711,21 @@ export class ZhaBindingMapCard extends HTMLElement {
         </fieldset>`;
       const list =
         f.candidates == null
-          ? `<p class="muted">Finding lights this remote can control…</p>`
+          ? `<p class="muted">Finding devices this remote can control…</p>`
           : !f.candidates.length
           ? `<p class="muted">No devices accept ${escapeHtml(this._flowSourceClusters().map(clusterName).join(" or "))}.</p>`
           : `<div class="flow-targets">${f.candidates
               .map((t) => {
                 const k = targetKey(t);
+                const noGroup = t.groupable === false
+                  ? ` <span class="flow-tag" title="This device has no Groups cluster, so it can't be added to a ZHA group. Control it directly instead.">can't join groups</span>`
+                  : "";
                 return `<label class="flow-target"><input type="checkbox" data-flow-target="${escapeHtml(k)}" ${f.selected.has(k) ? "checked" : ""}>
-                  <span>${escapeHtml(t.name)}</span><span class="muted">${escapeHtml(t.clusters.map(clusterName).join(", "))}</span></label>`;
+                  <span>${escapeHtml(t.name)}${noGroup}</span><span class="muted">${escapeHtml(t.clusters.map(clusterName).join(", "))}</span></label>`;
               })
               .join("")}</div>`;
-      html = `${epSel}${groupSel}<p><strong>Lights to control</strong> (<span id="flow-count">${f.selected.size}</span> selected)</p>${list}
+      html = `${epSel}<p><strong>Devices to control</strong> (<span id="flow-count">${f.selected.size}</span> selected)</p>${list}
+        ${f.candidates && f.candidates.length ? this._flowModeHtml() : ""}${groupSel}
         <div class="dialog-actions">
           <button class="btn btn-primary" id="flow-next" ${this._flowCanReview() ? "" : "disabled"}>Next: review</button>
           ${f.fromToolbar ? `<button class="btn" id="flow-back-remote">Back</button>` : ""}
@@ -3676,8 +3738,9 @@ export class ZhaBindingMapCard extends HTMLElement {
       const targets = this._flowTargets();
       const plan = planClusters(this._flowSourceClusters(), targets, (ieee) => this._clusterCache.get(ieee));
       if (!f.clustersChosen) f.clustersChosen = new Set(plan.filter((p) => p.include).map((p) => p.clusterId));
-      const known = f.known
-        ? `<div class="flow-known flow-known-${f.known.state}"><strong>What other users found:</strong> ${escapeHtml(f.known.text)}</div>`
+      const k = this._flowKnown();
+      const known = k
+        ? `<div class="flow-known flow-known-${k.state}"><strong>What other users found:</strong> ${escapeHtml(k.text)}</div>`
         : `<div class="flow-known flow-known-unknown">Checking what other users have reported…</div>`;
       let seen = false;
       try {
@@ -3685,30 +3748,26 @@ export class ZhaBindingMapCard extends HTMLElement {
       } catch (e) {
         /* optional */
       }
-      const directOk = targets.length <= DIRECT_BINDING_MAX_LIGHTS;
-      const mode = `<fieldset class="flow-mode"><legend>How to bind</legend>
-          <label><input type="radio" name="flow-mode" value="group" ${f.mode === "group" ? "checked" : ""}> One group binding <span class="muted">(recommended: one binding-table slot per cluster, lights switch together)</span></label>
-          <label class="${directOk ? "" : "muted"}"><input type="radio" name="flow-mode" value="direct" ${f.mode === "direct" ? "checked" : ""} ${directOk ? "" : "disabled"}> Bind to each light directly <span class="muted">(${directOk ? `uses ${targets.length} slot${targets.length === 1 ? "" : "s"} per cluster on the remote; lights may not switch exactly together` : `only offered for up to ${DIRECT_BINDING_MAX_LIGHTS} lights`})</span></label>
-        </fieldset>`;
+      const mode = this._flowModeHtml();
       let groupLine = "";
       if (f.mode === "group") {
         const start = f.startGroupId != null ? this._groups.find((g) => Number(g.group_id) === f.startGroupId) : null;
         const match = start ? null : findMatchingGroup(this._groups, targets, this._coordinatorIeee());
-        if (match) groupLine = `<p>Group: reuse <strong>${escapeHtml(match.name)}</strong>, which already has exactly these lights.</p>`;
+        if (match) groupLine = `<p>Group: reuse <strong>${escapeHtml(match.name)}</strong>, which already has exactly these devices.</p>`;
         else if (start) {
           const add = missingMembers(start, targets);
-          groupLine = `<p>Group: use <strong>${escapeHtml(start.name)}</strong>${add.length ? ` and add ${escapeHtml(add.map((t) => t.name).join(", "))}` : ""}. Lights already in it that you didn't select stay in it.</p>`;
+          groupLine = `<p>Group: use <strong>${escapeHtml(start.name)}</strong>${add.length ? ` and add ${escapeHtml(add.map((t) => t.name).join(", "))}` : ""}. Devices already in it that you didn't select stay in it.</p>`;
         } else {
           const name = (f.groupName || "").trim() || suggestGroupName(null, srcName);
-          groupLine = `<p>Group: create <strong>${escapeHtml(name)}</strong> with ${targets.length} light${targets.length === 1 ? "" : "s"}.</p>`;
+          groupLine = `<p>Group: create <strong>${escapeHtml(name)}</strong> with ${targets.length} device${targets.length === 1 ? "" : "s"}.</p>`;
         }
       }
       const clusterRows = plan
         .map((p) => {
-          const sum = groupSupportSummary(p.support, clusterName(p.clusterId), f.mode === "group" ? "the selected lights" : "the selected lights");
-          if (!p.include) return `<li class="muted">Not bound: ${escapeHtml(clusterName(p.clusterId))}. None of the selected lights support it.</li>`;
+          const sum = groupSupportSummary(p.support, clusterName(p.clusterId), "the selected devices");
+          if (!p.include) return `<li class="muted">Not bound: ${escapeHtml(clusterName(p.clusterId))}. None of the selected devices support it.</li>`;
           return `<li><label><input type="checkbox" data-flow-cluster="${p.clusterId}" ${f.clustersChosen.has(p.clusterId) ? "checked" : ""}> ${escapeHtml(clusterName(p.clusterId))}</label>
-            <span class="flow-support flow-support-${sum.level}">${escapeHtml(sum.text.replace(/ in the selected lights/, " selected"))}</span></li>`;
+            <span class="flow-support flow-support-${sum.level}">${escapeHtml(sum.text.replace(/ in the selected devices/, " selected"))}</span></li>`;
         })
         .join("");
       const battery = this._isBatteryDevice(src);
@@ -3733,15 +3792,14 @@ export class ZhaBindingMapCard extends HTMLElement {
           <div class="dialog-actions"><button class="btn btn-primary" id="flow-bind-now">Bind now</button><button class="btn" id="flow-cancel">Cancel</button></div>`;
       } else if (f.step === "run" && f.verifying) {
         tail = `<p class="flow-callout">If ${escapeHtml(srcName)} runs on battery, <strong>press a button on it now</strong> so it answers the check.
-          If the lights already respond to it, you can skip the check and go straight to the button test.</p>
+          If the devices already respond to it, you can skip the check and go straight to the button test.</p>
           <div class="dialog-actions"><button class="btn" id="flow-skip-check">It already works: skip the check</button></div>`;
       } else if (f.step === "run" && f.unconfirmed) {
         tail = `<p class="flow-callout">${escapeHtml(srcName)} didn't answer the check, so the bindings aren't confirmed yet. Press a button on it, then click Check again.
-          If the lights already respond to it, go straight to the button test instead.</p>
+          If the devices already respond to it, go straight to the button test instead.</p>
           <div class="dialog-actions"><button class="btn btn-primary" id="flow-check">Check again</button><button class="btn" id="flow-skip-check">It already works: test it</button><button class="btn" id="flow-cancel">Close</button></div>`;
       } else if (f.step === "test") {
-        const dims = [...f.clustersChosen].includes(0x0008);
-        tail = `<p class="flow-callout"><strong>Now test it.</strong> Press on/off on ${escapeHtml(srcName)}${dims ? ", then hold to dim" : ""}. Did the lights respond?</p>
+        tail = `<p class="flow-callout"><strong>Now test it.</strong> ${escapeHtml(testInstruction(f.clustersChosen))} on ${escapeHtml(srcName)}. Did the devices respond?</p>
           <div class="dialog-actions">
             <button class="btn btn-primary" data-flow-test="all">All of them</button>
             <button class="btn" data-flow-test="some">Some of them</button>
@@ -3761,23 +3819,24 @@ export class ZhaBindingMapCard extends HTMLElement {
 
   _flowDoneHtml() {
     const f = this._flow;
-    const groupName = f.groupId != null ? this._groupName(f.groupId) : "the lights";
+    const groupName = f.groupId != null ? this._groupName(f.groupId) : "the devices";
     const advice = {
-      works: `Done. ${f.mode === "group" ? `The remote controls ${groupName}.` : "The remote controls each light directly."}`,
-      partial: `The binding works, but not every light responded. ${f.mode === "group" ? "The lights that didn't respond may not have joined the group: check them in ZHA's group page, or remove and re-add them." : "Check that the lights that didn't respond are powered and in range."}`,
+      works: `Done. ${f.mode === "group" ? `The remote controls ${groupName}.` : "The remote controls each device directly."}`,
+      partial: `The binding works, but not every device responded. ${f.mode === "group" ? "The devices that didn't respond may not have joined the group: check them in ZHA's group page, or remove and re-add them." : "Check that the devices that didn't respond are powered and in range."}`,
       stored_ignored:
-        "The remote stored the binding but nothing responded. Either it doesn't send to this kind of binding, or the lights didn't take the commands.",
+        "The remote stored the binding but nothing responded. Either it doesn't send to this kind of binding, or the devices didn't take the commands.",
       rejected:
         f.mode === "group"
           ? "The remote didn't accept the group binding."
           : "The remote didn't accept the bindings.",
     }[f.result];
     const level = f.result === "works" ? "success" : f.result === "partial" ? "info" : "warning";
+    const many = this._flowTargets().length > DIRECT_BINDING_MAX_LIGHTS;
     const fallback =
-      f.mode === "group" && (f.result === "rejected" || f.result === "stored_ignored") && this._flowTargets().length <= DIRECT_BINDING_MAX_LIGHTS
-        ? `<button class="btn" id="flow-direct">Bind to each light directly instead</button>`
-        : f.mode === "group" && (f.result === "rejected" || f.result === "stored_ignored")
-        ? `<p class="hint">Binding to each light directly is only offered for up to ${DIRECT_BINDING_MAX_LIGHTS} lights, because each light uses binding-table slots on the remote.</p>`
+      f.mode === "group" && (f.result === "rejected" || f.result === "stored_ignored")
+        ? `<button class="btn" id="flow-direct">Bind to each device directly instead</button>${
+            many ? `<p class="hint">${escapeHtml(this._flowModeOptions().direct.warning)}</p>` : ""
+          }`
         : "";
     let shared = false;
     try {
@@ -3825,7 +3884,7 @@ export class ZhaBindingMapCard extends HTMLElement {
       report.behaviour === "group_binding" ? "group binding" : "direct binding"
     } ${RESULT_TEXT[report.result] || report.result}`;
     const body =
-      "Shared from ZHA Bindings Manager's \"Control lights with this remote\" flow.\n\n```json\n" +
+      "Shared from ZHA Bindings Manager's \"Set up what this controls\" flow.\n\n```json\n" +
       JSON.stringify(report, null, 2) +
       "\n```";
     return `https://github.com/${CAPABILITY_DB_REPO}/issues/new?title=${encodeURIComponent(title)}&body=${encodeURIComponent(body)}&labels=${encodeURIComponent("behaviour-report")}`;
@@ -3869,20 +3928,25 @@ export class ZhaBindingMapCard extends HTMLElement {
       cb.addEventListener("change", () => {
         if (cb.checked) f.selected.add(cb.dataset.flowTarget);
         else f.selected.delete(cb.dataset.flowTarget);
-        const btn = this._q("#flow-next");
-        if (btn) btn.disabled = !this._flowCanReview();
-        const count = this._q("#flow-count");
-        if (count) count.textContent = String(f.selected.size);
-        const note = this._q("#flow-group-note");
-        if (note) note.textContent = this._flowGroupNote();
+        // The suggested way and what's possible depend on the selection, so
+        // re-render, keeping the list and dialog where they were scrolled.
+        this._flowAutoMode();
+        const list = this._q(".flow-targets");
+        const bodyEl = this._q("#dialog-body");
+        const listTop = list ? list.scrollTop : 0;
+        const bodyTop = bodyEl ? bodyEl.scrollTop : 0;
+        this._renderGroupFlow();
+        const list2 = this._q(".flow-targets");
+        if (list2) list2.scrollTop = listTop;
+        const body2 = this._q("#dialog-body");
+        if (body2) body2.scrollTop = bodyTop;
       })
     );
     on("#flow-next", "click", () => {
       f.step = "plan";
       f.clustersChosen = null;
-      f.known = null;
       this._renderGroupFlow();
-      this._flowLoadKnown();
+      if (!f.knownGroup) this._flowLoadKnown();
     });
     on("#flow-back-remote", "click", () => {
       const ieee = f.sourceIeee;
@@ -3900,6 +3964,7 @@ export class ZhaBindingMapCard extends HTMLElement {
     this._qa('input[name="flow-mode"]').forEach((r) =>
       r.addEventListener("change", () => {
         f.mode = r.value;
+        f.modeTouched = true;
         this._renderGroupFlow();
       })
     );
@@ -3940,10 +4005,11 @@ export class ZhaBindingMapCard extends HTMLElement {
     this._qa("[data-flow-test]").forEach((b) => b.addEventListener("click", () => this._flowAnswerTest(b.dataset.flowTest)));
     on("#flow-direct", "click", () => {
       f.mode = "direct";
+      f.modeTouched = true;
       f.result = null;
       f.test = null;
       f.items = [];
-      f.log.push({ state: "info", text: "Switching to binding each light directly." });
+      f.log.push({ state: "info", text: "Switching to binding each device directly." });
       f.step = "run";
       this._flowStartBinds();
     });
@@ -3988,7 +4054,7 @@ export class ZhaBindingMapCard extends HTMLElement {
     try {
       if (match) {
         f.groupId = Number(match.group_id);
-        this._flowLog("ok", `Using group ${match.name}, which already has these lights.`);
+        this._flowLog("ok", `Using group ${match.name}, which already has these devices.`);
         return true;
       }
       const start = f.startGroupId != null ? this._groups.find((g) => Number(g.group_id) === f.startGroupId) : null;
@@ -4001,7 +4067,7 @@ export class ZhaBindingMapCard extends HTMLElement {
         }
       } else {
         const name = (f.groupName || "").trim() || suggestGroupName(null, this._deviceLabel(this._flowSource()));
-        this._flowLog("wait", `Creating group ${name} with ${targets.length} light${targets.length === 1 ? "" : "s"}…`);
+        this._flowLog("wait", `Creating group ${name} with ${targets.length} device${targets.length === 1 ? "" : "s"}…`);
         const res = await this._api.createGroup(name, targets);
         f.groupId = res && res.group_id != null ? Number(res.group_id) : null;
         f.createdName = name;
@@ -4025,9 +4091,9 @@ export class ZhaBindingMapCard extends HTMLElement {
     }
     const stillMissing = missingMembers(group, targets);
     if (stillMissing.length) {
-      this._flowLog("warn", `${group.name} is ready, but ZHA doesn't list ${stillMissing.map((t) => t.name).join(", ")} as a member. Those lights won't respond.`);
+      this._flowLog("warn", `${group.name} is ready, but ZHA doesn't list ${stillMissing.map((t) => t.name).join(", ")} as a member. Those devices won't respond.`);
     } else {
-      this._flowLog("ok", `${group.name} has all ${targets.length} light${targets.length === 1 ? "" : "s"} (ID ${group.group_id}).`);
+      this._flowLog("ok", `${group.name} has all ${targets.length} device${targets.length === 1 ? "" : "s"} (ID ${group.group_id}).`);
     }
     return true;
   }
@@ -4140,7 +4206,7 @@ export class ZhaBindingMapCard extends HTMLElement {
     // After a skipped check, lights responding prove the bindings are there.
     const outcomes = f.items.map((i) => (f.skippedCheck && answer !== "none" && i.outcome !== "failed" ? "confirmed" : i.outcome || "unconfirmed"));
     if (f.skippedCheck && answer === "none" && flowResult(outcomes, answer) === "unconfirmed") {
-      f.log.push({ state: "warn", text: "Button test: no lights responded, and the bindings aren't confirmed yet." });
+      f.log.push({ state: "warn", text: "Button test: no devices responded, and the bindings aren't confirmed yet." });
       f.step = "run";
       f.unconfirmed = true;
       f.skippedCheck = false;
@@ -4149,7 +4215,7 @@ export class ZhaBindingMapCard extends HTMLElement {
     }
     f.test = answer;
     f.result = flowResult(outcomes, answer);
-    f.log.push({ state: "info", text: `Button test: ${answer === "all" ? "all lights responded" : answer === "some" ? "some lights responded" : "no lights responded"}.` });
+    f.log.push({ state: "info", text: `Button test: ${answer === "all" ? "all devices responded" : answer === "some" ? "some devices responded" : "no devices responded"}.` });
     f.step = "done";
     await this._flowCheckDb();
     this._renderGroupFlow();
@@ -4199,7 +4265,7 @@ export class ZhaBindingMapCard extends HTMLElement {
       el.classList.add("open");
       el.setAttribute("aria-hidden", "false");
     }
-    // Clusters decide whether "Control lights with this…" applies and
+    // Clusters decide whether "Set up what this controls…" applies and
     // which bindings are control rather than reporting (the device's own and
     // those of every device bound to it or its groups). Fetch any that are
     // missing in the background and re-render when they're in.
@@ -4460,7 +4526,7 @@ export class ZhaBindingMapCard extends HTMLElement {
       ${this._drawerMeshHtml(d)}
       <div class="drawer-section drawer-actions">
         <div class="drawer-section-title">Actions</div>
-        ${isController ? `<button class="btn btn-primary" id="drawer-control-lights" title="Pick lights for this remote to control; the card creates a group if needed, binds it and checks it works">Control lights with this…</button>` : ""}
+        ${isController ? `<button class="btn btn-primary" id="drawer-control-lights" title="Choose the lights, blinds or other devices this remote or switch controls. The card binds them, directly or through a group, and checks it works.">Set up what this controls…</button>` : ""}
         <button class="btn" id="drawer-show-bindings" title="Bindings tab, filtered to this device (what it controls and what controls it)">Show its bindings</button>
         <button class="btn" id="drawer-rescan" title="Read this device's binding table again">Rescan bindings</button>
         <button class="btn" id="drawer-share" title="Check which commands each endpoint supports and share it with the community database">Check and share capabilities…</button>
@@ -5547,7 +5613,7 @@ export class ZhaBindingMapCard extends HTMLElement {
         }
         ${
           controllerEndpoints(this._clusterCache.get(d.ieee)).length
-            ? `<button class="btn btn-primary" id="explode-control-lights" title="Pick lights for this remote or switch to control; the card creates a group if needed, binds it and checks it works">Control lights with this…</button>`
+            ? `<button class="btn btn-primary" id="explode-control-lights" title="Choose the lights, blinds or other devices this remote or switch controls. The card binds them, directly or through a group, and checks it works.">Set up what this controls…</button>`
             : ""
         }
         <button class="btn" id="explode-close">Close</button>
@@ -5792,7 +5858,7 @@ export class ZhaBindingMapCard extends HTMLElement {
     const entry = this._commandScans.get(key);
     const isBattery = this._isBatteryDevice(d);
     const wakeHint = isBattery
-      ? `<div class="scan-wake-hint">May be asleep — press a button on it first if this doesn't complete.</div>`
+      ? `<div class="scan-wake-hint">Battery devices fall asleep within seconds, and this check takes longer than that: press a button on it just before you start, then every few seconds until it finishes.</div>`
       : "";
 
     let actionHtml;
@@ -5935,11 +6001,16 @@ export class ZhaBindingMapCard extends HTMLElement {
   _deviceShareSectionHtml(d) {
     const epIds = this._deviceEndpointsIncludingGP(d);
     if (!epIds.length) return "";
-    const scannedCount = epIds.filter((ep) => {
+    const statusOf = (ep) => {
       const e = this._commandScans.get(this._commandScanKey(d.ieee, ep));
-      return e && e.status === "done";
-    }).length;
-    if (!scannedCount) return "";
+      return e && e.status;
+    };
+    const scannedCount = epIds.filter((ep) => statusOf(ep) === "done").length;
+    // A battery remote often falls asleep before the check finishes
+    // (zigbee-capabilities#387). Once any check has ended, its declared
+    // endpoints and clusters can still be shared, so the device isn't stuck.
+    const endedCount = epIds.filter((ep) => ["done", "timeout", "stopped", "error"].includes(statusOf(ep))).length;
+    if (!endedCount) return "";
 
     if (this._shareDraft && this._shareDraft.key === d.ieee) {
       return `<div class="device-share-section">${this._shareDraftHtml(this._shareDraft)}</div>`;
@@ -5947,7 +6018,11 @@ export class ZhaBindingMapCard extends HTMLElement {
     return `
       <div class="device-share-section">
         <button class="btn btn-small device-cmd-share" type="button">
-          Share scan to community database (${scannedCount}/${epIds.length} endpoint${epIds.length === 1 ? "" : "s"} checked)
+          ${
+            scannedCount
+              ? `Share scan to community database (${scannedCount}/${epIds.length} endpoint${epIds.length === 1 ? "" : "s"} checked)`
+              : "Share what's known to community database (endpoints and clusters only)"
+          }
         </button>
       </div>`;
   }
@@ -6051,12 +6126,16 @@ export class ZhaBindingMapCard extends HTMLElement {
     const openBtn = `<a class="btn btn-small ep-cmd-share-open" href="${escapeHtml(
       draft.url
     )}" target="_blank" rel="noopener">${openLabel}</a>`;
+    const partial = draft.declaredOnly
+      ? `<p class="hint">No command check finished, so this shares the device's endpoints and clusters only, marked as not checked. That still tells the next person what the device has; anyone whose check completes can add the commands later.</p>`
+      : "";
     const notice = draft.tooLong
       ? `<p class="hint">This scan is too large to pre-fill the whole issue. The title's already filled in — clicking below also copies the JSON, so just paste it (Ctrl/Cmd+V) into the body once the new issue opens.</p>`
       : `<p class="hint">Review what would be submitted, then open a pre-filled GitHub issue — nothing is sent until you click "Submit new issue" on GitHub's own page. No IEEE address, entity, area, or binding data is included.</p>`;
     return `
       <div class="ep-cmd-share-draft">
         ${notice}
+        ${partial}
         <textarea class="ep-cmd-share-json" readonly rows="8">${escapeHtml(draft.body)}</textarea>
         <div class="ep-cmd-share-actions">
           ${openBtn}
@@ -6231,10 +6310,13 @@ export class ZhaBindingMapCard extends HTMLElement {
    *  _shareDraftHtml(). */
   _shareDeviceCapabilities(d) {
     const record = this._buildDeviceCapabilityRecord(d);
-    if (!record || !record.endpoints.some((e) => e.scanned)) {
-      this._setStatus("error", "Nothing to share yet — check supported commands on at least one endpoint first.");
+    if (!record) {
+      this._setStatus("error", "Nothing to share yet: this device's endpoints haven't been read.");
       return;
     }
+    // No completed command check (e.g. a battery remote that fell asleep):
+    // share the declared endpoints and clusters, marked as not scanned.
+    const declaredOnly = !record.endpoints.some((e) => e.scanned);
     const title = `[Device Submission] ${record.manufacturer || "Unknown"} ${record.model || "Unknown"}${
       record.identity.sw_build_id ? ` (fw ${record.identity.sw_build_id})` : ""
     }`;
@@ -6249,7 +6331,7 @@ export class ZhaBindingMapCard extends HTMLElement {
       ? `https://github.com/${CAPABILITY_DB_REPO}/issues/new?title=${encodeURIComponent(title)}` +
         `&body=${encodeURIComponent("Paste the copied JSON below this line:\n\n")}&${labelsParam}`
       : fullUrl;
-    this._shareDraft = { key: d.ieee, record, title, body: displayBody, url, tooLong };
+    this._shareDraft = { key: d.ieee, record, title, body: displayBody, url, tooLong, declaredOnly };
     this._renderExplodedView(d);
   }
 
@@ -7340,15 +7422,21 @@ export class ZhaBindingMapCard extends HTMLElement {
       sourceIeee: "",
       clusterIds: FLOW_CLUSTERS,
     }).filter((t) => !inGroup.has(`${normIeee(t.ieee)}:${t.endpoint}`));
-    if (!list.length) {
-      return `<div class="drawer-share"><p>Every light that accepts On/Off, Level or Colour commands is already in this group.</p>
+    const canJoin = list.filter((t) => t.groupable !== false);
+    if (!canJoin.length && !list.length) {
+      return `<div class="drawer-share"><p>Every device that accepts On/Off, Level, Colour or Window Covering commands is already in this group.</p>
         <div class="dialog-actions"><button class="btn btn-small" id="groups-add-cancel">Close</button></div></div>`;
     }
     return `<div class="drawer-share groups-add">
       <p>Choose the lights to add. ZHA adds each one to the group straight away; the remotes bound to the group control them from then on.</p>
       <div class="groups-pick">${list
-        .map((t) => `<label class="row"><input type="checkbox" data-add-key="${escapeHtml(t.ieee)}|${t.endpoint}"> ${escapeHtml(t.name)} <span class="muted">${escapeHtml(t.clusters.map(clusterName).join(", "))}</span></label>`)
+        .map((t) =>
+          t.groupable === false
+            ? `<label class="row muted" title="This light has no Groups cluster, so it can't be added to a group. Bind the remote to it directly instead (Set up what this controls…, Directly)."><input type="checkbox" disabled> ${escapeHtml(t.name)} <span class="flow-tag">can't join groups</span></label>`
+            : `<label class="row"><input type="checkbox" data-add-key="${escapeHtml(t.ieee)}|${t.endpoint}"> ${escapeHtml(t.name)} <span class="muted">${escapeHtml(t.clusters.map(clusterName).join(", "))}</span></label>`
+        )
         .join("")}</div>
+      ${canJoin.length < list.length ? `<p class="hint">Greyed-out lights have no Groups cluster, so they can't be in a group. A remote can still control them directly.</p>` : ""}
       <div class="dialog-actions"><button class="btn btn-primary btn-small" id="groups-add-go" disabled>Add</button><button class="btn btn-small" id="groups-add-cancel">Cancel</button></div>
     </div>`;
   }
@@ -7483,7 +7571,16 @@ export class ZhaBindingMapCard extends HTMLElement {
       const have = new Set(((g && g.members) || []).map((m) => `${normIeee(m.device && m.device.ieee)}:${Number(m.endpoint_id)}`));
       const missing = members.filter((m) => !have.has(`${normIeee(m.ieee)}:${m.endpoint}`));
       if (missing.length) {
-        this._setStatus("error", `ZHA didn't list ${missing.map((m) => this._ieeeLabel(m.ieee, { plain: true })).join(", ")} in ${name} afterwards. Check the light is online and try again.`, 0);
+        const label = (m) => this._ieeeLabel(m.ieee, { plain: true });
+        const noGroups = missing.filter((m) => {
+          const cl = this._clusterCache.get(m.ieee);
+          return cl && !endpointHasGroups(cl, m.endpoint);
+        });
+        const other = missing.filter((m) => !noGroups.includes(m));
+        const parts = [];
+        if (noGroups.length) parts.push(`${noGroups.map(label).join(", ")} can't join groups (no Groups cluster). Bind the remote to ${noGroups.length === 1 ? "it" : "them"} directly instead.`);
+        if (other.length) parts.push(`ZHA didn't list ${other.map(label).join(", ")} in ${name} afterwards. Check the light is online and try again.`);
+        this._setStatus("error", parts.join(" "), 0);
       } else {
         this._setStatus("success", `Added ${members.map((m) => this._ieeeLabel(m.ieee, { plain: true })).join(", ")} to ${name}.`);
       }
@@ -9426,6 +9523,17 @@ export class ZhaBindingMapCard extends HTMLElement {
       let targetIeeeForRescan = null;
       if (type === "coordinator") targetIeeeForRescan = this._coordinatorIeee();
       else if (type === "device") targetIeeeForRescan = this._q("#adv-target-device").value;
+      // What's already bound that this request could produce, so the result
+      // can be judged by what actually appears on the device rather than by
+      // zha_toolkit's own report, which can say "failure" for a bind that
+      // worked (zigbee-capabilities#387).
+      const looseTarget =
+        type === "group"
+          ? { isGroup: true, groupId: Number(this._q("#adv-target-group").value) }
+          : { isGroup: false, ieee: targetIeeeForRescan, endpoint: opts.dstEndpoint != null ? opts.dstEndpoint : null };
+      const matchesRequest = (b) =>
+        bindingMatchesLoose(b, { sourceIeee, sourceEp: opts.endpoint != null ? opts.endpoint : null, clusterIds: clusters, target: looseTarget });
+      const beforeKeys = new Set(this._rawBindings().filter(matchesRequest).map(bindingKey));
       let callErr = null;
       try {
         if (type === "group") {
@@ -9479,18 +9587,34 @@ export class ZhaBindingMapCard extends HTMLElement {
             }
           }
           this._setStatus(res.level, res.message, res.level === "success" ? undefined : 0, res.action);
-        } else if (!callErr && !sourceRead) {
+        } else if (!sourceRead) {
           this._setStatus(
             "warning",
             `Bind command sent, but ${this._ieeeLabel(sourceIeee, { plain: true })} didn't answer the check, so the table may not show it yet. Wake the device and rescan it.`,
             0
           );
         } else {
-          this._setStatus(
-            callErr ? "error" : "success",
-            callErr ? callErr.message || String(callErr) : "Bind command sent.",
-            callErr ? 0 : undefined
-          );
+          // The source answered: judge by its binding table, whatever
+          // zha_toolkit reported.
+          const after = this._rawBindings().filter(matchesRequest);
+          const added = after.filter((b) => !beforeKeys.has(bindingKey(b)));
+          if (added.length) {
+            const names = [...new Set(added.map((b) => clusterName(b.clusterId)))].join(", ");
+            this._setStatus(
+              "success",
+              `Binding confirmed on the device (${names}).${callErr ? " zha_toolkit reported a failure, but the binding is there." : ""}`
+            );
+          } else if (after.length) {
+            this._setStatus("info", "Already bound: the device had this binding before.");
+          } else {
+            this._setStatus(
+              "error",
+              `Bind failed: ${this._ieeeLabel(sourceIeee, { plain: true })} answered the check and no matching binding is on it.${
+                callErr ? ` (${callErr.message || String(callErr)})` : ""
+              }`,
+              0
+            );
+          }
         }
       }
     });

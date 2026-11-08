@@ -188,7 +188,8 @@ Coverage is limited to devices someone has scanned and shared. A missing or empt
 
 ### Create and remove bindings
 
-- **New group for a remote…** (Groups tab, or **Control lights with this…** in a remote's side panel) does it step by step: pick the remote, pick the lights, choose a new or existing ZHA group, and the card creates or updates the group, binds the remote to it, checks the binding was stored and asks you to test it.
+- **Set up what this controls…** (in a remote's or switch's side panel) does it step by step: choose the lights, blinds or other devices it should control, then whether it controls them **directly** (a binding to each device) or **through a group** (one binding to a ZHA group). The card suggests one, based on how many devices you chose, whether they can join groups, and what other users reported for that remote. It then creates or updates the group if needed, binds the remote, checks the bindings were stored and asks you to test it. **New group for a remote…** in the Groups tab starts the same steps from a group.
+- Devices without the Groups cluster (some relay modules, for example) are marked *can't join groups* and are only offered for direct control.
 - Drag a source device onto a target device to pre-select a likely binding.
 - Choose the exact source endpoint, target endpoint and cluster before committing.
 - Remove bindings directly from the map or table.

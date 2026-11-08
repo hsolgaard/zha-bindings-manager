@@ -151,6 +151,8 @@ a.btn { display:inline-block; text-decoration:none; }
 .flow .flow-target { display:flex; align-items:center; gap:8px; margin:4px 0; }
 .flow .flow-target .muted { margin-left:auto; font-size:0.85em; }
 .flow-known, .flow-result, .flow-share, .flow-callout { padding:8px 12px; border-radius:8px; margin:8px 0; }
+.flow-tag { display:inline-block; font-size:0.8em; padding:0 6px; margin-left:6px; border-radius:8px; background: rgba(255,152,0,0.16); color: var(--warning-color, #c77700); }
+.flow-suggested { display:inline-block; font-size:0.8em; padding:0 6px; margin-left:6px; border-radius:8px; background: rgba(33,150,243,0.14); color: var(--primary-color, #1976d2); }
 .flow-known-unknown { background: rgba(127,127,127,0.12); }
 .flow-known-works, .flow-result-success { background: rgba(76,175,80,0.14); }
 .flow-known-mixed, .flow-result-info { background: rgba(3,169,244,0.12); }

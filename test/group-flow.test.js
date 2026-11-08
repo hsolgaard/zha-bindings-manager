@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   controllerEndpoints, candidateTargets, findMatchingGroup, missingMembers, planClusters,
   flowResult, buildBehaviourReport, knownBehaviour, firmwareKey, suggestGroupName,
+  endpointHasGroups, modeOptions, suggestMode, testInstruction, FLOW_CLUSTERS,
 } from "../src/group-flow.js";
 
 const rodret = [
@@ -118,5 +119,76 @@ describe("helpers", () => {
     expect(firmwareKey(null)).toBe("unknown");
     expect(suggestGroupName("Lounge", "Rodret")).toBe("Lounge lights");
     expect(suggestGroupName("No area", "Rodret")).toBe("Rodret lights");
+  });
+});
+
+describe("groups support and direct/group choice", () => {
+  const withGroups = [{ id: 4, endpoint_id: 1, type: "in" }, { id: 6, endpoint_id: 1, type: "in" }];
+  const noGroups = [{ id: 6, endpoint_id: 1, type: "in" }, { id: 4, endpoint_id: 2, type: "in" }];
+  const CL = { g: withGroups, n: noGroups };
+  const devices = [{ ieee: "g", name: "Relay" }, { ieee: "n", name: "ZBMINIL2" }];
+  const t = (name, groupable = true) => ({ ieee: name, endpoint: 1, name, groupable });
+
+  it("flags endpoints without the Groups cluster (on the same endpoint)", () => {
+    expect(endpointHasGroups(withGroups, 1)).toBe(true);
+    expect(endpointHasGroups(noGroups, 1)).toBe(false);
+    const c = candidateTargets({ devices, clustersFor: (i) => CL[i], sourceIeee: "r", clusterIds: [6] });
+    expect(c.map((x) => [x.name, x.groupable])).toEqual([["Relay", true], ["ZBMINIL2", false]]);
+  });
+
+  it("blocks a group when a selected light can't join one, never blocks direct", () => {
+    const o = modeOptions([t("A"), t("Spots", false)]);
+    expect(o.group.ok).toBe(false);
+    expect(o.group.blocked).toEqual(["Spots"]);
+    expect(o.direct.ok).toBe(true);
+    expect(o.direct.warning).toBe("");
+  });
+
+  it("warns, but still allows, direct binding above the soft limit (#384)", () => {
+    const five = ["A", "B", "C", "D", "E"].map((n) => t(n));
+    const o = modeOptions(five, { clusterCount: 2 });
+    expect(o.direct.ok).toBe(true);
+    expect(o.direct.warning).toMatch(/about 10 binding-table slots/);
+  });
+
+  it("suggests direct for one light, group for several", () => {
+    expect(suggestMode([t("A")])).toBe("direct");
+    expect(suggestMode([t("A"), t("B")])).toBe("group");
+    expect(suggestMode(["A", "B", "C", "D", "E"].map((n) => t(n)))).toBe("group");
+  });
+
+  it("suggests direct when a light can't join groups, whatever the count", () => {
+    expect(suggestMode([t("A"), t("B"), t("Spots", false)])).toBe("direct");
+  });
+
+  it("follows what other users reported", () => {
+    const bad = { state: "problems" };
+    const five = ["A", "B", "C", "D", "E"].map((n) => t(n));
+    // IKEA on/off switch: groups rejected -> direct, even for 5 lights (#384)
+    expect(suggestMode(five, { groupKnown: bad })).toBe("direct");
+    // Repenic rocker: direct stored but ignored -> group, even for one light
+    expect(suggestMode([t("A")], { directKnown: bad })).toBe("group");
+  });
+});
+
+describe("blinds (zigbee-capabilities#387)", () => {
+  const openClose = [{ id: 0, endpoint_id: 1, type: "in" }, { id: 0x0102, endpoint_id: 1, type: "out" }, { id: 0x0019, endpoint_id: 1, type: "out" }];
+  const blind = [{ id: 4, endpoint_id: 1, type: "in" }, { id: 0x0102, endpoint_id: 1, type: "in" }];
+  it("treats a Window Covering remote as a controller and a blind as a target", () => {
+    expect(FLOW_CLUSTERS).toContain(0x0102);
+    expect(controllerEndpoints(openClose)).toEqual([{ endpoint: 1, clusters: [0x0102] }]);
+    const c = candidateTargets({
+      devices: [{ ieee: "b", name: "Blind" }],
+      clustersFor: () => blind,
+      sourceIeee: "r",
+      clusterIds: [0x0102],
+    });
+    expect(c).toEqual([{ ieee: "b", endpoint: 1, name: "Blind", clusters: [0x0102], groupable: true }]);
+  });
+  it("asks for the right buttons in the test", () => {
+    expect(testInstruction([6, 8])).toBe("Press on/off, then hold to dim");
+    expect(testInstruction([6])).toBe("Press on/off");
+    expect(testInstruction([0x0102])).toBe("Press open, then close");
+    expect(testInstruction(new Set([6, 0x0102]))).toBe("Press on/off and press open/close");
   });
 });

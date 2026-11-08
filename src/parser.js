@@ -52,6 +52,25 @@ export function bindingMatches(b, sourceIeee, sourceEp, clusterId, target) {
   return !b.isGroup && normIeee(b.targetIeee) === normIeee(target.ieee) && Number(b.targetEndpoint) === Number(target.endpoint);
 }
 
+/** Like bindingMatches, but any of `sourceEp`, `clusterIds` (array) and the
+ *  target's `endpoint` may be null/empty to mean "any". Used to check an
+ *  Advanced-tab bind where zha_toolkit picked endpoints or default clusters
+ *  itself (zigbee-capabilities#387). */
+export function bindingMatchesLoose(b, { sourceIeee, sourceEp = null, clusterIds = null, target }) {
+  if (normIeee(b.sourceIeee) !== normIeee(sourceIeee)) return false;
+  if (sourceEp != null && Number(b.sourceEndpoint) !== Number(sourceEp)) return false;
+  if (clusterIds && clusterIds.length && !clusterIds.map(Number).includes(Number(b.clusterId))) return false;
+  if (target.isGroup) return b.isGroup && Number(b.groupId) === Number(target.groupId);
+  if (b.isGroup || normIeee(b.targetIeee) !== normIeee(target.ieee)) return false;
+  return target.endpoint == null || Number(b.targetEndpoint) === Number(target.endpoint);
+}
+
+/** Stable key for one binding, for before/after comparisons. */
+export function bindingKey(b) {
+  const dst = b.isGroup ? `g${Number(b.groupId)}` : `${normIeee(b.targetIeee)}:${Number(b.targetEndpoint)}`;
+  return `${normIeee(b.sourceIeee)}|${Number(b.sourceEndpoint)}|${Number(b.clusterId)}|${dst}`;
+}
+
 /** Converts a Zigbee IEEE address serialized as an array of 8 decimal bytes
  *  in little-endian (wire) order — e.g. [255,255,21,126,16,56,193,164] — into
  *  the standard colon-hex string (e.g. "a4:c1:38:10:7e:15:ff:ff") that

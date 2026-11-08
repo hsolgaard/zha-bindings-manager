@@ -192,3 +192,32 @@ describe("blinds (zigbee-capabilities#387)", () => {
     expect(testInstruction(new Set([6, 0x0102]))).toBe("Press on/off and press open/close");
   });
 });
+
+describe("community reports per cluster (#387)", () => {
+  const doc = {
+    "ikea/open-close": {
+      group_binding: {
+        counts: { stored_ignored: 1, works: 1 },
+        by_firmware: { "24.4.6": { stored_ignored: 1, works: 1 } },
+        by_clusters: {
+          "0x0008": { counts: { stored_ignored: 1 }, by_firmware: { "24.4.6": { stored_ignored: 1 } } },
+          "0x0006,0x0102": { counts: { works: 1 }, by_firmware: { "24.4.6": { works: 1 } } },
+        },
+      },
+    },
+    "old/remote": { group_binding: { counts: { works: 2 }, by_firmware: {} } },
+  };
+  const fw = { sw_build_id: "24.4.6" };
+  it("only counts reports that bound one of the clusters", () => {
+    expect(knownBehaviour(doc, "ikea/open-close", "group_binding", fw, [0x0102]).state).toBe("works");
+    expect(knownBehaviour(doc, "ikea/open-close", "group_binding", fw, [0x0008]).state).toBe("problems");
+    expect(knownBehaviour(doc, "ikea/open-close", "group_binding", fw, [0x0300]).state).toBe("unknown");
+  });
+  it("counts each report once even when it matches several clusters", () => {
+    expect(knownBehaviour(doc, "ikea/open-close", "group_binding", fw, [0x0006, 0x0102]).total).toBe(1);
+  });
+  it("falls back to all reports without clusters or by_clusters", () => {
+    expect(knownBehaviour(doc, "ikea/open-close", "group_binding", fw).state).toBe("mixed");
+    expect(knownBehaviour(doc, "old/remote", "group_binding", null, [6]).state).toBe("works");
+  });
+});

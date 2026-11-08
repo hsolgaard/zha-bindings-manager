@@ -3,6 +3,18 @@
 All notable changes to ZHA Bindings Manager are documented here.
 
 
+## [1.6.1]
+
+### Fixed
+
+- **What other users found now only counts reports for the clusters you're binding.** The guided setup's hints
+  and suggestion counted every report for a remote, whatever it was bound for. So, for example, earlier reports
+  that bound an IKEA TRÅDFRI open/close remote's Level Control to lights (stored but ignored, since it doesn't
+  send Level Control) also warned against setting it up with a blind. Reports are now matched on the clusters
+  being bound, and the hint updates when you change the clusters on the review step. Needs the updated
+  zigbee-capabilities index; with an older one, all reports still count. Thanks to HarvsG
+  (zigbee-capabilities#387).
+
 ## [1.6.0]
 
 ### Added

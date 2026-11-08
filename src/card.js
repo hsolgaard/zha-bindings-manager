@@ -3438,8 +3438,9 @@ export class ZhaBindingMapCard extends HTMLElement {
       // (Groups tab "Add a remote…") means group.
       mode: groupId != null ? "group" : "direct",
       modeTouched: groupId != null,
-      knownGroup: null,
-      knownDirect: null,
+      // data/behaviour.json once loaded (null if it couldn't be); what other
+      // users found is worked out from it for the clusters being bound.
+      behaviourDoc: undefined,
       groupName: suggestGroupName(this._areaName(source.area_id), this._deviceLabel(source)),
       clustersChosen: null,
       known: null,
@@ -3514,7 +3515,10 @@ export class ZhaBindingMapCard extends HTMLElement {
   _flowAutoMode() {
     const f = this._flow;
     if (!f || f.modeTouched) return;
-    f.mode = suggestMode(this._flowTargets(), { groupKnown: f.knownGroup, directKnown: f.knownDirect });
+    f.mode = suggestMode(this._flowTargets(), {
+      groupKnown: this._flowKnownFor("group_binding"),
+      directKnown: this._flowKnownFor("direct_binding"),
+    });
   }
 
   _flowModeOptions() {
@@ -3526,7 +3530,17 @@ export class ZhaBindingMapCard extends HTMLElement {
   /** What other users reported for the way of binding currently chosen. */
   _flowKnown() {
     const f = this._flow;
-    return f ? (f.mode === "direct" ? f.knownDirect : f.knownGroup) : null;
+    return f ? this._flowKnownFor(f.mode === "direct" ? "direct_binding" : "group_binding") : null;
+  }
+
+  /** Community reports for this remote and `behaviour`, counting only
+   *  reports for the clusters about to be bound (chosen on the review step,
+   *  else everything the chosen endpoint sends). Null until loaded. */
+  _flowKnownFor(behaviour) {
+    const f = this._flow;
+    if (!f || f.behaviourDoc === undefined) return null;
+    const clusters = f.clustersChosen && f.clustersChosen.size ? [...f.clustersChosen] : this._flowSourceClusters();
+    return knownBehaviour(f.behaviourDoc, this._flowSlugKey(), behaviour, this._flowFirmware(), clusters);
   }
 
   /** "How should it control them?" — shared by the Choose devices and Review steps. */
@@ -3539,7 +3553,7 @@ export class ZhaBindingMapCard extends HTMLElement {
     const notes = [];
     if (f.mode === "direct" && opts.direct.warning) notes.push(opts.direct.warning);
     if (!opts.group.ok) notes.push(opts.group.reason);
-    for (const [label, k] of [["Directly", f.knownDirect], ["Through a group", f.knownGroup]]) {
+    for (const [label, k] of [["Directly", this._flowKnownFor("direct_binding")], ["Through a group", this._flowKnownFor("group_binding")]]) {
       if (k && k.state !== "unknown") notes.push(`${label}: ${k.text}`);
     }
     return `<fieldset class="flow-mode"><legend>How should it control them?</legend>
@@ -3608,9 +3622,7 @@ export class ZhaBindingMapCard extends HTMLElement {
       flow.knownError = e.message || String(e);
     }
     if (this._flow !== flow) return;
-    const fw = this._flowFirmware();
-    flow.knownGroup = knownBehaviour(doc, this._flowSlugKey(), "group_binding", fw);
-    flow.knownDirect = knownBehaviour(doc, this._flowSlugKey(), "direct_binding", fw);
+    flow.behaviourDoc = doc;
     // Suggest the way other users found works (e.g. a remote that only sends
     // to groups), unless the user already picked one.
     this._flowAutoMode();
@@ -3946,7 +3958,7 @@ export class ZhaBindingMapCard extends HTMLElement {
       f.step = "plan";
       f.clustersChosen = null;
       this._renderGroupFlow();
-      if (!f.knownGroup) this._flowLoadKnown();
+      if (f.behaviourDoc === undefined) this._flowLoadKnown();
     });
     on("#flow-back-remote", "click", () => {
       const ieee = f.sourceIeee;
@@ -3978,8 +3990,8 @@ export class ZhaBindingMapCard extends HTMLElement {
         const id = Number(cb.dataset.flowCluster);
         if (cb.checked) f.clustersChosen.add(id);
         else f.clustersChosen.delete(id);
-        const btn = this._q("#flow-run");
-        if (btn) btn.disabled = !f.clustersChosen.size;
+        // What other users found depends on the clusters bound.
+        this._renderGroupFlow();
       })
     );
     const pit = this._q(".flow-pitfalls");

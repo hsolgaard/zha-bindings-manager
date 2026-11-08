@@ -21,7 +21,7 @@
  * zha_toolkit MUST be installed (via HACS) and working for bind/unbind/scan
  * to function. See README.md for details.
  *
- * Version: 1.6.0
+ * Version: 1.6.1
  */
 (() => {
   // src/capexplorer-constants.js
@@ -78,7 +78,7 @@
 
   // src/constants.js
   var ZTK_DOMAIN = "zha_toolkit";
-  var CARD_VERSION = "1.6.0";
+  var CARD_VERSION = "1.6.1";
   var CHANGELOG_URL = "https://github.com/hsolgaard/zha-bindings-manager/blob/main/CHANGELOG.md";
   var DEFAULT_BINDABLE_OUT_CLUSTERS = [5, 6, 8, 258, 768];
   var MEMBERSHIP_EDGE_COLOR = "#8e24aa";
@@ -1813,6 +1813,20 @@
       provenance: { submitted_at: (now || /* @__PURE__ */ new Date()).toISOString() }
     };
   }
+  function reportsForClusters(byClusters, clusterIds) {
+    const want = new Set([...clusterIds].map(hex));
+    let out = null;
+    for (const [key, group] of Object.entries(byClusters || {})) {
+      if (!key.split(",").some((c) => want.has(c.trim().toLowerCase()))) continue;
+      out = out || { counts: {}, by_firmware: {} };
+      for (const [r, n] of Object.entries(group.counts || {})) out.counts[r] = (out.counts[r] || 0) + n;
+      for (const [fw, counts] of Object.entries(group.by_firmware || {})) {
+        const t = out.by_firmware[fw] = out.by_firmware[fw] || {};
+        for (const [r, n] of Object.entries(counts)) t[r] = (t[r] || 0) + n;
+      }
+    }
+    return out;
+  }
   var RESULT_TEXT = {
     works: "works",
     partial: "works for some lights",
@@ -1822,8 +1836,11 @@
   function firmwareKey(fw) {
     return fw && (fw.sw_build_id || fw.registry_sw_version) || "unknown";
   }
-  function knownBehaviour(doc, slugKey, behaviour, firmware) {
-    const entry = doc && doc[slugKey] && doc[slugKey][behaviour];
+  function knownBehaviour(doc, slugKey, behaviour, firmware, clusterIds = null) {
+    let entry = doc && doc[slugKey] && doc[slugKey][behaviour];
+    if (entry && entry.by_clusters && clusterIds && [...clusterIds].length) {
+      entry = reportsForClusters(entry.by_clusters, clusterIds);
+    }
     if (!entry || !entry.counts) {
       return {
         state: "unknown",
@@ -6317,8 +6334,9 @@ a.btn { display:inline-block; text-decoration:none; }
         // (Groups tab "Add a remote…") means group.
         mode: groupId != null ? "group" : "direct",
         modeTouched: groupId != null,
-        knownGroup: null,
-        knownDirect: null,
+        // data/behaviour.json once loaded (null if it couldn't be); what other
+        // users found is worked out from it for the clusters being bound.
+        behaviourDoc: void 0,
         groupName: suggestGroupName(this._areaName(source.area_id), this._deviceLabel(source)),
         clustersChosen: null,
         known: null,
@@ -6384,7 +6402,10 @@ a.btn { display:inline-block; text-decoration:none; }
     _flowAutoMode() {
       const f = this._flow;
       if (!f || f.modeTouched) return;
-      f.mode = suggestMode(this._flowTargets(), { groupKnown: f.knownGroup, directKnown: f.knownDirect });
+      f.mode = suggestMode(this._flowTargets(), {
+        groupKnown: this._flowKnownFor("group_binding"),
+        directKnown: this._flowKnownFor("direct_binding")
+      });
     }
     _flowModeOptions() {
       const f = this._flow;
@@ -6394,7 +6415,16 @@ a.btn { display:inline-block; text-decoration:none; }
     /** What other users reported for the way of binding currently chosen. */
     _flowKnown() {
       const f = this._flow;
-      return f ? f.mode === "direct" ? f.knownDirect : f.knownGroup : null;
+      return f ? this._flowKnownFor(f.mode === "direct" ? "direct_binding" : "group_binding") : null;
+    }
+    /** Community reports for this remote and `behaviour`, counting only
+     *  reports for the clusters about to be bound (chosen on the review step,
+     *  else everything the chosen endpoint sends). Null until loaded. */
+    _flowKnownFor(behaviour) {
+      const f = this._flow;
+      if (!f || f.behaviourDoc === void 0) return null;
+      const clusters = f.clustersChosen && f.clustersChosen.size ? [...f.clustersChosen] : this._flowSourceClusters();
+      return knownBehaviour(f.behaviourDoc, this._flowSlugKey(), behaviour, this._flowFirmware(), clusters);
     }
     /** "How should it control them?" — shared by the Choose devices and Review steps. */
     _flowModeHtml() {
@@ -6406,7 +6436,7 @@ a.btn { display:inline-block; text-decoration:none; }
       const notes = [];
       if (f.mode === "direct" && opts.direct.warning) notes.push(opts.direct.warning);
       if (!opts.group.ok) notes.push(opts.group.reason);
-      for (const [label, k] of [["Directly", f.knownDirect], ["Through a group", f.knownGroup]]) {
+      for (const [label, k] of [["Directly", this._flowKnownFor("direct_binding")], ["Through a group", this._flowKnownFor("group_binding")]]) {
         if (k && k.state !== "unknown") notes.push(`${label}: ${k.text}`);
       }
       return `<fieldset class="flow-mode"><legend>How should it control them?</legend>
@@ -6467,9 +6497,7 @@ a.btn { display:inline-block; text-decoration:none; }
         flow.knownError = e.message || String(e);
       }
       if (this._flow !== flow) return;
-      const fw = this._flowFirmware();
-      flow.knownGroup = knownBehaviour(doc, this._flowSlugKey(), "group_binding", fw);
-      flow.knownDirect = knownBehaviour(doc, this._flowSlugKey(), "direct_binding", fw);
+      flow.behaviourDoc = doc;
       this._flowAutoMode();
       this._renderGroupFlow();
     }
@@ -6737,7 +6765,7 @@ a.btn { display:inline-block; text-decoration:none; }
         f.step = "plan";
         f.clustersChosen = null;
         this._renderGroupFlow();
-        if (!f.knownGroup) this._flowLoadKnown();
+        if (f.behaviourDoc === void 0) this._flowLoadKnown();
       });
       on("#flow-back-remote", "click", () => {
         const ieee = f.sourceIeee;
@@ -6769,8 +6797,7 @@ a.btn { display:inline-block; text-decoration:none; }
           const id = Number(cb.dataset.flowCluster);
           if (cb.checked) f.clustersChosen.add(id);
           else f.clustersChosen.delete(id);
-          const btn = this._q("#flow-run");
-          if (btn) btn.disabled = !f.clustersChosen.size;
+          this._renderGroupFlow();
         })
       );
       const pit = this._q(".flow-pitfalls");

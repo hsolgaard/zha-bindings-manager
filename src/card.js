@@ -37,7 +37,7 @@ import {
   downloadFile,
 } from "./utils.js";
 import { bindingMatches, bindingMatchesLoose, bindingKey, isIeee, sanitizeStoredBindings } from "./parser.js";
-import { activityRows, interestingCounters, timesTypical, TOP_ROWS } from "./activity.js";
+import { activityRows, clusterLabel, interestingCounters, timesTypical, TOP_ROWS } from "./activity.js";
 import { ZhaApi } from "./api-client.js";
 import { SHELL_HTML } from "./template.js";
 import { LocalStorageProvider } from "./storage/local-storage-provider.js";
@@ -4838,25 +4838,20 @@ export class ZhaBindingMapCard extends HTMLElement {
       const d = this._devices.find((x) => normIeee(x.ieee) === ieee);
       return d ? this._deviceLabel(d) : ieee;
     };
-    const head = `<div class="drawer-section-title activity-head">Messages to Home Assistant
-        <button class="btn btn-small" id="activity-refresh" ${this._activityLoading ? "disabled" : ""}>${this._activityLoading ? "Loading…" : "Refresh"}</button></div>`;
-    if (this._activityError && !this._activity) {
-      el.innerHTML = `${head}<p class="muted">Couldn't load the message counts: ${escapeHtml(this._activityError)}</p>`;
-      this._wireActivity();
-      return;
-    }
+    const refresh = `<button class="btn btn-small" id="activity-refresh" ${this._activityLoading ? "disabled" : ""}>${this._activityLoading ? "Loading…" : "Refresh"}</button>`;
     if (!this._activity) {
-      el.innerHTML = `${head}<p class="muted">Loading…</p>`;
+      const msg = this._activityError ? `couldn't load the counts (${escapeHtml(this._activityError)})` : "loading…";
+      el.innerHTML = `<div class="activity-summary-line"><strong>Messages to Home Assistant:</strong> <span class="muted">${msg}</span> ${refresh}</div>`;
+      this._wireActivity();
       return;
     }
     const snap = this._activity;
     const { rows, chatty, fromCoordinator } = activityRows(snap, { coordinatorIeee: this._coordinatorIeee() });
     const since = snap.since ? new Date(snap.since) : null;
-    const hex = (n) => (n == null ? "" : `0x${Number(n).toString(16).padStart(4, "0")}`);
-    const clusterText = (r) => r.clusters.slice(0, 3).map(([id, n]) => `${clusterName(Number(id))} ${n}`).join(", ");
+    const clusterText = (r, n = 2) => r.clusters.slice(0, n).map(([id, c]) => `${clusterLabel(Number(id))} ${c}`).join(", ");
     const alerts = [];
     if (fromCoordinator) {
-      alerts.push(`<li class="mesh-tip-error"><strong>${fromCoordinator.hour} messages in the last hour claimed to come from the coordinator itself</strong> (${escapeHtml(hex(0))}).
+      alerts.push(`<li class="mesh-tip-error"><strong>${fromCoordinator.hour} messages in the last hour claimed to come from the coordinator itself</strong> (0x0000).
         The coordinator doesn't send to itself, so a device is probably using its network address. That can confuse or flood the whole network.
         If the Network scan flags a device using 0x0000, unplug it, then reset and pair it again.</li>`);
     }
@@ -4868,39 +4863,66 @@ export class ZhaBindingMapCard extends HTMLElement {
     if (!snap.attached) {
       alerts.push(`<li class="mesh-tip-warning">Not counting: ZHA isn't running, or the counter couldn't attach to it yet. It retries every minute.</li>`);
     }
+    const flagged = chatty.length + (fromCoordinator ? 1 : 0);
+    const busiest = rows[0];
+    const summary = flagged
+      ? `<span class="activity-alert">${flagged} ${flagged === 1 ? "problem" : "problems"} found</span>`
+      : !snap.attached
+      ? `<span class="muted">not counting</span>`
+      : busiest
+      ? `nothing stands out <span class="muted">· busiest: ${escapeHtml(nameOf(busiest.ieee))}, ${busiest.now} a minute</span>`
+      : `<span class="muted">no messages counted yet</span>`;
+    // Open when something's wrong; otherwise as the user last left it.
+    const open = alerts.length > 0 || !!this._activityOpen;
     const counters = interestingCounters(snap);
-    el.innerHTML = `${head}
-      <p class="hint">Messages ZHA received from each device, per minute. Only traffic that reaches the coordinator is counted, and counts restart with Home Assistant${
-        since ? ` (counting since ${escapeHtml(since.toLocaleString())})` : ""
-      }.</p>
-      ${alerts.length ? `<ul class="mesh-tips">${alerts.join("")}</ul>` : rows.length ? `<p class="muted">No device stands out.</p>` : ""}
-      ${
-        rows.length
-          ? `<table class="detail-table activity-table">
-              <tr><th>Device</th><th>Now /min</th><th>Last hour</th><th>Usual /min</th><th>Mostly</th></tr>
-              ${rows
-                .slice(0, TOP_ROWS)
-                .map(
-                  (r) => `<tr class="${r.chatty ? "activity-chatty" : ""}"><td><a href="#" class="src-link" data-activity-ieee="${escapeHtml(r.ieee)}">${escapeHtml(nameOf(r.ieee))}</a></td>
-                    <td>${r.now}</td><td>${r.hour}</td><td>${r.typical}</td><td class="muted">${escapeHtml(clusterText(r))}</td></tr>`
-                )
-                .join("")}
-            </table>`
-          : `<p class="muted">No messages counted yet.</p>`
-      }
-      ${
-        counters.length
-          ? `<details class="activity-counters"><summary>Coordinator counters (${counters.length})</summary>
-              <table class="detail-table">${counters.map((c) => `<tr><td>${escapeHtml(c.name)}</td><td>${Number(c.value)}</td></tr>`).join("")}</table>
-              <p class="hint">From the radio library; which counters exist depends on your adapter.</p></details>`
-          : ""
-      }`;
+    const usual = (r) => (r.typical == null ? "–" : r.typical);
+    el.innerHTML = `<details class="activity-details" ${open ? "open" : ""}>
+        <summary class="activity-summary-line"><strong>Messages to Home Assistant:</strong> ${summary} ${refresh}</summary>
+        <p class="hint">Messages ZHA received from each device. Only traffic that reaches the coordinator is counted, and counts restart with Home Assistant${
+          since ? ` (counting since ${escapeHtml(since.toLocaleString())})` : ""
+        }. "Usual" is the typical rate since then, shown after 10 minutes.</p>
+        ${alerts.length ? `<ul class="mesh-tips">${alerts.join("")}</ul>` : ""}
+        ${
+          rows.length
+            ? `<table class="detail-table activity-table">
+                <colgroup><col class="activity-col-name"><col class="activity-col-num"><col class="activity-col-num"><col class="activity-col-num"><col></colgroup>
+                <thead><tr><th>Device</th><th class="num">Now /min</th><th class="num">Last hour</th><th class="num">Usual /min</th><th>Mostly</th></tr></thead>
+                <tbody>${rows
+                  .slice(0, TOP_ROWS)
+                  .map(
+                    (r) => `<tr class="${r.chatty ? "activity-chatty" : ""}"><td><a href="#" class="src-link" data-activity-ieee="${escapeHtml(r.ieee)}">${escapeHtml(nameOf(r.ieee))}</a></td>
+                      <td class="num">${r.now}</td><td class="num">${r.hour}</td><td class="num">${usual(r)}</td><td class="muted">${escapeHtml(clusterText(r))}</td></tr>`
+                  )
+                  .join("")}</tbody>
+              </table>`
+            : ""
+        }
+        ${
+          counters.length
+            ? `<details class="activity-counters"><summary>Coordinator counters (${counters.length})</summary>
+                <table class="detail-table">${counters.map((c) => `<tr><td>${escapeHtml(c.name)}</td><td class="num">${Number(c.value)}</td></tr>`).join("")}</table>
+                <p class="hint">From the radio library; which counters exist depends on your adapter.</p></details>`
+            : ""
+        }
+      </details>`;
+    const det = el.querySelector(".activity-details");
+    if (det)
+      det.addEventListener("toggle", () => {
+        // Remember the user's choice, but not an automatic open for alerts.
+        if (!alerts.length) this._activityOpen = det.open;
+      });
     this._wireActivity();
   }
 
   _wireActivity() {
     const btn = this._q("#activity-refresh");
-    if (btn) btn.addEventListener("click", () => this._activityLoad(true));
+    if (btn)
+      btn.addEventListener("click", (e) => {
+        // The button sits in the <summary>: don't let it fold the section.
+        e.preventDefault();
+        e.stopPropagation();
+        this._activityLoad(true);
+      });
     this._qa("[data-activity-ieee]").forEach((a) =>
       a.addEventListener("click", (e) => {
         e.preventDefault();

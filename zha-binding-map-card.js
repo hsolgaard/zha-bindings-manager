@@ -21,7 +21,7 @@
  * zha_toolkit MUST be installed (via HACS) and working for bind/unbind/scan
  * to function. See README.md for details.
  *
- * Version: 1.7.0b1
+ * Version: 1.7.0b2
  */
 (() => {
   // src/capexplorer-constants.js
@@ -78,7 +78,7 @@
 
   // src/constants.js
   var ZTK_DOMAIN = "zha_toolkit";
-  var CARD_VERSION = "1.7.0b1";
+  var CARD_VERSION = "1.7.0b2";
   var CHANGELOG_URL = "https://github.com/hsolgaard/zha-bindings-manager/blob/main/CHANGELOG.md";
   var DEFAULT_BINDABLE_OUT_CLUSTERS = [5, 6, 8, 258, 768];
   var MEMBERSHIP_EDGE_COLOR = "#8e24aa";
@@ -686,6 +686,19 @@
   var CHATTY_FACTOR = 10;
   var FLOOD_RATE = 60;
   var TOP_ROWS = 8;
+  var MIN_MINUTES_FOR_USUAL = 10;
+  function clusterLabel(id) {
+    const n = Number(id);
+    if (n >= 64512) return `Manufacturer-specific (0x${n.toString(16).toUpperCase().padStart(4, "0")})`;
+    return clusterName(n);
+  }
+  function countedMinutes(snapshot, nowMs = Date.now()) {
+    const len = snapshot && snapshot.window_minutes || 60;
+    const since = snapshot && snapshot.since ? Date.parse(snapshot.since) : NaN;
+    if (!Number.isFinite(since)) return len;
+    const minutes = Math.floor(nowMs / 6e4) - Math.floor(since / 6e4) + 1;
+    return Math.max(1, Math.min(len, minutes));
+  }
   function median(values) {
     const v = [...values || []].sort((a, b) => a - b);
     if (!v.length) return 0;
@@ -693,19 +706,20 @@
     return v.length % 2 ? v[mid] : (v[mid - 1] + v[mid]) / 2;
   }
   var round1 = (n) => Math.round(n * 10) / 10;
-  function activityRows(snapshot, { coordinatorIeee = null } = {}) {
+  function activityRows(snapshot, { coordinatorIeee = null, nowMs = Date.now() } = {}) {
+    const counted = countedMinutes(snapshot, nowMs);
     const coord = normIeee(coordinatorIeee || snapshot && snapshot.coordinator_ieee || "");
     const rows = [];
     let fromCoordinator = null;
     for (const [ieee, d] of Object.entries(snapshot && snapshot.by_device || {})) {
       const pm = Array.isArray(d.per_minute) ? d.per_minute.map(Number) : [];
       if (!pm.length) continue;
-      const last5 = pm.slice(-5);
+      const last5 = pm.slice(-Math.min(5, counted));
       const now = round1(last5.reduce((a, b) => a + b, 0) / last5.length);
-      const hour = pm.reduce((a, b) => a + b, 0);
-      const typical = round1(median(pm));
+      const hour = Math.round(pm.reduce((a, b) => a + b, 0));
+      const typical = counted >= MIN_MINUTES_FOR_USUAL ? round1(median(pm.slice(-counted))) : null;
       const clusters = Object.entries(d.clusters || {}).map(([id, n]) => [id, Number(n)]).sort((a, b) => b[1] - a[1]);
-      const chatty = now >= CHATTY_MIN_RATE && (now >= CHATTY_FACTOR * Math.max(typical, 0.5) || now >= FLOOD_RATE);
+      const chatty = now >= CHATTY_MIN_RATE && (typical != null && now >= CHATTY_FACTOR * Math.max(typical, 0.5) || now >= FLOOD_RATE);
       const row = { ieee: normIeee(ieee), nwk: d.nwk, now, hour, typical, clusters, chatty };
       if (coord && row.ieee === coord) fromCoordinator = row;
       else rows.push(row);
@@ -714,7 +728,7 @@
     return { rows, chatty: rows.filter((r) => r.chatty), fromCoordinator };
   }
   function timesTypical(row) {
-    if (!row || row.typical <= 0) return "";
+    if (!row || row.typical == null || row.typical <= 0) return "";
     const x = row.now / row.typical;
     return x >= 2 ? `\xD7${Math.round(x)}` : "";
   }
@@ -1659,38 +1673,38 @@
   }
   var plural = (n, one, many) => `${n} ${n === 1 ? one : many}`;
   var list = (names) => names.join(", ");
-  function groupSupportSummary(res, clusterLabel, groupName) {
+  function groupSupportSummary(res, clusterLabel2, groupName) {
     if (!res.total) {
       return {
         level: "empty",
-        text: `${groupName} has no members yet, so nothing will act on ${clusterLabel} commands sent to it.`
+        text: `${groupName} has no members yet, so nothing will act on ${clusterLabel2} commands sent to it.`
       };
     }
     const known = res.supported.length + res.unsupported.length;
     const unknownNote = res.unknown.length ? ` Not checked yet: ${list(res.unknown)}.` : "";
     if (!known) {
-      return { level: "unknown", text: `Checking which devices in ${groupName} support ${clusterLabel}\u2026` };
+      return { level: "unknown", text: `Checking which devices in ${groupName} support ${clusterLabel2}\u2026` };
     }
     if (!res.unsupported.length) {
       return {
         level: "ok",
-        text: `${res.supported.length === res.total ? res.total === 1 ? "The device" : `All ${res.total} devices` : plural(res.supported.length, "device", "devices")} in ${groupName} support${res.supported.length === 1 ? "s" : ""} ${clusterLabel}.${unknownNote}`
+        text: `${res.supported.length === res.total ? res.total === 1 ? "The device" : `All ${res.total} devices` : plural(res.supported.length, "device", "devices")} in ${groupName} support${res.supported.length === 1 ? "s" : ""} ${clusterLabel2}.${unknownNote}`
       };
     }
     if (!res.supported.length) {
       return {
         level: "warning",
-        text: `No device in ${groupName} supports ${clusterLabel} (${list(res.unsupported)}). The binding can still be made, but nothing in the group will act on these commands.${unknownNote}`
+        text: `No device in ${groupName} supports ${clusterLabel2} (${list(res.unsupported)}). The binding can still be made, but nothing in the group will act on these commands.${unknownNote}`
       };
     }
     return {
       level: "info",
-      text: `${res.supported.length} of ${res.total} devices in ${groupName} support ${clusterLabel} (${list(
+      text: `${res.supported.length} of ${res.total} devices in ${groupName} support ${clusterLabel2} (${list(
         res.supported
       )}). Not supported: ${list(res.unsupported)}, which will ignore these commands.${unknownNote}`
     };
   }
-  function groupSupportHealth(res, clusterLabel, groupName) {
+  function groupSupportHealth(res, clusterLabel2, groupName) {
     if (!res.total) {
       return {
         level: "warning",
@@ -1705,17 +1719,17 @@
       return {
         level: "warning",
         code: "group_cluster_unsupported",
-        message: `No device in ${groupName} supports ${clusterLabel}.`,
-        why: `The source sends ${clusterLabel} commands to the group, but none of its members (${list(
+        message: `No device in ${groupName} supports ${clusterLabel2}.`,
+        why: `The source sends ${clusterLabel2} commands to the group, but none of its members (${list(
           res.unsupported
         )}) can act on them. The binding is valid but does nothing, and it uses one of the source's binding-table slots.`,
-        recommendation: `Remove this binding, or add a device that supports ${clusterLabel} to the group.`
+        recommendation: `Remove this binding, or add a device that supports ${clusterLabel2} to the group.`
       };
     }
     return {
       level: "info",
       code: "group_cluster_partial",
-      message: `${res.supported.length} of ${res.total} devices in ${groupName} support ${clusterLabel}.`,
+      message: `${res.supported.length} of ${res.total} devices in ${groupName} support ${clusterLabel2}.`,
       why: `Not supported: ${list(res.unsupported)}. Those devices ignore these commands, while the others act on them.`,
       recommendation: null
     };
@@ -2306,11 +2320,29 @@ a.btn { display:inline-block; text-decoration:none; }
 .mesh-kids { fill: var(--secondary-text-color); font-weight:600; }
 .mesh-legend { display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-top:6px; font-size:0.85em; }
 .mesh-tips { padding-left:18px; margin:0 0 12px; }
-.activity-section { margin: 0 0 16px; }
-.activity-head { display:flex; align-items:center; gap:8px; }
-.activity-table th { text-align:left; font-weight:600; }
+.activity-section { margin: 4px 0 12px; }
+.activity-summary-line { display:flex; flex-wrap:wrap; align-items:center; gap:6px 8px; cursor:pointer; padding:6px 0; }
+.activity-details > summary { list-style:none; }
+.activity-details > summary::-webkit-details-marker { display:none; }
+.activity-details > summary::before { content:"\u25B8"; display:inline-block; width:1em; transition: transform .15s; }
+.activity-details[open] > summary::before { transform: rotate(90deg); }
+.activity-alert { color: var(--error-color, #c62828); font-weight:600; }
+.activity-table { width:100%; max-width:900px; border-collapse:collapse; table-layout:fixed; }
+.activity-table th, .activity-table td { padding:4px 8px; text-align:left; vertical-align:top; overflow:hidden; text-overflow:ellipsis; }
+.activity-table th { font-weight:600; white-space:nowrap; }
+.activity-table .num { text-align:right; font-variant-numeric: tabular-nums; }
+.activity-table .activity-col-name { width:32%; }
+.activity-table .activity-col-num { width:11%; }
 .activity-table tr.activity-chatty td { color: var(--error-color, #c62828); }
 .activity-counters { margin-top:8px; }
+.activity-counters .num { text-align:right; font-variant-numeric: tabular-nums; }
+@media (max-width: 600px) {
+  .activity-table .activity-col-name { width:46%; }
+  .activity-table .activity-col-num { width:18%; }
+  .activity-table th { white-space:normal; font-size:0.9em; }
+  .activity-table th, .activity-table td { padding:4px 4px; }
+  .activity-table th:nth-child(5), .activity-table td:nth-child(5) { display:none; }
+}
 .mesh-tips li { margin-bottom:6px; }
 .mesh-tip-error { color: var(--error-color, #db4437); font-weight: 500; }
 .mesh-tip-warning { color: var(--primary-text-color); }
@@ -7601,25 +7633,20 @@ a.btn { display:inline-block; text-decoration:none; }
         const d = this._devices.find((x) => normIeee(x.ieee) === ieee);
         return d ? this._deviceLabel(d) : ieee;
       };
-      const head = `<div class="drawer-section-title activity-head">Messages to Home Assistant
-        <button class="btn btn-small" id="activity-refresh" ${this._activityLoading ? "disabled" : ""}>${this._activityLoading ? "Loading\u2026" : "Refresh"}</button></div>`;
-      if (this._activityError && !this._activity) {
-        el.innerHTML = `${head}<p class="muted">Couldn't load the message counts: ${escapeHtml(this._activityError)}</p>`;
-        this._wireActivity();
-        return;
-      }
+      const refresh = `<button class="btn btn-small" id="activity-refresh" ${this._activityLoading ? "disabled" : ""}>${this._activityLoading ? "Loading\u2026" : "Refresh"}</button>`;
       if (!this._activity) {
-        el.innerHTML = `${head}<p class="muted">Loading\u2026</p>`;
+        const msg = this._activityError ? `couldn't load the counts (${escapeHtml(this._activityError)})` : "loading\u2026";
+        el.innerHTML = `<div class="activity-summary-line"><strong>Messages to Home Assistant:</strong> <span class="muted">${msg}</span> ${refresh}</div>`;
+        this._wireActivity();
         return;
       }
       const snap = this._activity;
       const { rows, chatty, fromCoordinator } = activityRows(snap, { coordinatorIeee: this._coordinatorIeee() });
       const since = snap.since ? new Date(snap.since) : null;
-      const hex2 = (n) => n == null ? "" : `0x${Number(n).toString(16).padStart(4, "0")}`;
-      const clusterText = (r) => r.clusters.slice(0, 3).map(([id, n]) => `${clusterName(Number(id))} ${n}`).join(", ");
+      const clusterText = (r, n = 2) => r.clusters.slice(0, n).map(([id, c]) => `${clusterLabel(Number(id))} ${c}`).join(", ");
       const alerts = [];
       if (fromCoordinator) {
-        alerts.push(`<li class="mesh-tip-error"><strong>${fromCoordinator.hour} messages in the last hour claimed to come from the coordinator itself</strong> (${escapeHtml(hex2(0))}).
+        alerts.push(`<li class="mesh-tip-error"><strong>${fromCoordinator.hour} messages in the last hour claimed to come from the coordinator itself</strong> (0x0000).
         The coordinator doesn't send to itself, so a device is probably using its network address. That can confuse or flood the whole network.
         If the Network scan flags a device using 0x0000, unplug it, then reset and pair it again.</li>`);
       }
@@ -7631,25 +7658,43 @@ a.btn { display:inline-block; text-decoration:none; }
       if (!snap.attached) {
         alerts.push(`<li class="mesh-tip-warning">Not counting: ZHA isn't running, or the counter couldn't attach to it yet. It retries every minute.</li>`);
       }
+      const flagged = chatty.length + (fromCoordinator ? 1 : 0);
+      const busiest = rows[0];
+      const summary = flagged ? `<span class="activity-alert">${flagged} ${flagged === 1 ? "problem" : "problems"} found</span>` : !snap.attached ? `<span class="muted">not counting</span>` : busiest ? `nothing stands out <span class="muted">\xB7 busiest: ${escapeHtml(nameOf(busiest.ieee))}, ${busiest.now} a minute</span>` : `<span class="muted">no messages counted yet</span>`;
+      const open = alerts.length > 0 || !!this._activityOpen;
       const counters = interestingCounters(snap);
-      el.innerHTML = `${head}
-      <p class="hint">Messages ZHA received from each device, per minute. Only traffic that reaches the coordinator is counted, and counts restart with Home Assistant${since ? ` (counting since ${escapeHtml(since.toLocaleString())})` : ""}.</p>
-      ${alerts.length ? `<ul class="mesh-tips">${alerts.join("")}</ul>` : rows.length ? `<p class="muted">No device stands out.</p>` : ""}
-      ${rows.length ? `<table class="detail-table activity-table">
-              <tr><th>Device</th><th>Now /min</th><th>Last hour</th><th>Usual /min</th><th>Mostly</th></tr>
-              ${rows.slice(0, TOP_ROWS).map(
+      const usual = (r) => r.typical == null ? "\u2013" : r.typical;
+      el.innerHTML = `<details class="activity-details" ${open ? "open" : ""}>
+        <summary class="activity-summary-line"><strong>Messages to Home Assistant:</strong> ${summary} ${refresh}</summary>
+        <p class="hint">Messages ZHA received from each device. Only traffic that reaches the coordinator is counted, and counts restart with Home Assistant${since ? ` (counting since ${escapeHtml(since.toLocaleString())})` : ""}. "Usual" is the typical rate since then, shown after 10 minutes.</p>
+        ${alerts.length ? `<ul class="mesh-tips">${alerts.join("")}</ul>` : ""}
+        ${rows.length ? `<table class="detail-table activity-table">
+                <colgroup><col class="activity-col-name"><col class="activity-col-num"><col class="activity-col-num"><col class="activity-col-num"><col></colgroup>
+                <thead><tr><th>Device</th><th class="num">Now /min</th><th class="num">Last hour</th><th class="num">Usual /min</th><th>Mostly</th></tr></thead>
+                <tbody>${rows.slice(0, TOP_ROWS).map(
         (r) => `<tr class="${r.chatty ? "activity-chatty" : ""}"><td><a href="#" class="src-link" data-activity-ieee="${escapeHtml(r.ieee)}">${escapeHtml(nameOf(r.ieee))}</a></td>
-                    <td>${r.now}</td><td>${r.hour}</td><td>${r.typical}</td><td class="muted">${escapeHtml(clusterText(r))}</td></tr>`
-      ).join("")}
-            </table>` : `<p class="muted">No messages counted yet.</p>`}
-      ${counters.length ? `<details class="activity-counters"><summary>Coordinator counters (${counters.length})</summary>
-              <table class="detail-table">${counters.map((c) => `<tr><td>${escapeHtml(c.name)}</td><td>${Number(c.value)}</td></tr>`).join("")}</table>
-              <p class="hint">From the radio library; which counters exist depends on your adapter.</p></details>` : ""}`;
+                      <td class="num">${r.now}</td><td class="num">${r.hour}</td><td class="num">${usual(r)}</td><td class="muted">${escapeHtml(clusterText(r))}</td></tr>`
+      ).join("")}</tbody>
+              </table>` : ""}
+        ${counters.length ? `<details class="activity-counters"><summary>Coordinator counters (${counters.length})</summary>
+                <table class="detail-table">${counters.map((c) => `<tr><td>${escapeHtml(c.name)}</td><td class="num">${Number(c.value)}</td></tr>`).join("")}</table>
+                <p class="hint">From the radio library; which counters exist depends on your adapter.</p></details>` : ""}
+      </details>`;
+      const det = el.querySelector(".activity-details");
+      if (det)
+        det.addEventListener("toggle", () => {
+          if (!alerts.length) this._activityOpen = det.open;
+        });
       this._wireActivity();
     }
     _wireActivity() {
       const btn = this._q("#activity-refresh");
-      if (btn) btn.addEventListener("click", () => this._activityLoad(true));
+      if (btn)
+        btn.addEventListener("click", (e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          this._activityLoad(true);
+        });
       this._qa("[data-activity-ieee]").forEach(
         (a) => a.addEventListener("click", (e) => {
           e.preventDefault();

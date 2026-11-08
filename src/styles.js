@@ -336,11 +336,29 @@ a.btn { display:inline-block; text-decoration:none; }
 .mesh-kids { fill: var(--secondary-text-color); font-weight:600; }
 .mesh-legend { display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-top:6px; font-size:0.85em; }
 .mesh-tips { padding-left:18px; margin:0 0 12px; }
-.activity-section { margin: 0 0 16px; }
-.activity-head { display:flex; align-items:center; gap:8px; }
-.activity-table th { text-align:left; font-weight:600; }
+.activity-section { margin: 4px 0 12px; }
+.activity-summary-line { display:flex; flex-wrap:wrap; align-items:center; gap:6px 8px; cursor:pointer; padding:6px 0; }
+.activity-details > summary { list-style:none; }
+.activity-details > summary::-webkit-details-marker { display:none; }
+.activity-details > summary::before { content:"▸"; display:inline-block; width:1em; transition: transform .15s; }
+.activity-details[open] > summary::before { transform: rotate(90deg); }
+.activity-alert { color: var(--error-color, #c62828); font-weight:600; }
+.activity-table { width:100%; max-width:900px; border-collapse:collapse; table-layout:fixed; }
+.activity-table th, .activity-table td { padding:4px 8px; text-align:left; vertical-align:top; overflow:hidden; text-overflow:ellipsis; }
+.activity-table th { font-weight:600; white-space:nowrap; }
+.activity-table .num { text-align:right; font-variant-numeric: tabular-nums; }
+.activity-table .activity-col-name { width:32%; }
+.activity-table .activity-col-num { width:11%; }
 .activity-table tr.activity-chatty td { color: var(--error-color, #c62828); }
 .activity-counters { margin-top:8px; }
+.activity-counters .num { text-align:right; font-variant-numeric: tabular-nums; }
+@media (max-width: 600px) {
+  .activity-table .activity-col-name { width:46%; }
+  .activity-table .activity-col-num { width:18%; }
+  .activity-table th { white-space:normal; font-size:0.9em; }
+  .activity-table th, .activity-table td { padding:4px 4px; }
+  .activity-table th:nth-child(5), .activity-table td:nth-child(5) { display:none; }
+}
 .mesh-tips li { margin-bottom:6px; }
 .mesh-tip-error { color: var(--error-color, #db4437); font-weight: 500; }
 .mesh-tip-warning { color: var(--primary-text-color); }

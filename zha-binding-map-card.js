@@ -21,7 +21,7 @@
  * zha_toolkit MUST be installed (via HACS) and working for bind/unbind/scan
  * to function. See README.md for details.
  *
- * Version: 1.9.0b1
+ * Version: 1.9.0b2
  */
 (() => {
   // src/capexplorer-constants.js
@@ -78,7 +78,7 @@
 
   // src/constants.js
   var ZTK_DOMAIN = "zha_toolkit";
-  var CARD_VERSION = "1.9.0b1";
+  var CARD_VERSION = "1.9.0b2";
   var CHANGELOG_URL = "https://github.com/hsolgaard/zha-bindings-manager/blob/main/CHANGELOG.md";
   var DEFAULT_BINDABLE_OUT_CLUSTERS = [5, 6, 8, 258, 768];
   var MEMBERSHIP_EDGE_COLOR = "#8e24aa";
@@ -5821,7 +5821,7 @@ a.health-chip-lost { text-decoration:none; cursor:pointer; }
         ${draft.use === "other" ? otherBox("use", (draft.other || {}).use, "What do you use it for?") : ""}</label>
       ${draft.use ? qHtml : `<p class="hint">${escapeHtml(q.use.help || "")}</p>`}
       ${draft.use ? `<label class="answers-q"><span>${escapeHtml(q.rating.text)}</span>${sel("rating", ratingOpts, draft.rating != null ? String(draft.rating) : "")}</label>
-             <details class="answers-context"><summary>About your setup (optional)</summary>${ctx}</details>
+             <details class="answers-context" ${this._answersContextOpen ? "open" : ""}><summary>About your setup (optional)</summary>${ctx}</details>
              <label class="answers-q"><span>${escapeHtml(q.tip.text)} <span class="muted">${escapeHtml(q.tip.help || "")}</span></span>
                <textarea class="answers-tip" maxlength="${q.free_text_max || 280}" rows="2">${escapeHtml(draft.tip || "")}</textarea></label>` : ""}
       ${shareFirst}
@@ -5891,6 +5891,8 @@ a.health-chip-lost { text-decoration:none; cursor:pointer; }
           this._answersRefreshSubmit(d);
         })
       );
+      const ctxBox = root.querySelector(".answers-context");
+      if (ctxBox) ctxBox.addEventListener("toggle", () => this._answersContextOpen = ctxBox.open);
       const moreBox = root.querySelector(".answers-more");
       if (moreBox) moreBox.addEventListener("toggle", () => this._answersMoreOpen = moreBox.open);
       const tip = root.querySelector(".answers-tip");
@@ -8924,6 +8926,10 @@ a.health-chip-lost { text-decoration:none; cursor:pointer; }
         this._closeDrawer();
         return;
       }
+      const keepScroll = body.scrollTop;
+      requestAnimationFrame(() => {
+        if (this._drawerIeee === d.ieee && body.scrollTop !== keepScroll) body.scrollTop = keepScroll;
+      });
       this._q("#drawer-title").textContent = this._deviceLabel(d);
       const rel = this._drawerRelations(d.ieee);
       this._ensureZ2mModels();

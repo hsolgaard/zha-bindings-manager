@@ -21,7 +21,7 @@
  * zha_toolkit MUST be installed (via HACS) and working for bind/unbind/scan
  * to function. See README.md for details.
  *
- * Version: 1.9.0
+ * Version: 1.10.0
  */
 (() => {
   // src/capexplorer-constants.js
@@ -78,7 +78,7 @@
 
   // src/constants.js
   var ZTK_DOMAIN = "zha_toolkit";
-  var CARD_VERSION = "1.9.0";
+  var CARD_VERSION = "1.10.0";
   var CHANGELOG_URL = "https://github.com/hsolgaard/zha-bindings-manager/blob/main/CHANGELOG.md";
   var DEFAULT_BINDABLE_OUT_CLUSTERS = [5, 6, 8, 258, 768];
   var MEMBERSHIP_EDGE_COLOR = "#8e24aa";
@@ -741,6 +741,10 @@
     constructor(hass) {
       this.hass = hass;
       this.watchEnabled = false;
+    }
+    /** 1.10.0: short-address history and missed presses. */
+    async evidenceGet() {
+      return this.hass.callWS({ type: "zha_bindings_manager/evidence_get" });
     }
     // --- Replace a device (integration 1.9.0) -----------------------------------
     async replacePlan(oldIeee, newIeee, { oldClusters, newClusters, endpointMap } = {}) {
@@ -2277,6 +2281,111 @@
     }
   };
 
+  // src/evidence.js
+  var HOUR = 36e5;
+  function changedDevices(res, nameOf = (i) => i) {
+    return Object.entries(res && res.addresses || {}).filter(([, h]) => Array.isArray(h) && h.length > 1).map(([ieee, h]) => ({ ieee: normIeee(ieee), name: nameOf(ieee), history: h, changes: h.length - 1 })).sort((a, b) => b.changes - a.changes || String(a.name).localeCompare(String(b.name)));
+  }
+  function historyLines(history) {
+    return (history || []).map((e, i) => {
+      const d = new Date(e.from);
+      const when = isNaN(d) ? "" : d.toLocaleString(void 0, { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
+      const how = i === 0 ? "first seen" : e.seen === "joined" ? "announced by the device" : "seen in ZHA's device list";
+      return { nwk: e.nwk, when, how };
+    });
+  }
+  function addressFact(res, ieee) {
+    const h = res && res.addresses && res.addresses[normIeee(ieee)];
+    if (!h || !h.length) return null;
+    const last = h[h.length - 1];
+    return { nwk: last.nwk, changes: h.length - 1, since: last.from };
+  }
+  function noticeSummary(res, nameOf) {
+    const changed = changedDevices(res, nameOf);
+    const misses = (res && res.misses || []).length;
+    const afterChange = (res && res.misses || []).filter((m) => m.address_changed_since_last_ok).length;
+    if (!changed.length && !misses) return null;
+    return { changed: changed.length, misses, afterChange, key: `${changed.reduce((n, c) => n + c.changes, 0)}|${misses}` };
+  }
+  var roleOf = (d) => {
+    const t = String(d && d.device_type || "").toLowerCase();
+    if (t.includes("coordinator")) return "coordinator";
+    if (t.includes("router")) return "router";
+    if (t.includes("end")) return "end_device";
+    return "unknown";
+  };
+  function buildNetworkReport(res, devices, { firmwareOf = () => "", cardVersion = "", nowMs = Date.now() } = {}) {
+    const since = Date.parse(res && res.since || "") || nowMs;
+    const list2 = [...devices || []].sort((a, b) => roleOf(a).localeCompare(roleOf(b)) || String(a.model || "").localeCompare(String(b.model || "")));
+    const ids2 = /* @__PURE__ */ new Map();
+    list2.forEach((d, i) => ids2.set(normIeee(d.ieee), `d${i + 1}`));
+    const hist = res && res.addresses || {};
+    const hours = (iso) => Math.round((Date.parse(iso) - since) / HOUR * 10) / 10;
+    const coord = list2.find((d) => roleOf(d) === "coordinator") || {};
+    const record = {
+      kind: "network_report",
+      schema: 1,
+      card_version: cardVersion,
+      period: { days: Math.round((nowMs - since) / (24 * HOUR) * 10) / 10 },
+      system: "zha",
+      coordinator: { manufacturer: coord.manufacturer || "", model: coord.model || "", firmware: firmwareOf(coord) || "" },
+      network: {
+        devices: list2.length,
+        routers: list2.filter((d) => roleOf(d) === "router").length,
+        end_devices: list2.filter((d) => roleOf(d) === "end_device").length
+      },
+      devices: list2.map((d) => {
+        const h = hist[normIeee(d.ieee)] || [];
+        return {
+          id: ids2.get(normIeee(d.ieee)),
+          manufacturer: d.manufacturer || "",
+          model: d.model || "",
+          firmware: firmwareOf(d) || "",
+          power: /battery/i.test(d.power_source || "") ? "battery" : /mains/i.test(d.power_source || "") ? "mains" : "unknown",
+          role: roleOf(d),
+          address_changes: Math.max(0, h.length - 1),
+          changes: h.slice(1).map((e) => ({ after_hours: Math.max(0, hours(e.from)), seen: e.seen === "joined" ? "joined" : "snapshot" }))
+        };
+      }),
+      pairs: [],
+      misses: []
+    };
+    for (const [key, p] of Object.entries(res && res.pairs || {})) {
+      const [remote, light] = key.split("|");
+      const r = ids2.get(normIeee(remote));
+      const l = ids2.get(normIeee(light));
+      if (r && l) record.pairs.push({ remote: r, light: l, presses: p.presses || 0, followed: p.followed || 0, missed: p.missed || 0 });
+    }
+    for (const m of res && res.misses || []) {
+      const r = ids2.get(normIeee(m.remote));
+      const l = ids2.get(normIeee(m.light));
+      if (!r || !l) continue;
+      record.misses.push({
+        remote: r,
+        light: l,
+        hours_since_last_ok: m.last_ok_at ? Math.round((Date.parse(m.at) - Date.parse(m.last_ok_at)) / HOUR * 10) / 10 : null,
+        address_changed_since_last_ok: !!m.address_changed_since_last_ok,
+        binding_in_last_read: !!m.binding_in_last_read
+      });
+    }
+    return record;
+  }
+  function reportIssue(record) {
+    const changed = record.devices.filter((d) => d.address_changes).length;
+    const title = `[Network Report] ${record.devices.length} devices, ${changed} with address changes`;
+    const body = "```json\n" + JSON.stringify(record, null, 2) + "\n```";
+    const compact = "Shared from ZHA Bindings Manager (anonymised).\n\n```json\n" + JSON.stringify(record) + "\n```";
+    const base = `https://github.com/${CAPABILITY_DB_REPO}/issues/new?title=${encodeURIComponent(title)}&labels=${encodeURIComponent("network-report")}`;
+    const full = `${base}&body=${encodeURIComponent(compact)}`;
+    const tooLong = full.length > 6e3;
+    return {
+      title,
+      body,
+      tooLong,
+      url: tooLong ? `${base}&body=${encodeURIComponent("Shared from ZHA Bindings Manager (anonymised). Paste the copied JSON below this line:\n\n")}` : full
+    };
+  }
+
   // src/lost.js
   var POLICIES = ["off", "notify", "auto"];
   var POLICY_LABELS = {
@@ -2479,6 +2588,7 @@
   <div id="view-table" class="view">
     <div id="health-summary" class="health-summary" style="display:none"></div>
     <div id="lost-banner" class="stale-banner lost-banner" style="display:none"></div>
+    <div id="evidence-banner" class="stale-banner evidence-banner" style="display:none"></div>
     <div id="stale-banner" class="stale-banner" style="display:none"></div>
     <div id="pending-banner" class="stale-banner pending-banner" style="display:none"></div>
     <div id="table-filter-info" class="table-filter-info" style="display:none"></div>
@@ -2724,7 +2834,7 @@
      *  - bundledCardVersion: the card version the integration ships (1.0.0+).
      *  Unknown values are null. */
     static async probe(hass) {
-      const none = { installed: false, available: false, version: null, bundledCardVersion: null, experimental: false, watch: false, replace: false, lqi: null };
+      const none = { installed: false, available: false, version: null, bundledCardVersion: null, experimental: false, watch: false, replace: false, evidence: false, lqi: null };
       try {
         const res = await hass.connection.sendMessagePromise({ type: WS_GET_CAPABILITIES });
         if (!res || !res.available) return none;
@@ -2741,6 +2851,8 @@
           watch: !!(res.features && res.features.binding_watch === true),
           // 1.9.0: Replace a device.
           replace: !!(res.features && res.features.replace === true),
+          // 1.10.0: address changes and missed presses.
+          evidence: !!(res.features && res.features.evidence === true),
           lqi: res.lqi_thresholds && Number.isInteger(res.lqi_thresholds.good) && Number.isInteger(res.lqi_thresholds.weak) ? { good: res.lqi_thresholds.good, weak: res.lqi_thresholds.weak } : null
         };
       } catch (e) {
@@ -4855,6 +4967,7 @@ a.health-chip-lost { text-decoration:none; cursor:pointer; }
       this._experimental = probe.experimental;
       this._watchEnabled = !!probe.watch;
       this._replaceEnabled = !!probe.replace;
+      this._evidenceEnabled = !!probe.evidence;
       if (this._api) this._api.watchEnabled = this._watchEnabled;
       this._lqiThr = probe.lqi || { ...LQI_RECOMMENDED };
       this._toggleExperimentalUi();
@@ -5264,6 +5377,7 @@ a.health-chip-lost { text-decoration:none; cursor:pointer; }
       this._openDeepLinkedDevice();
       this._pickUpIntegrationScans();
       this._lostLoad();
+      this._evidenceLoad();
     }
     // -------------------------------------------------------------------
     // Lost bindings (1.8.0, integration only)
@@ -5396,6 +5510,149 @@ a.health-chip-lost { text-decoration:none; cursor:pointer; }
           if (d) this._openDeviceDrawer(d);
         })
       );
+    }
+    // -------------------------------------------------------------------
+    // Address changes and missed presses (1.10.0, integration)
+    // -------------------------------------------------------------------
+    async _evidenceLoad() {
+      if (!this._evidenceEnabled || !this._api) return;
+      try {
+        this._evidence = await this._api.evidenceGet();
+      } catch (e) {
+        this._evidence = null;
+      }
+      this._renderEvidenceBanner();
+      if (this._drawerIeee) this._renderDrawer();
+    }
+    _evidenceName(ieee) {
+      const d = this._devices.find((x) => normIeee(x.ieee) === normIeee(ieee));
+      return d ? this._deviceLabel(d) : this._evidence && this._evidence.names && this._evidence.names[ieee] || ieee;
+    }
+    _drawerAddressFact(d) {
+      const f = this._evidence ? addressFact(this._evidence, d.ieee) : null;
+      const nwk = f ? f.nwk : d.nwk != null && d.nwk !== "" ? typeof d.nwk === "string" ? d.nwk : `0x${Number(d.nwk).toString(16).padStart(4, "0")}` : null;
+      if (!nwk) return null;
+      if (!f || !f.changes) return escapeHtml(nwk);
+      return `${escapeHtml(nwk)} <span class="health-warning">changed ${f.changes}\xD7 since recording started</span> <a href="#" class="src-link" id="drawer-evidence-link">Details</a>`;
+    }
+    _renderEvidenceBanner() {
+      const el = this._q("#evidence-banner");
+      if (!el) return;
+      const sum = this._evidenceEnabled && this._evidence ? noticeSummary(this._evidence, (i) => this._evidenceName(i)) : null;
+      let dismissed = null;
+      try {
+        dismissed = localStorage.getItem("zbm-evidence-dismissed");
+      } catch (e) {
+      }
+      if (!sum || dismissed === sum.key) {
+        el.style.display = "none";
+        el.innerHTML = "";
+        return;
+      }
+      const parts = [];
+      if (sum.changed) parts.push(`<strong>${sum.changed} device${sum.changed === 1 ? "" : "s"} changed ${sum.changed === 1 ? "its" : "their"} network address</strong>`);
+      if (sum.misses)
+        parts.push(
+          `<strong>${sum.misses} press${sum.misses === 1 ? "" : "es"} didn't reach a light</strong>${sum.afterChange ? ` (${sum.afterChange} after that light's address changed)` : ""}`
+        );
+      el.innerHTML = `<div class="stale-row">
+        <span>${parts.join(", and ")}. A battery remote can keep sending to a light's old address, so it stops working even though
+          its binding is still there. Sharing an anonymised report helps find out how often this happens, and why.</span>
+        <button class="btn btn-small" id="btn-evidence-show">Show</button>
+        <button class="btn btn-small btn-primary" id="btn-evidence-share">Share anonymously\u2026</button>
+        <button class="btn btn-small" id="btn-evidence-dismiss" title="Hide until something else changes">Dismiss</button>
+      </div>`;
+      el.style.display = "";
+      const on = (sel, fn) => {
+        const b = this._q(sel);
+        if (b) b.addEventListener("click", fn);
+      };
+      on("#btn-evidence-show", () => this._openEvidence(false));
+      on("#btn-evidence-share", () => this._openEvidence(true));
+      on("#btn-evidence-dismiss", () => {
+        try {
+          localStorage.setItem("zbm-evidence-dismissed", sum.key);
+        } catch (e) {
+        }
+        el.style.display = "none";
+      });
+    }
+    _firmwareOf(d) {
+      const reg = d && d.ieee ? this._haDeviceRegistryEntry(d.ieee) : null;
+      return reg && reg.sw_version || "";
+    }
+    _openEvidence(share) {
+      this._evidenceShare = !!share;
+      this._closeDrawer();
+      this._q("#dialog-title").textContent = "Address changes and missed presses";
+      const panel = this._q(".dialog-panel");
+      if (panel) panel.classList.add("wide");
+      this._q("#dialog").classList.add("open");
+      this._renderEvidence();
+    }
+    _renderEvidence() {
+      const body = this._q("#dialog-body");
+      const res = this._evidence || { addresses: {}, misses: [], pairs: {} };
+      const since = res.since ? new Date(res.since).toLocaleDateString() : "";
+      if (this._evidenceShare) {
+        const record = buildNetworkReport(res, this._devices.filter((d) => !this._isRemovedDevice(d.ieee)), {
+          firmwareOf: (d) => this._firmwareOf(d),
+          cardVersion: CARD_VERSION
+        });
+        const issue = reportIssue(record);
+        body.innerHTML = `<div class="flow">
+        <p>This is exactly what would be shared with the community
+          <a href="https://github.com/${CAPABILITY_DB_REPO}" target="_blank" rel="noopener">zigbee-capabilities</a> database: every device's
+          make, model, firmware, power source and role (the coordinator too), how often its network address changed, and the presses
+          that didn't reach a light. Devices are numbered d1, d2\u2026: <strong>no addresses, names, areas or times of day.</strong></p>
+        <p class="hint">Nothing is sent until you press <em>Submit new issue</em> on GitHub. It's public once the database merges it.</p>
+        <textarea class="ep-cmd-share-json" readonly rows="12">${escapeHtml(issue.body)}</textarea>
+        <div class="dialog-actions">
+          <a class="btn btn-primary" id="evidence-open" href="${escapeHtml(issue.url)}" target="_blank" rel="noopener">${issue.tooLong ? "Copy and open GitHub issue" : "Open GitHub issue"}</a>
+          <button class="btn" id="evidence-back">Back</button>
+        </div>
+        ${issue.tooLong ? `<p class="hint">It's too long to fill in the issue for you: the button copies it, so paste it into the new issue.</p>` : ""}
+      </div>`;
+        const open = this._q("#evidence-open");
+        if (open)
+          open.addEventListener("click", async () => {
+            if (issue.tooLong) await this._copyShareText(issue.body);
+          });
+        const back = this._q("#evidence-back");
+        if (back)
+          back.addEventListener("click", () => {
+            this._evidenceShare = false;
+            this._renderEvidence();
+          });
+        return;
+      }
+      const changed = changedDevices(res, (i) => this._evidenceName(i));
+      const changedHtml = changed.length ? `<table class="detail-table">${changed.map(
+        (c) => `<tr><td><strong>${escapeHtml(c.name)}</strong><br><span class="muted">${c.changes} change${c.changes === 1 ? "" : "s"}</span></td><td>${historyLines(
+          c.history
+        ).map((l) => `${escapeHtml(l.nwk)} <span class="muted">${escapeHtml(l.when)} \xB7 ${escapeHtml(l.how)}</span>`).join("<br>")}</td></tr>`
+      ).join("")}</table>` : `<p class="muted">No device has changed its address since ${escapeHtml(since)}.</p>`;
+      const misses = [...res.misses || []].reverse();
+      const missHtml = misses.length ? `<table class="detail-table">${misses.slice(0, 50).map(
+        (m) => `<tr><td>${escapeHtml(new Date(m.at).toLocaleString())}</td><td>${escapeHtml(this._evidenceName(m.remote))} \u2192 ${escapeHtml(
+          this._evidenceName(m.light)
+        )}</td><td>${m.address_changed_since_last_ok ? `<span class="health-warning">its address changed since the last press that worked (${escapeHtml(m.nwk_at_last_ok || "?")} \u2192 ${escapeHtml(
+          m.nwk_now || "?"
+        )})</span>` : m.last_ok_at ? "address unchanged since the last press that worked" : "no press that worked recorded yet"}${m.binding_in_last_read ? " \xB7 binding still in the remote's table" : ""}</td></tr>`
+      ).join("")}</table>` : `<p class="muted">No missed presses recorded.</p>`;
+      body.innerHTML = `<div class="flow">
+      <p class="hint">Recorded since ${escapeHtml(since)} (turn it off under the integration's Configure). Read-only: nothing is sent to your devices.
+        A missed press is a remote's On, Off or Toggle that a light bound to it directly didn't follow within 2 seconds.</p>
+      <div class="drawer-section-title">Network address changes</div>${changedHtml}
+      <div class="drawer-section-title">Missed presses</div>${missHtml}
+      <div class="dialog-actions"><button class="btn btn-primary" id="evidence-share">Share anonymously\u2026</button></div>
+    </div>`;
+      const share = this._q("#evidence-share");
+      if (share)
+        share.addEventListener("click", () => {
+          this._evidenceShare = true;
+          this._renderEvidence();
+        });
     }
     // -------------------------------------------------------------------
     // Replace a device (1.9.0)
@@ -8945,7 +9202,8 @@ a.health-chip-lost { text-decoration:none; cursor:pointer; }
         ["Bindings read", this._lastScanCellInfo(d).html.replace(/<button[\s\S]*?<\/button>/, "")],
         ["Community database", this._drawerCommunityStatus(d)],
         this._drawerActivityText(d) != null ? ["Messages to Home Assistant", this._drawerActivityText(d)] : null,
-        d.manufacturer || d.model ? ["How it behaves", this._drawerAnswersFact(d)] : null
+        d.manufacturer || d.model ? ["How it behaves", this._drawerAnswersFact(d)] : null,
+        this._drawerAddressFact(d) ? ["Network address", this._drawerAddressFact(d)] : null
       ].filter(Boolean);
       const battery = this._isBatteryDevice(d);
       const haUrl = deviceHaUrl(d);
@@ -8967,7 +9225,7 @@ a.health-chip-lost { text-decoration:none; cursor:pointer; }
         ${photo}
         <div>
           ${tags.length ? `<div class="drawer-tags">${tags.map((t) => `<span class="chip">${escapeHtml(t)}</span>`).join("")}</div>` : ""}
-          <table class="detail-table drawer-facts">${facts.map(([k, v]) => `<tr><td>${escapeHtml(k)}</td><td>${k === "Bindings read" || k === "Community database" || k === "How it behaves" ? v : escapeHtml(String(v))}</td></tr>`).join("")}</table>
+          <table class="detail-table drawer-facts">${facts.map(([k, v]) => `<tr><td>${escapeHtml(k)}</td><td>${k === "Bindings read" || k === "Community database" || k === "How it behaves" || k === "Network address" ? v : escapeHtml(String(v))}</td></tr>`).join("")}</table>
         </div>
       </div>
       ${problems}
@@ -9018,6 +9276,12 @@ a.health-chip-lost { text-decoration:none; cursor:pointer; }
       on("#drawer-show-bindings", showBindings);
       on("#drawer-problems-link", showBindings);
       on("#drawer-lost-put-back", () => this._lostPutBack(d.ieee));
+      const evLink = this._q("#drawer-evidence-link");
+      if (evLink)
+        evLink.addEventListener("click", (e) => {
+          e.preventDefault();
+          this._openEvidence(false);
+        });
       this._wireDrawerAnswers(d);
       const lostForget = this._q("#drawer-lost-forget");
       if (lostForget)
@@ -10938,6 +11202,7 @@ Used by: ${h.uses.join("; ")}`;
       this._renderHealthSummary(healthMap);
       this._renderStaleBanner();
       this._renderLostBanner();
+      this._renderEvidenceBanner();
       this._renderPendingBanner();
       this._updateSortIndicators("#view-table", this._tableSort);
       let rows = this._filteredBindingRows(healthMap).map((b) => {

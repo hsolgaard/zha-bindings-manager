@@ -162,6 +162,24 @@ had before:
   remote's bindings are checked. Not for group bindings, and Toggle only when the lights agreed before the press.
 - Unbinding in the card is never reported as lost. Removing a binding some other way is: use **Removed on purpose**.
 
+### Address changes and missed presses (needs the integration)
+
+Some remotes stop controlling a light although the binding is still in their table, and removing and re-adding it
+fixes it. One theory is that the light's short network address changed and the battery remote, which never hears the
+light announce its new address, keeps sending to the old one. With the integration's **Record address changes and
+missed presses** (on by default), you can see whether that happens on your network:
+
+- every device's network address is recorded over time (side panel: **Network address**, and how often it changed),
+- when a remote's On, Off or Toggle doesn't reach a light it's bound to directly within 2 seconds, it's logged, with
+  whether that light's address changed since the last press that worked,
+- a notice on the Bindings tab when either happens, with **Show** and **Share anonymously…**: a report of every
+  device's make, model, firmware, power source and role (coordinator included), the address changes and the missed
+  presses, with devices numbered and no addresses, names, areas or times of day. You review it before anything is
+  sent, as a GitHub issue to the community [zigbee-capabilities](https://github.com/hsolgaard/zigbee-capabilities)
+  database.
+
+It's read-only: nothing is sent to your devices.
+
 ### Replace a device
 
 **Replace this device…** in a device's side panel (or **Move to a new device…** on the banner for bindings to

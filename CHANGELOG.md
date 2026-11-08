@@ -3,7 +3,23 @@
 All notable changes to ZHA Bindings Manager are documented here.
 
 
-## [1.9.0]
+## [1.10.0]
+
+### Added
+
+- **Address changes and missed presses** (needs the integration 1.10.0, on by default). Some remotes stop controlling
+  a light although the binding is still in their table (HarvsG's TRÅDFRI switches); one theory is that the light's
+  short network address changed and the battery remote keeps sending to the old one. The integration now records
+  every device's network address over time, and the presses where a light bound directly to a remote didn't follow,
+  noting whether that light's address had changed since the last press that worked.
+  - A notice on the Bindings tab when addresses change or presses are missed, with **Show** (the history and each
+    missed press) and **Share anonymously…**.
+  - **Share anonymously…** prepares a report for the community database: every device's make, model, firmware,
+    power source and role (the coordinator too), its address changes and the missed presses. Devices are numbered;
+    no addresses, names, areas or times of day. You review it, and nothing is sent until you submit the GitHub issue.
+  - The side panel shows a device's network address, and how often it changed.
+
+
 
 Rolls up what was tested at home as 1.7.0, 1.8.0 and 1.9.0 betas. Lost bindings, Replace a device and the Messages
 count need the [integration](https://github.com/hsolgaard/zha-bindings-manager-integration) 1.9.0.

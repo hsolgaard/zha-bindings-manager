@@ -56,10 +56,11 @@ export function lostFor(res, ieee) {
         autoPaused: !!d.auto_paused,
         lastCheck: d.last_check || null,
         expected: d.expected || 0,
+        fallback: !!d.fallback,
       };
     }
   }
-  return { policy: "notify", lost: [], queued: false, autoPaused: false, lastCheck: null, expected: 0 };
+  return { policy: "notify", lost: [], queued: false, autoPaused: false, lastCheck: null, expected: 0, fallback: false };
 }
 
 /** Status line after Put back. results: {ieee: "put_back"|"still_missing"|"waiting"|"nothing"}. */
@@ -108,4 +109,5 @@ export const NOTICED_BY = {
   press: "noticed after a button press",
   check: "noticed by Check for lost bindings",
   put_back: "still missing after Put back",
+  replace: "copied from a replaced device, waiting for it to wake up",
 };

@@ -14,6 +14,30 @@ export class ZhaApi {
     this.watchEnabled = false;
   }
 
+  // --- Replace a device (integration 1.9.0) -----------------------------------
+
+  async replacePlan(oldIeee, newIeee, { oldClusters, newClusters, endpointMap } = {}) {
+    const clean = (list) => (list || []).map((c) => ({ endpoint_id: Number(c.endpoint_id), id: Number(c.id), type: c.type }));
+    const msg = { type: "zha_bindings_manager/replace_plan", old_ieee: oldIeee, new_ieee: newIeee };
+    if (oldClusters && oldClusters.length) msg.old_clusters = clean(oldClusters);
+    if (newClusters && newClusters.length) msg.new_clusters = clean(newClusters);
+    if (endpointMap && Object.keys(endpointMap).length) msg.endpoint_map = endpointMap;
+    return this.hass.callWS(msg);
+  }
+
+  async replaceRun(planId, items) {
+    return this.hass.callWS({ type: "zha_bindings_manager/replace_run", plan_id: planId, items });
+  }
+
+  async replaceCleanup(planId, unbindOld) {
+    return this.hass.callWS({ type: "zha_bindings_manager/replace_cleanup", plan_id: planId, unbind_old: !!unbindOld });
+  }
+
+  /** Removes a device from ZHA (ZHA's own zha.remove action). */
+  async removeZhaDevice(ieee) {
+    return this.hass.callService("zha", "remove", { ieee });
+  }
+
   // --- Lost bindings (integration 1.8.0) -------------------------------------
 
   async watchGet() {
@@ -36,6 +60,11 @@ export class ZhaApi {
 
   async watchPolicy(ieee, policy) {
     return this.hass.callWS({ type: "zha_bindings_manager/watch_policy", ieee, policy });
+  }
+
+  /** Switch the lights from Home Assistant when a press doesn't reach them. */
+  async watchFallback(ieee, enabled) {
+    return this.hass.callWS({ type: "zha_bindings_manager/watch_fallback", ieee, enabled: !!enabled });
   }
 
   async watchCheckAll() {

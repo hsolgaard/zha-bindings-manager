@@ -40,6 +40,23 @@ import {
 import { bindingMatches, bindingMatchesLoose, bindingKey, isIeee, sanitizeStoredBindings } from "./parser.js";
 import { activityRows, clusterLabel, interestingCounters, timesTypical, TOP_ROWS } from "./activity.js";
 import { ZhaApi } from "./api-client.js";
+import {
+  detectDeviceType,
+  useAnswers,
+  questionsFor,
+  formQuestions,
+  buildRecord,
+  draftProblem,
+  issueUrl as answersIssueUrl,
+  answersForFirmware,
+  summaryLines,
+  answerCountsText,
+  fetchQuestions,
+  fetchAnswersDoc,
+  ISSUE_FORM_URL,
+} from "./device-answers.js";
+const LOST_EDGE_COLOR = "#db4437";
+import { replacementCandidates, commandGaps, VERDICT, RESULT_LABEL, defaultSelection, runSummary } from "./replace.js";
 import { lostSummary, lostFor, putBackMessage, sinceText, NOTICED_BY, POLICIES, POLICY_LABELS, POLICY_HINTS } from "./lost.js";
 import { SHELL_HTML } from "./template.js";
 import { LocalStorageProvider } from "./storage/local-storage-provider.js";
@@ -622,6 +639,7 @@ export class ZhaBindingMapCard extends HTMLElement {
     this._bundledCardVersion = probe.bundledCardVersion;
     this._experimental = probe.experimental;
     this._watchEnabled = !!probe.watch;
+    this._replaceEnabled = !!probe.replace;
     if (this._api) this._api.watchEnabled = this._watchEnabled;
     this._lqiThr = probe.lqi || { ...LQI_RECOMMENDED };
     this._toggleExperimentalUi();
@@ -1119,6 +1137,7 @@ export class ZhaBindingMapCard extends HTMLElement {
     }
     this._renderLostBanner();
     this._renderHealthSummary(this._computeHealthMap());
+    if (this._edgesLayer) this._renderGraphEdges();
     if (this._drawerIeee) this._renderDrawer();
   }
 
@@ -1258,6 +1277,626 @@ export class ZhaBindingMapCard extends HTMLElement {
     );
   }
 
+  // -------------------------------------------------------------------
+  // Replace a device (1.9.0)
+  // -------------------------------------------------------------------
+
+  _openReplace({ ieee = null, deadTargets = null } = {}) {
+    this._closeDrawer();
+    this._replace = { step: ieee ? "pick" : "old", oldIeee: ieee ? normIeee(ieee) : null, deadTargets: deadTargets || [], selected: new Set(), endpointMap: {} };
+    this._q("#dialog-title").textContent = "Replace a device";
+    const panel = this._q(".dialog-panel");
+    if (panel) panel.classList.add("wide");
+    this._q("#dialog").classList.add("open");
+    this._renderReplace();
+  }
+
+  _replaceOldDevice() {
+    const r = this._replace;
+    const d = this._devices.find((x) => normIeee(x.ieee) === r.oldIeee);
+    return d || { ieee: r.oldIeee, name: this._ieeeLabel(r.oldIeee, { plain: true }), gone: true };
+  }
+
+  _replaceTypeOf(d) {
+    return detectDeviceType(this._clusterCache.get(d.ieee), d.power_source);
+  }
+
+  _renderReplace() {
+    const r = this._replace;
+    if (!r) return;
+    const body = this._q("#dialog-body");
+    const steps = [
+      ["pick", "1. Choose the new device"],
+      ["check", "2. Check"],
+      ["run", "3. Copy"],
+      ["done", "4. Clean up"],
+    ];
+    const stepsHtml = `<ol class="flow-steps">${steps.map(([k, v]) => `<li class="${k === r.step ? "active" : ""}">${v}</li>`).join("")}</ol>`;
+    const needs = !this._replaceEnabled
+      ? `<div class="flow-callout flow-result-warning">Replacing a device needs the ZHA Bindings Manager integration (1.9.0 or later) with
+          "Watch for lost bindings" on: it reads the saved scans, copies the bindings and checks each one.</div>`
+      : "";
+    let html = "";
+    if (r.step === "old") {
+      html = `<p>Which device did you replace? These no longer exist in ZHA, but other devices still have bindings to them.</p>
+        <div class="flow-targets">${r.deadTargets
+          .map((i) => `<label class="flow-target"><input type="radio" name="replace-old" value="${escapeHtml(i)}"> ${escapeHtml(this._ieeeLabel(i, { plain: true }))} <span class="muted">${escapeHtml(i)}</span></label>`)
+          .join("")}</div>
+        <div class="dialog-actions"><button class="btn btn-primary" id="replace-next" disabled>Next</button><button class="btn" id="replace-cancel">Cancel</button></div>`;
+    } else if (r.step === "pick") {
+      const old = this._replaceOldDevice();
+      const cands = replacementCandidates(this._devices.filter((x) => !this._isRemovedDevice(x.ieee)), old, {
+        coordinatorIeee: this._coordinatorIeee(),
+        typeOf: (x) => this._replaceTypeOf(x),
+        nameOf: (x) => this._deviceLabel(x),
+      });
+      html = `<p>Replacing <strong>${escapeHtml(old.gone ? old.name : this._deviceLabel(old))}</strong>${
+        old.gone ? ` <span class="muted">(no longer in ZHA: its bindings come from saved scans)</span>` : ""
+      }. Pair the new device first, then choose it here.</p>
+        <input type="search" id="replace-filter" placeholder="Filter devices" value="${escapeHtml(r.filter || "")}">
+        <div class="flow-targets">${cands
+          .filter((c) => !r.filter || this._deviceLabel(c.device).toLowerCase().includes(r.filter.toLowerCase()))
+          .map(
+            (c) => `<label class="flow-target"><input type="radio" name="replace-new" value="${escapeHtml(c.device.ieee)}" ${
+              normIeee(c.device.ieee) === r.newIeee ? "checked" : ""
+            }> ${escapeHtml(this._deviceLabel(c.device))}${c.why ? ` <span class="flow-suggested">${escapeHtml(c.why)}</span>` : ""}
+              <span class="muted">${escapeHtml([c.device.manufacturer, c.device.model].filter(Boolean).join(" "))} · ${escapeHtml(c.device.power_source || "")}</span></label>`
+          )
+          .join("")}</div>
+        <p class="hint">Same model, re-paired after a reset? That keeps its address, so it isn't a replacement: use Put all back for lost bindings instead.</p>
+        <div class="dialog-actions"><button class="btn btn-primary" id="replace-next" ${r.newIeee && this._replaceEnabled ? "" : "disabled"}>Check it</button><button class="btn" id="replace-cancel">Cancel</button></div>`;
+    } else if (r.step === "check") {
+      html = this._replaceCheckHtml();
+    } else if (r.step === "run") {
+      html = `<p>${escapeHtml(r.progress || "Copying…")}</p><p class="hint">Each binding is read back from the device that holds it. A battery device
+        that's asleep gets its bindings at its next button press.</p>`;
+    } else if (r.step === "done") {
+      html = this._replaceDoneHtml();
+    }
+    body.innerHTML = `<div class="flow">${stepsHtml}${needs}${html}</div>`;
+    this._wireReplace();
+  }
+
+  _replaceCheckHtml() {
+    const r = this._replace;
+    if (r.error) return `<div class="flow-callout flow-result-warning">${escapeHtml(r.error)}</div><div class="dialog-actions"><button class="btn" id="replace-back">Back</button></div>`;
+    if (!r.plan) return `<p>Checking what the old device did and whether the new one can do it…</p>`;
+    const p = r.plan;
+    const v = VERDICT[p.verdict] || VERDICT.unknown;
+    const oldD = this._replaceOldDevice();
+    const newD = this._devices.find((x) => normIeee(x.ieee) === r.newIeee) || { ieee: r.newIeee };
+    const inClusters = [...new Set(p.items.filter((i) => i.role === "in").flatMap((i) => i.clusters))].filter((c) => c !== 4);
+    const gaps = this._capExpIndex ? commandGaps(this._capExpIndex, oldD, newD, inClusters) : { gaps: [], unknown: true };
+    const gapHtml = gaps.gaps.length
+      ? `<div class="flow-callout flow-result-warning">From the community database: ${gaps.gaps
+          .map((g) => `${escapeHtml(clusterName(g.clusterId))}: the old model accepts ${escapeHtml(g.missing.join(", "))}; the new one was checked and doesn't`)
+          .join(". ")}. Those commands from your remotes won't work on it.</div>`
+      : gaps.unknown
+      ? `<p class="hint">Only clusters were checked: one of the models has no command check in the community database yet. Sharing a scan of it helps.</p>`
+      : `<p class="hint">The community database confirms the new model accepts the same commands.</p>`;
+    const groupsOf = (kind, title, empty) => {
+      const items = p.items.filter((i) => i.kind === kind);
+      if (!items.length) return `<div class="drawer-section-title">${title}</div><p class="muted">${empty}</p>`;
+      return `<div class="drawer-section-title">${title}</div>${items
+        .map((i) => {
+          const epSel =
+            p.new_endpoints.length > 1 && i.old_ep != null
+              ? ` <label class="muted">new ep <select data-epmap="${i.old_ep}">${p.new_endpoints
+                  .map((ep) => `<option value="${ep}" ${ep === i.new_ep ? "selected" : ""}>${ep}</option>`)
+                  .join("")}</select></label>`
+              : i.new_ep != null
+              ? ` <span class="muted">→ new ep ${i.new_ep}</span>`
+              : "";
+          return `<label class="flow-target"><input type="checkbox" data-item="${i.id}" ${r.selected.has(i.id) ? "checked" : ""} ${
+            i.ok === false ? "disabled" : ""
+          }> <span>${escapeHtml(i.text)}${epSel}${i.reason ? `<br><span class="health-warning">${escapeHtml(i.reason)}</span>` : ""}</span></label>`;
+        })
+        .join("")}`;
+    };
+    return `<div class="flow-callout flow-result-${v.level}"><strong>${v.icon} ${escapeHtml(v.text)}</strong></div>
+      ${gapHtml}
+      ${groupsOf("controlled_by", "Controlled by (bound on the other device)", "Nothing was bound to it.")}
+      ${groupsOf("controls", "Controls (bound on the new device)", "It didn't control anything.")}
+      ${groupsOf("group", "Groups (the new device joins)", "It wasn't in any ZHA group.")}
+      <details class="drawer-lost-expect"><summary>What to expect</summary><ul>
+        <li>This checks the clusters the new device declares and, where known, the commands the community confirmed. A device can
+          still behave differently: press each remote afterwards, and share the result.</li>
+        <li>Bindings to a dead device can only be found in saved scans. If a remote wasn't scanned since, it isn't listed: scan it first.</li>
+        <li>Battery remotes only accept bindings when awake. Those are queued and go on at their next button press, while Home Assistant runs.</li>
+        <li>Settings (power-on behaviour, a detached relay, LEDs) aren't copied: set them on the new device yourself.</li>
+      </ul></details>
+      <div class="dialog-actions"><button class="btn btn-primary" id="replace-run" ${r.selected.size ? "" : "disabled"}>Copy ${r.selected.size} item${
+      r.selected.size === 1 ? "" : "s"
+    }</button><button class="btn" id="replace-back">Back</button></div>`;
+  }
+
+  _replaceDoneHtml() {
+    const r = this._replace;
+    const p = r.plan;
+    const sum = runSummary(r.results);
+    const rows = p.items
+      .filter((i) => r.results[i.id])
+      .map((i) => `<li>${escapeHtml(i.text)}: <strong>${escapeHtml(RESULT_LABEL[r.results[i.id]] || r.results[i.id])}</strong></li>`)
+      .join("");
+    const old = this._replaceOldDevice();
+    const hasSources = p.items.some((i) => i.kind === "controlled_by");
+    const groups = p.items.filter((i) => i.kind === "group");
+    if (r.cleaned) {
+      return `<div class="flow-callout flow-result-success">${escapeHtml(r.cleaned)}</div>
+        <p>Now press each remote that controls the new device${p.items.some((i) => i.kind === "controls") ? ", and the new remote itself" : ""}, and check the lights respond.</p>
+        <div class="dialog-actions"><button class="btn btn-primary" id="replace-close">Done</button></div>`;
+    }
+    return `<div class="flow-callout flow-result-${sum.level}">${escapeHtml(sum.text)}.</div><ul>${rows}</ul>
+      <div class="drawer-section-title">Clean up</div>
+      ${hasSources ? `<label class="flow-target"><input type="checkbox" id="replace-unbind-old" checked> Remove the bindings that still point at ${escapeHtml(old.name || this._deviceLabel(old))}</label>` : ""}
+      ${!old.gone && groups.length ? `<label class="flow-target"><input type="checkbox" id="replace-leave-groups" checked> Take ${escapeHtml(this._deviceLabel(old))} out of its groups</label>` : ""}
+      ${!old.gone ? `<label class="flow-target"><input type="checkbox" id="replace-remove-old"> Remove ${escapeHtml(this._deviceLabel(old))} from ZHA <span class="muted">(leave unticked if you'll reuse it)</span></label>` : ""}
+      <p class="hint">Until then both devices stay bound, so nothing goes dark. The old device's bindings won't be reported as lost.</p>
+      <div class="dialog-actions"><button class="btn btn-primary" id="replace-cleanup">Clean up</button><button class="btn" id="replace-close">Not now</button></div>`;
+  }
+
+  async _replacePlan() {
+    const r = this._replace;
+    r.plan = null;
+    r.error = null;
+    this._renderReplace();
+    const old = this._replaceOldDevice();
+    try {
+      await Promise.all([old.gone ? null : this._ensureClusters(old.ieee).catch(() => {}), this._ensureClusters(r.newIeee).catch(() => {})]);
+      if (!this._capExpIndex && !this._capExpLoading) this._capExpLoadIndex();
+      const plan = await this._api.replacePlan(old.ieee, r.newIeee, {
+        oldClusters: old.gone ? null : this._clusterCache.get(old.ieee),
+        newClusters: this._clusterCache.get(r.newIeee),
+        endpointMap: r.endpointMap,
+      });
+      r.plan = plan;
+      r.selected = defaultSelection(plan);
+    } catch (err) {
+      r.error = extractErrorMessage(err);
+    }
+    this._renderReplace();
+  }
+
+  async _replaceRun() {
+    const r = this._replace;
+    const ids = [...r.selected];
+    r.step = "run";
+    r.progress = "Copying bindings and reading them back…";
+    this._renderReplace();
+    r.results = {};
+    try {
+      const res = await this._api.replaceRun(r.plan.plan_id, ids.filter((id) => (r.plan.items.find((i) => i.id === id) || {}).kind !== "group"));
+      Object.assign(r.results, res.results || {});
+      for (const item of r.plan.items.filter((i) => i.kind === "group" && r.selected.has(i.id))) {
+        r.progress = `Adding it to group ${item.group_id}…`;
+        this._renderReplace();
+        try {
+          await this._api.addGroupMembers(item.group_id, [{ ieee: r.newIeee, endpoint: item.new_ep }]);
+          r.results[item.id] = "added";
+        } catch (err) {
+          r.results[item.id] = "failed";
+        }
+      }
+    } catch (err) {
+      this._setStatus("error", `Copying failed: ${extractErrorMessage(err)}`, 0);
+    }
+    r.step = "done";
+    this._renderReplace();
+    this._pickUpIntegrationScans();
+    this._lostLoad();
+  }
+
+  async _replaceCleanup() {
+    const r = this._replace;
+    const box = (id) => {
+      const el = this._q(`#${id}`);
+      return !!(el && el.checked);
+    };
+    const unbindOld = box("replace-unbind-old");
+    const leaveGroups = box("replace-leave-groups");
+    const removeOld = box("replace-remove-old");
+    const old = this._replaceOldDevice();
+    const done = [];
+    try {
+      const res = await this._api.replaceCleanup(r.plan.plan_id, unbindOld);
+      if (unbindOld) done.push(`removed the old bindings on ${res.unbound.length} device${res.unbound.length === 1 ? "" : "s"}${res.failed.length ? ` (${res.failed.length} didn't answer)` : ""}`);
+      if (leaveGroups) {
+        for (const item of r.plan.items.filter((i) => i.kind === "group")) {
+          await this._api.removeGroupMembers(item.group_id, [{ ieee: old.ieee, endpoint: item.old_ep }]).catch(() => {});
+        }
+        done.push("took the old device out of its groups");
+      }
+      if (removeOld) {
+        await this._api.removeZhaDevice(old.ieee);
+        done.push("removed the old device from ZHA");
+      }
+      r.cleaned = done.length ? `Done: ${done.join(", ")}.` : "Nothing to clean up.";
+    } catch (err) {
+      r.cleaned = `Clean-up stopped: ${extractErrorMessage(err)}`;
+    }
+    this._renderReplace();
+    this._reloadDevices({ quiet: true }).then(() => this._pickUpIntegrationScans());
+    this._lostLoad();
+  }
+
+  _wireReplace() {
+    const r = this._replace;
+    const root = this._q("#dialog-body");
+    const on = (sel, ev, fn) => root.querySelectorAll(sel).forEach((el) => el.addEventListener(ev, fn));
+    on("#replace-cancel", "click", () => this._closeReplace());
+    on("#replace-close", "click", () => this._closeReplace());
+    on('input[name="replace-old"]', "change", (e) => {
+      r.oldIeee = normIeee(e.target.value);
+      const next = root.querySelector("#replace-next");
+      if (next) next.disabled = false;
+    });
+    on('input[name="replace-new"]', "change", (e) => {
+      r.newIeee = normIeee(e.target.value);
+      const next = root.querySelector("#replace-next");
+      if (next) next.disabled = !this._replaceEnabled;
+    });
+    on("#replace-filter", "input", (e) => {
+      r.filter = e.target.value;
+      this._renderReplace();
+      const f = this._q("#replace-filter");
+      if (f) {
+        f.focus();
+        f.setSelectionRange(f.value.length, f.value.length);
+      }
+    });
+    on("#replace-next", "click", () => {
+      if (r.step === "old" && r.oldIeee) r.step = "pick";
+      else if (r.step === "pick" && r.newIeee) {
+        r.step = "check";
+        this._replacePlan();
+        return;
+      }
+      this._renderReplace();
+    });
+    on("#replace-back", "click", () => {
+      r.step = "pick";
+      r.plan = null;
+      this._renderReplace();
+    });
+    on("input[data-item]", "change", (e) => {
+      if (e.target.checked) r.selected.add(e.target.dataset.item);
+      else r.selected.delete(e.target.dataset.item);
+      this._renderReplace();
+    });
+    on("select[data-epmap]", "change", (e) => {
+      r.endpointMap[e.target.dataset.epmap] = Number(e.target.value);
+      this._replacePlan();
+    });
+    on("#replace-run", "click", () => this._replaceRun());
+    on("#replace-cleanup", "click", () => this._replaceCleanup());
+  }
+
+  _closeReplace() {
+    this._replace = null;
+    this._closeDialog();
+  }
+
+  // -------------------------------------------------------------------
+  // Device answers (1.9.0): how a device behaves, asked in the side panel
+  // and shared with the community database (data/questions.json).
+  // -------------------------------------------------------------------
+
+  _answersStoreRead(key) {
+    try {
+      return JSON.parse(localStorage.getItem(key) || "{}") || {};
+    } catch (e) {
+      return {};
+    }
+  }
+
+  _answersStoreWrite(key, value) {
+    try {
+      localStorage.setItem(key, JSON.stringify(value));
+    } catch (e) {
+      /* private window or storage full: not remembered, nothing breaks */
+    }
+  }
+
+  /** Remembers (in this browser) that a scan of this device was shared, so
+   *  its questions open before the scan has been merged into the database. */
+  _markScanShared(ieee, record) {
+    const all = this._answersStoreRead("zbm-shared-scans");
+    all[normIeee(ieee)] = {
+      at: new Date().toISOString(),
+      sw_build_id: (record && record.identity && record.identity.sw_build_id) || null,
+    };
+    this._answersStoreWrite("zbm-shared-scans", all);
+  }
+
+  /** The firmware to file answers under: sw_build_id from a command check
+   *  this session (or a remembered share), plus Home Assistant's version. */
+  _deviceFirmware(d) {
+    let sw = null;
+    const prefix = `${normIeee(d.ieee)}:`;
+    for (const [key, entry] of this._commandScans.entries()) {
+      if (key.startsWith(prefix) && entry.status === "done" && entry.scan) {
+        const epScan = (entry.scan.endpoints || []).find((e) => Number(e.id) === Number(key.slice(prefix.length)));
+        const id = epScan && this._extractIdentity(epScan);
+        if (id && id.sw_build_id) sw = id.sw_build_id;
+      }
+    }
+    if (!sw) {
+      const shared = this._answersStoreRead("zbm-shared-scans")[normIeee(d.ieee)];
+      if (shared && shared.sw_build_id) sw = shared.sw_build_id;
+    }
+    const reg = this._haDeviceRegistryEntry(d.ieee);
+    return { sw_build_id: sw, registry_sw_version: (reg && reg.sw_version) || null };
+  }
+
+  async _answersLoad(force = false) {
+    if (this._answersLoading) return;
+    this._answersLoading = true;
+    try {
+      const [q, doc] = await Promise.all([fetchQuestions({ force }), fetchAnswersDoc({ force })]);
+      this._answersQ = q;
+      this._answersDoc = doc || {};
+      this._answersError = null;
+    } catch (err) {
+      this._answersError = (err && err.message) || String(err);
+    }
+    this._answersLoading = false;
+    if (this._drawerIeee) this._renderDrawer();
+  }
+
+  _drawerAnswersHtml(d) {
+    if (!d.manufacturer && !d.model) return "";
+    if (this._answersQ === undefined) {
+      if (!this._answersLoading) this._answersLoad();
+      return "";
+    }
+    const q = this._answersQ;
+    if (!q || this._answersError) return ""; // the database doesn't ask questions yet, or couldn't be reached
+    const fw = this._deviceFirmware(d);
+    const community = answersForFirmware(this._answersDoc, d, fw);
+    const inDb = this._capExpIndex ? matchLocalDevices([d], this._capExpIndex).length > 0 : false;
+    const shared = !!this._answersStoreRead("zbm-shared-scans")[normIeee(d.ieee)];
+    const mine = this._answersStoreRead("zbm-device-answers")[normIeee(d.ieee)] || null;
+    const unlocked = inDb || shared;
+    const draft = this._answerDraft && this._answerDraft.ieee === normIeee(d.ieee) ? this._answerDraft : null;
+
+    const communityHtml = this._answersCommunityHtml(q, community);
+    let body;
+    if (draft) {
+      body = this._answersFormHtml(q, d, fw, draft, mine);
+    } else if (!unlocked) {
+      const type = detectDeviceType(this._clusterCache.get(d.ieee), d.power_source);
+      const preview = questionsFor(q, type, null)
+        .slice(0, 3)
+        .map((x) => `<li><strong>${escapeHtml(x.text)}</strong> <span class="muted">${escapeHtml(x.answers.map((a) => a.label).join(" · "))}</span></li>`)
+        .join("");
+      body = `<div class="answers-locked">
+          <p>Things a scan can't show: whether it stays connected, what a press really sends, whether it keeps its settings after a power cut.
+            Answering takes about a minute and helps the next person with this model.</p>
+          <ul class="answers-preview">${preview}</ul>
+          <p class="hint">Share this device's capability scan first, so your answers are tied to its real firmware.</p>
+          <button class="btn btn-small btn-primary" id="drawer-answers-share">Check and share capabilities…</button>
+        </div>`;
+    } else {
+      const again = mine
+        ? `<p class="hint">You answered on ${escapeHtml(new Date(mine.at).toLocaleDateString())}${
+            mine.firmware && mine.firmware !== (fw.sw_build_id || fw.registry_sw_version) ? `, on firmware ${escapeHtml(mine.firmware)}` : ""
+          }.</p>`
+        : "";
+      body = `${again}<button class="btn btn-small ${mine ? "" : "btn-primary"}" id="drawer-answers-start">${
+        mine ? "Change your answers" : "Answer a few questions (about 1 minute)"
+      }</button>`;
+    }
+    return `<div class="drawer-section drawer-answers">
+      <div class="drawer-section-title">How does it behave? <span class="muted">Help the next person</span></div>
+      ${communityHtml}
+      ${body}
+    </div>`;
+  }
+
+  _answersCommunityHtml(q, community) {
+    if (!community.total) return `<p class="hint">Nobody has answered for this model yet.</p>`;
+    const otherFw = community.others.length
+      ? `<p class="hint">Also answered for firmware ${community.others.map((o) => `${escapeHtml(o.firmware)} (${o.total})`).join(", ")}.</p>`
+      : "";
+    if (!community.here) {
+      return `<p class="hint">${community.total} answer${community.total === 1 ? "" : "s"} for this model, none yet for this firmware.</p>${otherFw}`;
+    }
+    const lines = summaryLines(q, community.here);
+    const html = lines
+      .map((u) => {
+        const rating =
+          u.rating != null
+            ? `<span class="answers-rating">★ ${u.rating.toFixed(1)} <span class="muted">from ${u.ratingCount}</span></span>`
+            : u.ratingCount
+            ? `<span class="muted">${u.ratingCount} rating${u.ratingCount === 1 ? "" : "s"} (average shown from 3)</span>`
+            : "";
+        const qs = u.questions
+          .slice(0, 8)
+          .map((x) => `<li><span>${escapeHtml(x.text)}</span> <span class="muted">${escapeHtml(answerCountsText(x))}</span></li>`)
+          .join("");
+        const tips = u.tips.length
+          ? `<ul class="answers-tips">${u.tips.map((t) => `<li>“${escapeHtml(t.text)}”</li>`).join("")}</ul>`
+          : "";
+        return `<details class="answers-use" ${lines.length === 1 ? "open" : ""}><summary><strong>${escapeHtml(u.useLabel)}</strong>
+            <span class="muted">${u.count} ${u.count === 1 ? "person" : "people"}</span> ${rating}</summary>
+            <ul class="answers-list">${qs}</ul>${tips}</details>`;
+      })
+      .join("");
+    const linked = community.here.scan_linked ? "" : ` <span class="muted">(no scan of this firmware in the database yet)</span>`;
+    return `<p class="hint">On firmware ${escapeHtml(community.hereKey)}${linked}:</p>${html}${otherFw}`;
+  }
+
+  _answersFormHtml(q, d, fw, draft, mine) {
+    const fwText = fw.sw_build_id || fw.registry_sw_version;
+    const sel = (name, options, value, extra = "") =>
+      `<select data-answer="${escapeHtml(name)}" ${extra}><option value="">–</option>${options
+        .map((o) => `<option value="${escapeHtml(o.id)}" ${o.id === value ? "selected" : ""}>${escapeHtml(o.label)}</option>`)
+        .join("")}</select>`;
+    const otherBox = (key, value, placeholder) =>
+      `<input type="text" class="answers-other" data-other="${escapeHtml(key)}" maxlength="${q.free_text_max || 280}" value="${escapeHtml(
+        value || ""
+      )}" placeholder="${escapeHtml(placeholder)}">`;
+    const firmwareChanged = !!(mine && mine.firmware && fwText && mine.firmware !== fwText);
+    const uses = useAnswers(q, draft.deviceType);
+    const useOptions = [...uses, { id: "other", label: "Something else…" }];
+    const battery = /battery/i.test(String(d.power_source || "")) ? true : /mains/i.test(String(d.power_source || "")) ? false : null;
+    const { main, more } = draft.use ? formQuestions(q, draft.deviceType, draft.use, { firmwareChanged, battery }) : { main: [], more: [] };
+    const qRow = (x) => {
+        const opts = [...x.answers, ...(x.allow_other ? [{ id: "other", label: x.other_label || "Other…" }] : [])];
+        const v = draft.answers[x.id] || "";
+        return `<label class="answers-q"><span>${escapeHtml(x.text)}${x.help ? ` <span class="muted">${escapeHtml(x.help)}</span>` : ""}</span>
+          ${sel(`q:${x.id}`, opts, v)}
+          ${v === "other" ? otherBox(x.id, (draft.other || {})[x.id], "Tell us (no names or addresses)") : ""}</label>`;
+    };
+    const moreAnswered = more.some((x) => draft.answers[x.id]);
+    const qHtml =
+      main.map(qRow).join("") +
+      (more.length
+        ? `<details class="answers-more" ${moreAnswered || this._answersMoreOpen ? "open" : ""}><summary>More questions (${more.length})</summary>${more
+            .map(qRow)
+            .join("")}</details>`
+        : "");
+    const ratingOpts = Object.entries(q.rating.labels).map(([n, l]) => ({ id: n, label: `${"★".repeat(Number(n))} ${l}` }));
+    const ctx = (q.context || [])
+      .map((c) => `<label class="answers-q"><span>${escapeHtml(c.text)}</span>${sel(`ctx:${c.id}`, c.answers, (draft.context || {})[c.id] || "")}</label>`)
+      .join("");
+    const problem = draftProblem(q, fw, draft);
+    return `<div class="answers-form">
+      <p class="hint">Answer for this one device, firmware ${fwText ? escapeHtml(fwText) : "<strong>unknown</strong>"}. Skip anything you're not sure about.
+        Free text is checked before it's shown, so leave out names, places and addresses.</p>
+      ${
+        fwText
+          ? ""
+          : `<p class="hint health-warning">The firmware isn't known yet: run <strong>Check and share capabilities…</strong> once (it reads it from the device).</p>`
+      }
+      <label class="answers-q"><span>What kind of device is it?</span>${sel("type", q.device_types, draft.deviceType)}</label>
+      <label class="answers-q"><span>${escapeHtml(q.use.text)}</span>${sel("use", useOptions, draft.use)}
+        ${draft.use === "other" ? otherBox("use", (draft.other || {}).use, "What do you use it for?") : ""}</label>
+      ${draft.use ? qHtml : `<p class="hint">${escapeHtml(q.use.help || "")}</p>`}
+      ${
+        draft.use
+          ? `<label class="answers-q"><span>${escapeHtml(q.rating.text)}</span>${sel("rating", ratingOpts, draft.rating != null ? String(draft.rating) : "")}</label>
+             <details class="answers-context"><summary>About your setup (optional)</summary>${ctx}</details>
+             <label class="answers-q"><span>${escapeHtml(q.tip.text)} <span class="muted">${escapeHtml(q.tip.help || "")}</span></span>
+               <textarea class="answers-tip" maxlength="${q.free_text_max || 280}" rows="2">${escapeHtml(draft.tip || "")}</textarea></label>`
+          : ""
+      }
+      <div class="dialog-actions">
+        <a class="btn btn-small btn-primary ${problem ? "disabled" : ""}" id="drawer-answers-submit" href="#" ${problem ? `aria-disabled="true" title="${escapeHtml(problem)}"` : ""}>Review on GitHub and submit</a>
+        <button class="btn btn-small" id="drawer-answers-cancel">Cancel</button>
+      </div>
+      ${problem && draft.use ? `<p class="hint">${escapeHtml(problem)}</p>` : ""}
+      <p class="hint">Opens a pre-filled GitHub issue; nothing is sent until you press Submit there. Not using GitHub? The same questions are on the
+        <a href="${escapeHtml(ISSUE_FORM_URL)}" target="_blank" rel="noopener">community form</a>.</p>
+    </div>`;
+  }
+
+  _wireDrawerAnswers(d) {
+    const root = this._q("#drawer-body .drawer-answers");
+    if (!root) return;
+    const ieee = normIeee(d.ieee);
+    const share = root.querySelector("#drawer-answers-share");
+    if (share)
+      share.addEventListener("click", () => {
+        this._drawerShareOpen = true;
+        this._renderDrawer();
+        const box = this._q("#drawer-body .drawer-share");
+        if (box && box.scrollIntoView) box.scrollIntoView({ block: "nearest", behavior: "smooth" });
+      });
+    const start = root.querySelector("#drawer-answers-start");
+    if (start)
+      start.addEventListener("click", () => {
+        const mine = this._answersStoreRead("zbm-device-answers")[ieee];
+        const prev = (mine && mine.draft) || {};
+        this._answerDraft = {
+          ieee,
+          deviceType: prev.deviceType || detectDeviceType(this._clusterCache.get(d.ieee), d.power_source),
+          use: prev.use || "",
+          answers: { ...(prev.answers || {}) },
+          other: { ...(prev.other || {}) },
+          rating: prev.rating != null ? prev.rating : null,
+          tip: prev.tip || "",
+          context: { system: "zha", ...(prev.context || {}) },
+        };
+        this._renderDrawer();
+      });
+    const draft = this._answerDraft && this._answerDraft.ieee === ieee ? this._answerDraft : null;
+    if (!draft) return;
+    root.querySelectorAll("select[data-answer]").forEach((el) =>
+      el.addEventListener("change", () => {
+        const name = el.dataset.answer;
+        const v = el.value;
+        if (name === "type") {
+          draft.deviceType = v;
+          draft.use = "";
+        } else if (name === "use") draft.use = v;
+        else if (name === "rating") draft.rating = v ? Number(v) : null;
+        else if (name.startsWith("q:")) draft.answers[name.slice(2)] = v;
+        else if (name.startsWith("ctx:")) draft.context[name.slice(4)] = v;
+        this._renderDrawer();
+      })
+    );
+    root.querySelectorAll("input[data-other]").forEach((el) =>
+      el.addEventListener("input", () => {
+        draft.other[el.dataset.other] = el.value;
+        this._answersRefreshSubmit(d);
+      })
+    );
+    const moreBox = root.querySelector(".answers-more");
+    if (moreBox) moreBox.addEventListener("toggle", () => (this._answersMoreOpen = moreBox.open));
+    const tip = root.querySelector(".answers-tip");
+    if (tip) tip.addEventListener("input", () => (draft.tip = tip.value));
+    const cancel = root.querySelector("#drawer-answers-cancel");
+    if (cancel)
+      cancel.addEventListener("click", () => {
+        this._answerDraft = null;
+        this._renderDrawer();
+      });
+    const submit = root.querySelector("#drawer-answers-submit");
+    if (submit)
+      submit.addEventListener("click", (e) => {
+        e.preventDefault();
+        const q = this._answersQ;
+        const fw = this._deviceFirmware(d);
+        const problem = draftProblem(q, fw, draft);
+        if (problem) {
+          this._setStatus("warning", problem);
+          return;
+        }
+        const mine = this._answersStoreRead("zbm-device-answers")[ieee];
+        const fwText = fw.sw_build_id || fw.registry_sw_version;
+        const record = buildRecord(q, d, fw, { ...draft, firmwareChanged: !!(mine && mine.firmware && mine.firmware !== fwText) }, CARD_VERSION);
+        window.open(answersIssueUrl(record), "_blank", "noopener");
+        const all = this._answersStoreRead("zbm-device-answers");
+        const { ieee: _i, ...keep } = draft;
+        all[ieee] = { at: new Date().toISOString(), firmware: fwText, draft: keep };
+        this._answersStoreWrite("zbm-device-answers", all);
+        this._answerDraft = null;
+        this._setStatus(
+          "success",
+          "Opened your answers as a GitHub issue: press Submit there. They show up for everyone once the database has merged them.",
+          0
+        );
+        this._renderDrawer();
+      });
+  }
+
+  /** Re-checks the submit button while typing, without re-rendering (which
+   *  would take the cursor out of the box). */
+  _answersRefreshSubmit(d) {
+    const btn = this._q("#drawer-answers-submit");
+    if (!btn || !this._answerDraft) return;
+    const problem = draftProblem(this._answersQ, this._deviceFirmware(d), this._answerDraft);
+    btn.classList.toggle("disabled", !!problem);
+    if (problem) btn.setAttribute("title", problem);
+    else btn.removeAttribute("title");
+  }
+
+  /** Sends On/Off itself (a remote or switch), so a press can be checked. */
+  _isRemoteLike(d) {
+    return (this._clusterCache.get(d.ieee) || []).some((c) => c.type === "out" && Number(c.id) === 0x0006);
+  }
+
   /** Side panel: lost bindings and the watch setting for one device. */
   _drawerLostHtml(d, rel) {
     const hasOwn = rel.controls.length > 0 || this._rawBindings().some((b) => normIeee(b.sourceIeee) === normIeee(d.ieee));
@@ -1292,6 +1931,14 @@ export class ZhaBindingMapCard extends HTMLElement {
       <label class="drawer-lost-policy">If it loses a binding:
         <select id="drawer-lost-policy" ${busy ? "disabled" : ""}>${opts}</select></label>
       <p class="hint">${escapeHtml(POLICY_HINTS[w.policy] || "")}</p>
+      ${
+        w.policy !== "off" && this._isRemoteLike(d)
+          ? `<label class="drawer-lost-policy"><input type="checkbox" id="drawer-lost-fallback" ${w.fallback ? "checked" : ""} ${busy ? "disabled" : ""}>
+              Switch the lights from Home Assistant if a press doesn't reach them</label>
+             <p class="hint">After On, Off or Toggle, any light it's bound to directly that hasn't changed within 2 seconds is switched by Home Assistant,
+               logged, and this device's bindings are checked straight away.</p>`
+          : ""
+      }
       <details class="drawer-lost-expect"><summary>What to expect</summary>
         <ul>
           <li>Battery devices only answer when awake: a lost binding on one is noticed and put back after you press a button.</li>
@@ -1299,6 +1946,9 @@ export class ZhaBindingMapCard extends HTMLElement {
             Zigbee2MQTT migration), it stops after 3 times a day.</li>
           <li>Removing a binding in this card is never treated as lost. Removing one somewhere else is: use "Removed on purpose".</li>
           <li>A device with a full binding table can't take it back; Put back then says it's still missing.</li>
+          <li>Switching from Home Assistant needs lights that report their state promptly, works for On, Off and Toggle only, and
+            never for group bindings: a light missing one group message hasn't lost a binding. Toggle is skipped when the lights
+            weren't all on or all off before the press.</li>
         </ul>
       </details>
     </div>`;
@@ -3187,6 +3837,40 @@ export class ZhaBindingMapCard extends HTMLElement {
         this._edgesLayer.appendChild(line);
       });
 
+    // 1.8.0: lost bindings (the device had them and doesn't any more),
+    // dashed red. Click: open the device's side panel to put them back.
+    if (this._watchEnabled) {
+      for (const dev of lostSummary(this._lost).devices) {
+        for (const b of dev.lost) {
+          const fromKey = this._nodeKey(b.sourceIeee || dev.ieee);
+          const toKey = b.isGroup ? this._groupNodeKey(b.groupId) : this._nodeKey(b.targetIeee);
+          if (!visibleKeys.has(fromKey) || !visibleKeys.has(toKey)) continue;
+          const pairKey = `${fromKey}->${toKey}`;
+          const idx = pairCount.get(pairKey) || 0;
+          pairCount.set(pairKey, idx + 1);
+          const line = this._svgEl("path", {
+            class: "edge edge-lost",
+            "data-from": fromKey,
+            "data-to": toKey,
+            "data-offset": idx,
+            stroke: LOST_EDGE_COLOR,
+            fill: "none",
+            "marker-end": "url(#arrow)",
+          });
+          line.style.setProperty("--edge-color", LOST_EDGE_COLOR);
+          const title = this._svgEl("title");
+          title.textContent = `Lost: ${b.text || b.key}. The device had this binding and doesn't any more. Click to put it back.`;
+          line.appendChild(title);
+          line.addEventListener("click", (ev) => {
+            ev.stopPropagation();
+            const d = this._devices.find((x) => normIeee(x.ieee) === dev.ieee);
+            if (d) this._openDeviceDrawer(d);
+          });
+          this._edgesLayer.appendChild(line);
+        }
+      }
+    }
+
     // Group -> member edges, from real group membership data (see
     // _membershipEdges) — drawn with the same weight as a control binding
     // so switch -> group -> member reads as one continuous path.
@@ -4755,6 +5439,7 @@ export class ZhaBindingMapCard extends HTMLElement {
         ${rel.memberOf.length ? `<p class="hint">Member of ${rel.memberOf.map((g) => escapeHtml(g.name)).join(", ")}.</p>` : ""}
       </div>
       ${this._drawerLostHtml(d, rel)}
+      ${this._drawerAnswersHtml(d)}
       ${this._drawerMeshHtml(d)}
       <div class="drawer-section drawer-actions">
         <div class="drawer-section-title">Actions</div>
@@ -4769,6 +5454,7 @@ export class ZhaBindingMapCard extends HTMLElement {
             : ""
         }
         <button class="btn" id="drawer-endpoints" title="Per-endpoint layout: clusters, bindings and supported commands">Show endpoints…</button>
+        <button class="btn" id="drawer-replace" title="Swapping this device for another one: copies its bindings and groups to the new device, after checking it can do the same job">Replace this device…</button>
         ${haUrl ? `<a class="btn" href="${escapeHtml(haUrl)}" target="_blank" rel="noopener" title="Opens this device's page in Home Assistant, in a new tab">Open in Home Assistant</a>` : ""}
       </div>`;
     const on = (sel, fn) => {
@@ -4782,6 +5468,7 @@ export class ZhaBindingMapCard extends HTMLElement {
       })
     );
     on("#drawer-control-lights", () => this._openGroupFlow(d));
+    on("#drawer-replace", () => this._openReplace({ ieee: d.ieee }));
     const showBindings = (e) => {
       if (e) e.preventDefault();
       this._setTableDeviceFilter(d.ieee);
@@ -4791,12 +5478,18 @@ export class ZhaBindingMapCard extends HTMLElement {
     on("#drawer-show-bindings", showBindings);
     on("#drawer-problems-link", showBindings);
     on("#drawer-lost-put-back", () => this._lostPutBack(d.ieee));
+    this._wireDrawerAnswers(d);
     const lostForget = this._q("#drawer-lost-forget");
     if (lostForget)
       lostForget.addEventListener("click", (e) => {
         e.preventDefault();
         this._lostForget(d.ieee, null);
       });
+    const lostFallback = this._q("#drawer-lost-fallback");
+    if (lostFallback)
+      lostFallback.addEventListener("change", () =>
+        this._lostAction("Change setting", () => this._api.watchFallback(d.ieee, lostFallback.checked))
+      );
     const lostPolicy = this._q("#drawer-lost-policy");
     if (lostPolicy)
       lostPolicy.addEventListener("change", () =>
@@ -6054,6 +6747,7 @@ export class ZhaBindingMapCard extends HTMLElement {
     // since the anchor click keeps this page's script running regardless.
     this._qa(".ep-cmd-share-open").forEach((a) => {
       a.addEventListener("click", async () => {
+        if (this._shareDraft) this._markScanShared(this._shareDraft.key, this._shareDraft.record);
         if (!this._shareDraft || !this._shareDraft.tooLong) return;
         const original = a.textContent;
         const ok = await this._copyShareText(this._shareDraft.body);
@@ -7304,6 +7998,7 @@ export class ZhaBindingMapCard extends HTMLElement {
         sources === 1 ? "" : "s"
       } point to devices that are no longer in ZHA. They use binding-table slots and send commands to nobody.</span>
           <button class="btn btn-small" id="btn-stale-show">Show</button>
+          <button class="btn btn-small" id="btn-stale-move" title="Replaced it with a new device? Point these bindings at the new one instead">Move to a new device…</button>
           <button class="btn btn-small btn-danger" id="btn-stale-unbind-all">Unbind all</button>
         </div>`);
     }
@@ -7328,6 +8023,8 @@ export class ZhaBindingMapCard extends HTMLElement {
         );
         this._renderTable();
       });
+    const move = this._q("#btn-stale-move");
+    if (move) move.addEventListener("click", () => this._openReplace({ deadTargets: [...new Set(dead.map((b) => normIeee(b.targetIeee)))] }));
     const unbindAll = this._q("#btn-stale-unbind-all");
     if (unbindAll) unbindAll.addEventListener("click", () => this._confirmUnbindDeadTargets());
     const forgetAll = this._q("#btn-stale-forget-all");

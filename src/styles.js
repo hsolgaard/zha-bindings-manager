@@ -189,6 +189,20 @@ a.health-chip-lost { text-decoration:none; cursor:pointer; }
 .drawer-lost-policy { display:flex; align-items:center; gap:6px; flex-wrap:wrap; margin-top:8px; font-size:0.9em; }
 .drawer-lost-expect { margin-top:4px; font-size:0.88em; }
 .drawer-lost-expect ul { margin:4px 0; padding-left:18px; }
+.answers-locked { opacity: 0.85; }
+.answers-preview { margin:6px 0; padding-left:18px; font-size:0.9em; }
+.answers-preview li { margin:3px 0; }
+.answers-form { display:flex; flex-direction:column; gap:8px; }
+.answers-q { display:flex; flex-direction:column; gap:3px; font-size:0.92em; }
+.answers-q select, .answers-q input, .answers-q textarea { max-width:100%; font:inherit; }
+.answers-other { margin-top:2px; }
+.answers-use { margin:4px 0; font-size:0.92em; }
+.answers-use summary { cursor:pointer; }
+.answers-list, .answers-tips { margin:4px 0; padding-left:18px; }
+.answers-list li { margin:2px 0; }
+.answers-tips li { font-style:italic; }
+.answers-rating { color:#b26a00; }
+.btn.disabled { opacity:0.5; pointer-events:auto; cursor:not-allowed; }
 .table-filter-info { display:flex; flex-wrap:wrap; align-items:center; gap:10px; margin-bottom:8px; padding:6px 10px;
   border-radius:8px; background: rgba(76,154,255,0.12); font-size:0.85em; }
 .dir-cell { white-space:nowrap; font-weight:600; }
@@ -318,6 +332,7 @@ a.health-chip-lost { text-decoration:none; cursor:pointer; }
 .mesh-picture { position: relative; }
 .mesh-picture > .mesh-selected { position: absolute; left: 8px; top: 8px; z-index: 2; max-width: min(340px, calc(100% - 16px)); background: var(--card-background-color, #fff); box-shadow: 0 2px 8px rgba(0,0,0,0.25); }
 .edge-pending { stroke-dasharray: 6 5; opacity: 0.85; cursor: pointer; }
+.edge-lost { stroke-dasharray: 7 5; stroke-width: 2.5; opacity: 0.9; cursor: pointer; }
 .mesh-show-hint { margin:4px 0 0; }
 .mesh-battery circle { fill: var(--card-background-color, #fff); stroke-width:2; }
 .mesh-battery.orphan circle { stroke: var(--disabled-text-color, #999) !important; stroke-dasharray: 2 2; }

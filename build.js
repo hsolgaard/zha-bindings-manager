@@ -18,7 +18,7 @@ const watch = process.argv.includes("--watch");
 // than symlinked so docs/ stays a normal, self-contained static directory
 // (GitHub Pages doesn't reliably follow symlinks anyway).
 function syncCapexplorerToDocs() {
-  const files = ["capexplorer.js", "capexplorer-constants.js"];
+  const files = ["capexplorer.js", "capexplorer-constants.js", "device-answers.js"];
   fs.mkdirSync("docs", { recursive: true });
   for (const file of files) {
     fs.copyFileSync(path.join("src", file), path.join("docs", file));

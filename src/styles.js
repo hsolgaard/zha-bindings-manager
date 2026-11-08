@@ -177,6 +177,18 @@ a.btn { display:inline-block; text-decoration:none; }
 .status .status-action { margin-left:8px; flex:0 0 auto; }
 .stale-row { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
 .stale-row > span { flex: 1 1 260px; }
+.lost-banner { background: rgba(219,68,55,0.10); }
+.lost-list { margin-top:8px; display:flex; flex-direction:column; gap:8px; }
+.lost-device { padding:6px 8px; border-radius:6px; background: var(--card-background-color, rgba(255,255,255,0.6)); }
+.lost-device-head { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+.lost-device-head .muted { flex: 1 1 160px; }
+.lost-device ul { margin:4px 0 0 0; padding-left:18px; }
+.lost-device li { margin:2px 0; }
+a.health-chip-lost { text-decoration:none; cursor:pointer; }
+.drawer-lost { margin:0 0 6px 0; padding-left:18px; }
+.drawer-lost-policy { display:flex; align-items:center; gap:6px; flex-wrap:wrap; margin-top:8px; font-size:0.9em; }
+.drawer-lost-expect { margin-top:4px; font-size:0.88em; }
+.drawer-lost-expect ul { margin:4px 0; padding-left:18px; }
 .table-filter-info { display:flex; flex-wrap:wrap; align-items:center; gap:10px; margin-bottom:8px; padding:6px 10px;
   border-radius:8px; background: rgba(76,154,255,0.12); font-size:0.85em; }
 .dir-cell { white-space:nowrap; font-weight:600; }

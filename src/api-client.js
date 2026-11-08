@@ -8,6 +8,53 @@ import { normalizeBinding, extractBindingsFromReplies, bindingIdentityKey } from
 export class ZhaApi {
   constructor(hass) {
     this.hass = hass;
+    /** Set by the card when the integration watches for lost bindings
+     *  (1.8.0): unbinds made here are then reported as "removed on
+     *  purpose", so the watch doesn't put them back. */
+    this.watchEnabled = false;
+  }
+
+  // --- Lost bindings (integration 1.8.0) -------------------------------------
+
+  async watchGet() {
+    return this.hass.callWS({ type: "zha_bindings_manager/watch_get" });
+  }
+
+  /** Puts lost bindings back: one device, or every device when ieee is omitted. */
+  async watchPutBack(ieee) {
+    const msg = { type: "zha_bindings_manager/watch_put_back" };
+    if (ieee) msg.ieee = ieee;
+    return this.hass.callWS(msg);
+  }
+
+  /** Stops expecting bindings (all of a device's, or just these keys). */
+  async watchForget(ieee, keys) {
+    const msg = { type: "zha_bindings_manager/watch_forget", ieee };
+    if (keys && keys.length) msg.keys = keys;
+    return this.hass.callWS(msg);
+  }
+
+  async watchPolicy(ieee, policy) {
+    return this.hass.callWS({ type: "zha_bindings_manager/watch_policy", ieee, policy });
+  }
+
+  async watchCheckAll() {
+    return this.hass.callWS({ type: "zha_bindings_manager/watch_check_all" });
+  }
+
+  /** Tells the watch which bindings were removed on purpose. Patterns:
+   *  {sourceIeee, sourceEndpoint?, clusterIds?, isGroup?, groupId?,
+   *  targetIeee?, targetEndpoint?}; anything left out matches all. Never
+   *  throws: this is bookkeeping, the unbind itself already happened. */
+  async _reportRemoved(pattern) {
+    if (!this.watchEnabled) return;
+    const clean = {};
+    for (const [k, v] of Object.entries(pattern)) if (v != null) clean[k] = v;
+    try {
+      await this.hass.callWS({ type: "zha_bindings_manager/watch_removed", bindings: [clean] });
+    } catch (e) {
+      /* older integration, or watch switched off */
+    }
   }
 
   async fetchDevices() {
@@ -205,7 +252,15 @@ export class ZhaApi {
     if (clusterIds && clusterIds.length) data.cluster = clusterIds;
     if (opts.endpoint != null) data.endpoint = opts.endpoint;
     if (opts.dstEndpoint != null) data.dst_endpoint = opts.dstEndpoint;
-    return this.callToolkit("binds_remove_all", data);
+    const res = await this.callToolkit("binds_remove_all", data);
+    await this._reportRemoved({
+      sourceIeee,
+      sourceEndpoint: opts.endpoint,
+      clusterIds: clusterIds && clusterIds.length ? clusterIds.map(Number) : null,
+      targetIeee,
+      targetEndpoint: opts.dstEndpoint,
+    });
+    return res;
   }
 
   /** Live per-device command-discovery scan via zha_toolkit.scan_device —
@@ -251,6 +306,12 @@ export class ZhaApi {
     });
   }
 
+  /** Creates a ZHA group with a given group ID (one that devices already
+   *  use, e.g. made by Find & Bind). */
+  async createGroupWithId(name, groupId) {
+    return this.hass.callWS({ type: "zha/group/add", group_name: name, group_id: Number(groupId) });
+  }
+
   /** Adds [{ieee, endpoint}] to an existing ZHA group. */
   async addGroupMembers(groupId, members) {
     return this.hass.callWS({
@@ -265,7 +326,9 @@ export class ZhaApi {
    *  group bindings included. Used for a light's reporting binding to a
    *  group, which unbind_group can't remove (see groups.js). */
   async removeBindingsOnCluster(sourceIeee, endpoint, clusterId) {
-    return this.callToolkit("binds_remove_all", { ieee: sourceIeee, endpoint: Number(endpoint), cluster: [Number(clusterId)] });
+    const res = await this.callToolkit("binds_remove_all", { ieee: sourceIeee, endpoint: Number(endpoint), cluster: [Number(clusterId)] });
+    await this._reportRemoved({ sourceIeee, sourceEndpoint: Number(endpoint), clusterIds: [Number(clusterId)] });
+    return res;
   }
 
   /** Removes [{ieee, endpoint}] from a ZHA group (ZHA's own websocket). */
@@ -286,6 +349,14 @@ export class ZhaApi {
     const data = { ieee: sourceIeee, command_data: groupId };
     if (clusterIds && clusterIds.length === 1) data.cluster = clusterIds[0];
     if (opts.endpoint != null) data.endpoint = opts.endpoint;
-    return this.callToolkit("unbind_group", data);
+    const res = await this.callToolkit("unbind_group", data);
+    await this._reportRemoved({
+      sourceIeee,
+      sourceEndpoint: opts.endpoint,
+      clusterIds: clusterIds && clusterIds.length === 1 ? [Number(clusterIds[0])] : null,
+      isGroup: true,
+      groupId: Number(groupId),
+    });
+    return res;
   }
 }

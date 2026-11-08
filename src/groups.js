@@ -39,6 +39,25 @@ export function groupRows({ groups, bindings, classify, coordinatorIeee }) {
 }
 
 /**
+ * Groups that bindings point at but Home Assistant doesn't know: usually
+ * made on the devices themselves (Find & Bind, a remote's pairing button, or
+ * another Zigbee system). [{groupId, controllers:[{sourceIeee, endpoint,
+ * clusters}], others}], by group id. Commands to them still reach every
+ * device that joined the group; Home Assistant just can't show or change it.
+ */
+export function deviceOnlyGroups({ groups, bindings, classify, coordinatorIeee }) {
+  const known = new Set((groups || []).map((g) => Number(g.group_id)));
+  const ids = new Set();
+  for (const b of bindings || []) {
+    if (b && b.isGroup && Number.isFinite(Number(b.groupId)) && !known.has(Number(b.groupId))) ids.add(Number(b.groupId));
+  }
+  const fake = [...ids].map((id) => ({ group_id: id, name: `Group ${groupIdHex(id)}`, members: [] }));
+  return groupRows({ groups: fake, bindings, classify, coordinatorIeee })
+    .map(({ groupId, controllers, others }) => ({ groupId, controllers, others }))
+    .sort((a, b) => a.groupId - b.groupId);
+}
+
+/**
  * The unbinds that clean up every binding pointing at a group before it's
  * deleted: [{sourceIeee, endpoint, clusterId, method}], one per binding.
  *

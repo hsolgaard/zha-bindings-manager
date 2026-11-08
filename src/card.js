@@ -35,10 +35,12 @@ import {
   deviceHaUrl,
   toCsv,
   downloadFile,
+  extractErrorMessage,
 } from "./utils.js";
 import { bindingMatches, bindingMatchesLoose, bindingKey, isIeee, sanitizeStoredBindings } from "./parser.js";
 import { activityRows, clusterLabel, interestingCounters, timesTypical, TOP_ROWS } from "./activity.js";
 import { ZhaApi } from "./api-client.js";
+import { lostSummary, lostFor, putBackMessage, sinceText, NOTICED_BY, POLICIES, POLICY_LABELS, POLICY_HINTS } from "./lost.js";
 import { SHELL_HTML } from "./template.js";
 import { LocalStorageProvider } from "./storage/local-storage-provider.js";
 import { HaStorageProvider } from "./storage/ha-storage-provider.js";
@@ -80,7 +82,7 @@ import { COMMAND_CHECK_LIMIT_MS, formatElapsed, shouldApplyResult } from "./comm
 import { bindOutcome, unbindOutcome, OUTCOME_LEVEL, pendingKey, reconcilePending } from "./action-verify.js";
 import { STYLE } from "./styles.js";
 import { explainUnbindFailure, toolkitErrorText } from "./unbind-errors.js";
-import { groupRows, groupUnbindPlan, groupIdHex, groupDeleteReasons } from "./groups.js";
+import { groupRows, groupUnbindPlan, groupIdHex, groupDeleteReasons, deviceOnlyGroups } from "./groups.js";
 import { LQI_RECOMMENDED, buildMesh, routePath, pathVerdict, rateLqi, groupCheck, weakestLinks, meshSuggestions, isRouterLike, visibleRouterLinks } from "./mesh.js";
 import {
   DIRECTION_ALL,
@@ -367,6 +369,7 @@ export class ZhaBindingMapCard extends HTMLElement {
     const first = !this._hass;
     this._hass = hass;
     this._api = new ZhaApi(hass);
+    this._api.watchEnabled = !!this._watchEnabled;
     if (first) {
       this._render();
       this._loadAll();
@@ -618,6 +621,8 @@ export class ZhaBindingMapCard extends HTMLElement {
     this._backendVersion = probe.version;
     this._bundledCardVersion = probe.bundledCardVersion;
     this._experimental = probe.experimental;
+    this._watchEnabled = !!probe.watch;
+    if (this._api) this._api.watchEnabled = this._watchEnabled;
     this._lqiThr = probe.lqi || { ...LQI_RECOMMENDED };
     this._toggleExperimentalUi();
     if (!this._backendAvailable) {
@@ -1092,6 +1097,211 @@ export class ZhaBindingMapCard extends HTMLElement {
     await this._reloadDevices({ initial: true });
     this._openDeepLinkedDevice();
     this._pickUpIntegrationScans();
+    this._lostLoad();
+  }
+
+  // -------------------------------------------------------------------
+  // Lost bindings (1.8.0, integration only)
+  // -------------------------------------------------------------------
+
+  /** Reads what the integration's watch knows: bindings that were there
+   *  before and aren't any more. */
+  async _lostLoad() {
+    if (!this._watchEnabled || !this._api) {
+      this._lost = null;
+      this._renderLostBanner();
+      return;
+    }
+    try {
+      this._lost = await this._api.watchGet();
+    } catch (e) {
+      this._lost = null; // older integration, or watch switched off
+    }
+    this._renderLostBanner();
+    this._renderHealthSummary(this._computeHealthMap());
+    if (this._drawerIeee) this._renderDrawer();
+  }
+
+  /** After a scan: the integration compares the newly saved scan with what
+   *  it expected, which takes a moment. */
+  _lostSoon() {
+    if (!this._watchEnabled) return;
+    clearTimeout(this._lostTimer);
+    this._lostTimer = setTimeout(() => this._lostLoad(), 1500);
+  }
+
+  async _lostAction(label, fn) {
+    if (this._lostBusy) return;
+    this._lostBusy = label;
+    this._renderLostBanner();
+    if (this._drawerIeee) this._renderDrawer();
+    try {
+      return await fn();
+    } catch (err) {
+      this._setStatus("error", `${label} failed: ${extractErrorMessage(err)}`, 0);
+      return null;
+    } finally {
+      this._lostBusy = null;
+      await this._lostLoad();
+    }
+  }
+
+  async _lostPutBack(ieee) {
+    const res = await this._lostAction(ieee ? "Put back" : "Put all back", () => this._api.watchPutBack(ieee));
+    if (!res) return;
+    const nameOf = (i) => {
+      const d = this._devices.find((x) => normIeee(x.ieee) === normIeee(i));
+      return d ? this._deviceLabel(d) : i;
+    };
+    const m = putBackMessage(res.results, nameOf);
+    this._setStatus(m.level, m.text, 0);
+    // The card's own copy of the binding table is now out of date.
+    const done = Object.entries(res.results || {}).filter(([, st]) => st === "put_back").map(([i]) => i);
+    if (done.length) this._scanBindings(done, { tries: 1 });
+  }
+
+  async _lostForget(ieee, key) {
+    await this._lostAction("Removed on purpose", () => this._api.watchForget(ieee, key ? [key] : null));
+  }
+
+  async _lostCheckAll() {
+    const res = await this._lostAction("Check for lost bindings", () => this._api.watchCheckAll());
+    if (!res) return;
+    const vals = Object.values((res && res.results) || res || {});
+    const asleep = vals.filter((v) => v === "no_answer").length;
+    const lost = lostSummary(this._lost).total;
+    this._setStatus(
+      lost ? "warning" : "success",
+      `Checked ${vals.length} device${vals.length === 1 ? "" : "s"}: ${lost ? `${lost} lost binding${lost === 1 ? "" : "s"}` : "nothing lost"}.${
+        asleep ? ` ${asleep} didn't answer (asleep or off); they're checked again when they next wake up.` : ""
+      }`,
+      0
+    );
+  }
+
+  _renderLostBanner() {
+    const el = this._q("#lost-banner");
+    if (!el) return;
+    const sum = lostSummary(this._lost);
+    if (!this._watchEnabled || !sum.total) {
+      el.style.display = "none";
+      el.innerHTML = "";
+      return;
+    }
+    const busy = this._lostBusy;
+    const nDev = sum.devices.length;
+    const list = this._lostOpen
+      ? `<div class="lost-list">${sum.devices
+          .map(
+            (d) => `<div class="lost-device">
+              <div class="lost-device-head">
+                <a href="#" class="src-link lost-dev-link" data-ieee="${escapeHtml(d.ieee)}"><strong>${escapeHtml(this._ieeeLabel(d.ieee, { plain: true }) || d.name)}</strong></a>
+                <span class="muted">${escapeHtml(POLICY_LABELS[d.policy] || d.policy)}${d.autoPaused ? " · stopped putting back automatically (3 times today)" : ""}${d.queued ? " · waiting for it to wake up" : ""}</span>
+                <button class="btn btn-small lost-put-back" data-ieee="${escapeHtml(d.ieee)}" ${busy ? "disabled" : ""}>Put back</button>
+              </div>
+              <ul>${d.lost
+                .map(
+                  (b) => `<li><span>${escapeHtml(b.text || b.key)}</span> <span class="muted">${escapeHtml(
+                    [NOTICED_BY[b.noticed_by] || "", sinceText(b.since)].filter(Boolean).join(", ")
+                  )}</span> · <a href="#" class="src-link lost-forget" data-ieee="${escapeHtml(d.ieee)}" data-key="${escapeHtml(
+                    b.key
+                  )}" title="You removed it yourself (outside this card, e.g. by resetting the device). Stop expecting it.">Removed on purpose</a></li>`
+                )
+                .join("")}</ul>
+            </div>`
+          )
+          .join("")}</div>`
+      : "";
+    el.innerHTML = `
+      <div class="stale-row">
+        <span><strong>${sum.total} lost binding${sum.total === 1 ? "" : "s"}</strong> on ${nDev} device${nDev === 1 ? "" : "s"}:
+          ${nDev === 1 ? "it" : "they"} had ${sum.total === 1 ? "this binding" : "these bindings"} before and don't any more, so a button may no longer
+          control what it used to.${
+            sum.queued
+              ? ` ${sum.queued} ${sum.queued === 1 ? "is" : "are"} asleep: ${sum.queued === 1 ? "it'll" : "they'll"} be put back the next time you press one of ${
+                  sum.queued === 1 ? "its" : "their"
+                } buttons.`
+              : ""
+          }</span>
+        <button class="btn btn-small" id="btn-lost-show">${this._lostOpen ? "Hide" : "Show"}</button>
+        <button class="btn btn-small" id="btn-lost-check" ${busy ? "disabled" : ""} title="Read every watched device's binding table now">${
+          busy === "Check for lost bindings" ? "Checking…" : "Check again"
+        }</button>
+        <button class="btn btn-small btn-primary" id="btn-lost-put-back-all" ${busy ? "disabled" : ""}>${
+          busy === "Put all back" ? "Putting back…" : "Put all back"
+        }</button>
+      </div>${list}`;
+    el.style.display = "";
+    const on = (sel, fn) => {
+      const b = this._q(sel);
+      if (b) b.addEventListener("click", fn);
+    };
+    on("#btn-lost-show", () => {
+      this._lostOpen = !this._lostOpen;
+      this._renderLostBanner();
+    });
+    on("#btn-lost-check", () => this._lostCheckAll());
+    on("#btn-lost-put-back-all", () => this._lostPutBack(null));
+    this._qa("#lost-banner .lost-put-back").forEach((b) => b.addEventListener("click", () => this._lostPutBack(b.dataset.ieee)));
+    this._qa("#lost-banner .lost-forget").forEach((a) =>
+      a.addEventListener("click", (e) => {
+        e.preventDefault();
+        this._lostForget(a.dataset.ieee, a.dataset.key);
+      })
+    );
+    this._qa("#lost-banner .lost-dev-link").forEach((a) =>
+      a.addEventListener("click", (e) => {
+        e.preventDefault();
+        const d = this._devices.find((x) => normIeee(x.ieee) === a.dataset.ieee);
+        if (d) this._openDeviceDrawer(d);
+      })
+    );
+  }
+
+  /** Side panel: lost bindings and the watch setting for one device. */
+  _drawerLostHtml(d, rel) {
+    const hasOwn = rel.controls.length > 0 || this._rawBindings().some((b) => normIeee(b.sourceIeee) === normIeee(d.ieee));
+    if (!this._watchEnabled) {
+      if (this._backendInstalled || !hasOwn) return "";
+      return `<div class="drawer-section"><div class="drawer-section-title">Lost bindings</div>
+        <p class="hint">Devices sometimes lose their bindings (a reset, a firmware update, a power cut on some models). Install the
+        ZHA Bindings Manager integration and it checks every night and tells you, or puts them back for you.</p></div>`;
+    }
+    const w = lostFor(this._lost, d.ieee);
+    if (!hasOwn && !w.expected && w.policy === "notify") return "";
+    const busy = this._lostBusy;
+    const lostList = w.lost.length
+      ? `<ul class="drawer-lost">${w.lost
+          .map(
+            (b) => `<li class="health-error">Lost: ${escapeHtml(b.text || b.key)} <span class="muted">${escapeHtml(sinceText(b.since))}</span></li>`
+          )
+          .join("")}</ul>
+        <button class="btn btn-small btn-primary" id="drawer-lost-put-back" ${busy ? "disabled" : ""}>${
+          busy === "Put back" ? "Putting back…" : "Put back"
+        }</button>
+        <a href="#" class="src-link" id="drawer-lost-forget" title="Stop expecting these: you removed them yourself">Removed on purpose</a>
+        ${w.queued ? `<p class="hint">It didn't answer, probably asleep. It'll be done the next time you press one of its buttons.</p>` : ""}
+        ${w.autoPaused ? `<p class="hint">It lost them 3 times today, so it stopped putting them back automatically. Something keeps removing them: a full binding table, or another app.</p>` : ""}`
+      : `<p class="hint">Nothing lost.${w.lastCheck ? ` Last checked ${escapeHtml(sinceText(w.lastCheck))}.` : ""}</p>`;
+    const opts = POLICIES.map(
+      (p) => `<option value="${p}" ${p === w.policy ? "selected" : ""}>${escapeHtml(POLICY_LABELS[p])}</option>`
+    ).join("");
+    return `<div class="drawer-section drawer-lost-section">
+      <div class="drawer-section-title">Lost bindings</div>
+      ${lostList}
+      <label class="drawer-lost-policy">If it loses a binding:
+        <select id="drawer-lost-policy" ${busy ? "disabled" : ""}>${opts}</select></label>
+      <p class="hint">${escapeHtml(POLICY_HINTS[w.policy] || "")}</p>
+      <details class="drawer-lost-expect"><summary>What to expect</summary>
+        <ul>
+          <li>Battery devices only answer when awake: a lost binding on one is noticed and put back after you press a button.</li>
+          <li>"Put back automatically" is for devices that keep losing bindings. If something removes them on purpose (another app, a
+            Zigbee2MQTT migration), it stops after 3 times a day.</li>
+          <li>Removing a binding in this card is never treated as lost. Removing one somewhere else is: use "Removed on purpose".</li>
+          <li>A device with a full binding table can't take it back; Put back then says it's still missing.</li>
+        </ul>
+      </details>
+    </div>`;
   }
 
   /** 1.5.0: the integration reads binding tables itself (the device-page
@@ -1578,6 +1788,7 @@ export class ZhaBindingMapCard extends HTMLElement {
     // completed run (updated live per device inside scanOne above), so
     // _saveScanState reads current state rather than needing it passed in.
     await this._saveScanState();
+    this._lostSoon();
     const goneNames = notInZha.map((ieee) => this._ieeeLabel(ieee, { plain: true })).join(", ");
     if (notInZha.length && !targets.length) {
       this._setStatus(
@@ -2138,11 +2349,16 @@ export class ZhaBindingMapCard extends HTMLElement {
       const groupExists = this._groups.some((g) => g.group_id === b.groupId);
       if (!groupExists) {
         return {
-          level: "warning",
+          level: "info",
           code: "missing_group",
-          message: "Referenced Zigbee group no longer exists.",
-          why: "This binding sends commands to a Zigbee group that Home Assistant no longer knows about, so nothing receives them.",
-          recommendation: "Recreate the group or remove the binding.",
+          message: `Group ${groupIdHex(b.groupId)} isn't a Home Assistant group.`,
+          why:
+            "This binding sends commands to a Zigbee group that Home Assistant doesn't know about. It was probably made on the " +
+            "devices themselves (Find & Bind, a remote's pairing button, or another Zigbee system), or it's a ZHA group that " +
+            "was deleted. Any device that joined the group still receives the commands; Home Assistant just can't show which ones.",
+          recommendation:
+            "Groups tab → Groups only on devices: add it to Home Assistant to see and change its lights, or remove the binding " +
+            "if you don't use it.",
         };
       }
       if (isManufacturerSpecific(b.clusterId)) return manufacturerSpecificRule(b.clusterId);
@@ -4538,6 +4754,7 @@ export class ZhaBindingMapCard extends HTMLElement {
         ${this._drawerRelListHtml(rel.controlledBy, "Nothing is bound to it.")}
         ${rel.memberOf.length ? `<p class="hint">Member of ${rel.memberOf.map((g) => escapeHtml(g.name)).join(", ")}.</p>` : ""}
       </div>
+      ${this._drawerLostHtml(d, rel)}
       ${this._drawerMeshHtml(d)}
       <div class="drawer-section drawer-actions">
         <div class="drawer-section-title">Actions</div>
@@ -4573,6 +4790,18 @@ export class ZhaBindingMapCard extends HTMLElement {
     };
     on("#drawer-show-bindings", showBindings);
     on("#drawer-problems-link", showBindings);
+    on("#drawer-lost-put-back", () => this._lostPutBack(d.ieee));
+    const lostForget = this._q("#drawer-lost-forget");
+    if (lostForget)
+      lostForget.addEventListener("click", (e) => {
+        e.preventDefault();
+        this._lostForget(d.ieee, null);
+      });
+    const lostPolicy = this._q("#drawer-lost-policy");
+    if (lostPolicy)
+      lostPolicy.addEventListener("change", () =>
+        this._lostAction("Change setting", () => this._api.watchPolicy(d.ieee, lostPolicy.value))
+      );
     on("#drawer-rescan", async () => {
       const btn = this._q("#drawer-rescan");
       if (btn) {
@@ -6903,6 +7132,7 @@ export class ZhaBindingMapCard extends HTMLElement {
     const healthMap = this._computeHealthMap();
     this._renderHealthSummary(healthMap);
     this._renderStaleBanner();
+    this._renderLostBanner();
     this._renderPendingBanner();
 
     this._updateSortIndicators("#view-table", this._tableSort);
@@ -7235,6 +7465,7 @@ export class ZhaBindingMapCard extends HTMLElement {
       return;
     }
     const counts = { ok: 0, info: 0, warning: 0, error: 0 };
+    const lost = this._watchEnabled ? lostSummary(this._lost).total : 0;
     bindings.forEach((b) => {
       const h = healthMap.get(b.id);
       if (h) counts[h.level] = (counts[h.level] || 0) + 1;
@@ -7259,7 +7490,21 @@ export class ZhaBindingMapCard extends HTMLElement {
           : ""
       }
       ${counts.info ? `<span class="health-chip health-info">${HEALTH_ICON.info} ${counts.info} Info</span>` : ""}
+      ${
+        lost
+          ? `<a href="#" class="health-chip health-error health-chip-lost" id="health-chip-lost" title="Bindings the devices had before and don't any more">${HEALTH_ICON.error} ${lost} Lost</a>`
+          : ""
+      }
     `;
+    const chip = this._q("#health-chip-lost");
+    if (chip)
+      chip.addEventListener("click", (e) => {
+        e.preventDefault();
+        this._lostOpen = true;
+        this._renderLostBanner();
+        const b = this._q("#lost-banner");
+        if (b && b.scrollIntoView) b.scrollIntoView({ block: "nearest", behavior: "smooth" });
+      });
   }
 
   /** Detail popover for a Health badge — answers what's wrong, why it
@@ -7508,8 +7753,27 @@ export class ZhaBindingMapCard extends HTMLElement {
           and you can change which lights are in it without touching the remote.</p>
         <button class="btn btn-primary" id="groups-new" ${dis} title="Pick a remote and the lights it should control. The card makes or reuses a group, binds the remote to it and checks it works.">New group for a remote…</button>
       </div>`;
+    const orphans = deviceOnlyGroups({ groups: this._groups, bindings: this._rawBindings(), classify: (b) => this._classifyBinding(b), coordinatorIeee: coord });
+    const orphanHtml = orphans.length
+      ? `<section class="group-card group-orphans">
+          <div class="group-card-head"><strong>Groups only on devices</strong>
+            <span class="muted">${orphans.length} group${orphans.length === 1 ? "" : "s"} Home Assistant doesn't know</span></div>
+          <p class="hint">Bindings point at ${orphans.length === 1 ? "this group" : "these groups"}, but ${orphans.length === 1 ? "it isn't" : "they aren't"} in ZHA. Usually
+            made on the devices themselves (Find & Bind, or a remote's pairing button). Devices that joined still receive the commands;
+            Home Assistant can't tell which devices those are. Adding it to Home Assistant lets you see and change its lights here
+            (add them with Add lights… afterwards: devices already in it are fine to add again).</p>
+          <ul class="groups-list">${orphans
+            .map(
+              (o) => `<li><strong>${groupIdHex(o.groupId)}</strong> <span class="muted">(${o.groupId})</span> used by
+                ${o.controllers.length ? o.controllers.map((c) => devLink(c.sourceIeee, ` <span class="muted">ep ${c.endpoint}: ${escapeHtml(c.clusters.map(clusterName).join(", "))}</span>`)).join(", ") : `<span class="muted">${o.others} reporting binding${o.others === 1 ? "" : "s"}</span>`}
+                <input type="text" class="groups-orphan-name" data-gid="${o.groupId}" value="${escapeHtml(`Group ${groupIdHex(o.groupId)}`)}" aria-label="Name for the new group" ${dis}>
+                <button class="btn btn-small" data-group-adopt="${o.groupId}" ${dis} title="Creates a ZHA group with this same group ID, so the bindings point at a group Home Assistant knows">Add to Home Assistant</button></li>`
+            )
+            .join("")}</ul>
+        </section>`
+      : "";
     if (!rows.length) {
-      el.innerHTML = `${head}<p class="muted">No ZHA groups yet. <strong>New group for a remote…</strong> creates one.</p>`;
+      el.innerHTML = `${head}<p class="muted">No ZHA groups yet. <strong>New group for a remote…</strong> creates one.</p>${orphanHtml}`;
       this._wireGroupsTab(rows);
       return;
     }
@@ -7551,7 +7815,7 @@ export class ZhaBindingMapCard extends HTMLElement {
         ${this._groupsDeleteOpen === r.groupId ? this._groupsDeleteHtml(r) : ""}
       </section>`;
     });
-    el.innerHTML = head + cards.join("");
+    el.innerHTML = head + cards.join("") + orphanHtml;
     this._wireGroupsTab(rows);
     if (this._groupsFocus != null) {
       const sec = this._q(`#view-groups .group-card[data-gid="${this._groupsFocus}"]`);
@@ -7644,6 +7908,11 @@ export class ZhaBindingMapCard extends HTMLElement {
       e.preventDefault();
       const d = this._devices.find((x) => x.ieee === e.currentTarget.dataset.ieee);
       if (d) this._openDeviceDrawer(d);
+    });
+    on("[data-group-adopt]", (e) => {
+      const gid = Number(e.currentTarget.dataset.groupAdopt);
+      const input = root.querySelector(`.groups-orphan-name[data-gid="${gid}"]`);
+      this._groupsAdopt(gid, ((input && input.value) || "").trim() || `Group ${groupIdHex(gid)}`);
     });
     on("[data-group-remote]", (e) => this._openGroupFlowPickRemote({ groupId: Number(e.currentTarget.dataset.groupRemote) }));
     on("[data-group-add]", async (e) => {
@@ -7738,6 +8007,25 @@ export class ZhaBindingMapCard extends HTMLElement {
       }
     } catch (err) {
       this._setStatus("error", `Couldn't add to ${name}: ${toolkitErrorText(err)}`, 0);
+    } finally {
+      this._groupsBusy = null;
+      this._renderGroupsTab();
+    }
+  }
+
+  /** Creates a ZHA group with the id a device-only group already uses. */
+  async _groupsAdopt(gid, name) {
+    if (this._groupsBusy != null) return;
+    this._groupsBusy = gid;
+    this._renderGroupsTab();
+    this._setStatus("info", `Adding ${name} to Home Assistant…`, 0);
+    try {
+      await this._api.createGroupWithId(name, gid);
+      await this._groupsRefresh();
+      this._groupsFocus = gid;
+      this._setStatus("success", `${name} is now a Home Assistant group. Use Add lights… to list the lights that are in it.`, 0);
+    } catch (err) {
+      this._setStatus("error", `Couldn't add ${name}: ${toolkitErrorText(err)}`, 0);
     } finally {
       this._groupsBusy = null;
       this._renderGroupsTab();

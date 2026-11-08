@@ -21,7 +21,7 @@
  * zha_toolkit MUST be installed (via HACS) and working for bind/unbind/scan
  * to function. See README.md for details.
  *
- * Version: 1.7.0b2
+ * Version: 1.8.0b1
  */
 (() => {
   // src/capexplorer-constants.js
@@ -78,7 +78,7 @@
 
   // src/constants.js
   var ZTK_DOMAIN = "zha_toolkit";
-  var CARD_VERSION = "1.7.0b2";
+  var CARD_VERSION = "1.8.0b1";
   var CHANGELOG_URL = "https://github.com/hsolgaard/zha-bindings-manager/blob/main/CHANGELOG.md";
   var DEFAULT_BINDABLE_OUT_CLUSTERS = [5, 6, 8, 258, 768];
   var MEMBERSHIP_EDGE_COLOR = "#8e24aa";
@@ -740,6 +740,42 @@
   var ZhaApi = class {
     constructor(hass) {
       this.hass = hass;
+      this.watchEnabled = false;
+    }
+    // --- Lost bindings (integration 1.8.0) -------------------------------------
+    async watchGet() {
+      return this.hass.callWS({ type: "zha_bindings_manager/watch_get" });
+    }
+    /** Puts lost bindings back: one device, or every device when ieee is omitted. */
+    async watchPutBack(ieee) {
+      const msg = { type: "zha_bindings_manager/watch_put_back" };
+      if (ieee) msg.ieee = ieee;
+      return this.hass.callWS(msg);
+    }
+    /** Stops expecting bindings (all of a device's, or just these keys). */
+    async watchForget(ieee, keys) {
+      const msg = { type: "zha_bindings_manager/watch_forget", ieee };
+      if (keys && keys.length) msg.keys = keys;
+      return this.hass.callWS(msg);
+    }
+    async watchPolicy(ieee, policy) {
+      return this.hass.callWS({ type: "zha_bindings_manager/watch_policy", ieee, policy });
+    }
+    async watchCheckAll() {
+      return this.hass.callWS({ type: "zha_bindings_manager/watch_check_all" });
+    }
+    /** Tells the watch which bindings were removed on purpose. Patterns:
+     *  {sourceIeee, sourceEndpoint?, clusterIds?, isGroup?, groupId?,
+     *  targetIeee?, targetEndpoint?}; anything left out matches all. Never
+     *  throws: this is bookkeeping, the unbind itself already happened. */
+    async _reportRemoved(pattern) {
+      if (!this.watchEnabled) return;
+      const clean = {};
+      for (const [k, v] of Object.entries(pattern)) if (v != null) clean[k] = v;
+      try {
+        await this.hass.callWS({ type: "zha_bindings_manager/watch_removed", bindings: [clean] });
+      } catch (e) {
+      }
     }
     async fetchDevices() {
       return this.hass.callWS({ type: "zha/devices" });
@@ -899,7 +935,15 @@
       if (clusterIds && clusterIds.length) data.cluster = clusterIds;
       if (opts.endpoint != null) data.endpoint = opts.endpoint;
       if (opts.dstEndpoint != null) data.dst_endpoint = opts.dstEndpoint;
-      return this.callToolkit("binds_remove_all", data);
+      const res = await this.callToolkit("binds_remove_all", data);
+      await this._reportRemoved({
+        sourceIeee,
+        sourceEndpoint: opts.endpoint,
+        clusterIds: clusterIds && clusterIds.length ? clusterIds.map(Number) : null,
+        targetIeee,
+        targetEndpoint: opts.dstEndpoint
+      });
+      return res;
     }
     /** Live per-device command-discovery scan via zha_toolkit.scan_device —
      *  separate from the passive binds_get-based network scan this card
@@ -941,6 +985,11 @@
         members: members.map((m) => ({ ieee: m.ieee, endpoint_id: Number(m.endpoint) }))
       });
     }
+    /** Creates a ZHA group with a given group ID (one that devices already
+     *  use, e.g. made by Find & Bind). */
+    async createGroupWithId(name, groupId) {
+      return this.hass.callWS({ type: "zha/group/add", group_name: name, group_id: Number(groupId) });
+    }
     /** Adds [{ieee, endpoint}] to an existing ZHA group. */
     async addGroupMembers(groupId, members) {
       return this.hass.callWS({
@@ -954,7 +1003,9 @@
      *  group bindings included. Used for a light's reporting binding to a
      *  group, which unbind_group can't remove (see groups.js). */
     async removeBindingsOnCluster(sourceIeee, endpoint, clusterId) {
-      return this.callToolkit("binds_remove_all", { ieee: sourceIeee, endpoint: Number(endpoint), cluster: [Number(clusterId)] });
+      const res = await this.callToolkit("binds_remove_all", { ieee: sourceIeee, endpoint: Number(endpoint), cluster: [Number(clusterId)] });
+      await this._reportRemoved({ sourceIeee, sourceEndpoint: Number(endpoint), clusterIds: [Number(clusterId)] });
+      return res;
     }
     /** Removes [{ieee, endpoint}] from a ZHA group (ZHA's own websocket). */
     async removeGroupMembers(groupId, members) {
@@ -972,8 +1023,106 @@
       const data = { ieee: sourceIeee, command_data: groupId };
       if (clusterIds && clusterIds.length === 1) data.cluster = clusterIds[0];
       if (opts.endpoint != null) data.endpoint = opts.endpoint;
-      return this.callToolkit("unbind_group", data);
+      const res = await this.callToolkit("unbind_group", data);
+      await this._reportRemoved({
+        sourceIeee,
+        sourceEndpoint: opts.endpoint,
+        clusterIds: clusterIds && clusterIds.length === 1 ? [Number(clusterIds[0])] : null,
+        isGroup: true,
+        groupId: Number(groupId)
+      });
+      return res;
     }
+  };
+
+  // src/lost.js
+  var POLICIES = ["off", "notify", "auto"];
+  var POLICY_LABELS = {
+    off: "Off",
+    notify: "Tell me",
+    auto: "Put back automatically"
+  };
+  var POLICY_HINTS = {
+    off: "Not watched: nothing is checked or put back for this device.",
+    notify: "Checked every night and whenever its bindings are read. A lost binding shows here and in Settings \u2192 Repairs.",
+    auto: "Lost bindings are put back straight away, at most 3 times a day; after that it stops and tells you instead."
+  };
+  function lostSummary(res) {
+    const devices = [];
+    for (const [ieee, d] of Object.entries(res && res.devices || {})) {
+      if (!d || d.policy === "off" || !Array.isArray(d.lost) || !d.lost.length) continue;
+      devices.push({
+        ieee: normIeee(ieee),
+        name: d.name || ieee,
+        policy: d.policy || "notify",
+        lost: d.lost,
+        queued: !!d.queued,
+        autoPaused: !!d.auto_paused,
+        lastCheck: d.last_check || null
+      });
+    }
+    devices.sort((a, b) => String(a.name).localeCompare(String(b.name)));
+    return {
+      total: devices.reduce((n, d) => n + d.lost.length, 0),
+      queued: devices.filter((d) => d.queued).length,
+      paused: devices.filter((d) => d.autoPaused).length,
+      devices
+    };
+  }
+  function lostFor(res, ieee) {
+    const key = normIeee(ieee || "");
+    for (const [k, d] of Object.entries(res && res.devices || {})) {
+      if (normIeee(k) === key) {
+        return {
+          policy: d.policy || "notify",
+          lost: d.policy === "off" ? [] : d.lost || [],
+          queued: !!d.queued,
+          autoPaused: !!d.auto_paused,
+          lastCheck: d.last_check || null,
+          expected: d.expected || 0
+        };
+      }
+    }
+    return { policy: "notify", lost: [], queued: false, autoPaused: false, lastCheck: null, expected: 0 };
+  }
+  function putBackMessage(results, nameOf = (i) => i) {
+    const by = { put_back: [], still_missing: [], waiting: [], nothing: [] };
+    for (const [ieee, st] of Object.entries(results || {})) (by[st] || by.nothing).push(nameOf(ieee));
+    const parts = [];
+    if (by.put_back.length) parts.push(`Put back on ${by.put_back.join(", ")}.`);
+    if (by.waiting.length)
+      parts.push(
+        `${by.waiting.join(", ")} didn't answer (probably asleep). It'll be done the next time ${by.waiting.length === 1 ? "it wakes up" : "they wake up"}: press one of its buttons.`
+      );
+    if (by.still_missing.length)
+      parts.push(
+        `${by.still_missing.join(", ")} answered but still ${by.still_missing.length === 1 ? "doesn't" : "don't"} have ${by.still_missing.length === 1 ? "it" : "them"}: its binding table may be full.`
+      );
+    if (!parts.length) parts.push("Nothing to put back.");
+    const level = by.still_missing.length ? "warning" : by.waiting.length ? "info" : "success";
+    return { level, text: parts.join(" ") };
+  }
+  function sinceText(iso, nowMs = Date.now()) {
+    const t = Date.parse(iso || "");
+    if (!Number.isFinite(t)) return "";
+    const day = (ms) => {
+      const d = new Date(ms);
+      return new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
+    };
+    const days = Math.round((day(nowMs) - day(t)) / 864e5);
+    if (days <= 0) {
+      const d = new Date(t);
+      return `today ${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+    }
+    if (days === 1) return "yesterday";
+    return `${days} days ago`;
+  }
+  var NOTICED_BY = {
+    scan: "noticed by a scan",
+    nightly: "noticed by the nightly check",
+    press: "noticed after a button press",
+    check: "noticed by Check for lost bindings",
+    put_back: "still missing after Put back"
   };
 
   // src/template.js
@@ -1085,6 +1234,7 @@
 
   <div id="view-table" class="view">
     <div id="health-summary" class="health-summary" style="display:none"></div>
+    <div id="lost-banner" class="stale-banner lost-banner" style="display:none"></div>
     <div id="stale-banner" class="stale-banner" style="display:none"></div>
     <div id="pending-banner" class="stale-banner pending-banner" style="display:none"></div>
     <div id="table-filter-info" class="table-filter-info" style="display:none"></div>
@@ -1330,7 +1480,7 @@
      *  - bundledCardVersion: the card version the integration ships (1.0.0+).
      *  Unknown values are null. */
     static async probe(hass) {
-      const none = { installed: false, available: false, version: null, bundledCardVersion: null, experimental: false, lqi: null };
+      const none = { installed: false, available: false, version: null, bundledCardVersion: null, experimental: false, watch: false, lqi: null };
       try {
         const res = await hass.connection.sendMessagePromise({ type: WS_GET_CAPABILITIES });
         if (!res || !res.available) return none;
@@ -1343,6 +1493,8 @@
           bundledCardVersion: str(res.bundled_card_version),
           // 1.5.0 (local build): experimental features + link-quality thresholds.
           experimental: !!(res.features && res.features.experimental_features === true),
+          // 1.8.0: the integration watches for lost bindings.
+          watch: !!(res.features && res.features.binding_watch === true),
           lqi: res.lqi_thresholds && Number.isInteger(res.lqi_thresholds.good) && Number.isInteger(res.lqi_thresholds.weak) ? { good: res.lqi_thresholds.good, weak: res.lqi_thresholds.weak } : null
         };
       } catch (e) {
@@ -2161,6 +2313,18 @@ a.btn { display:inline-block; text-decoration:none; }
 .status .status-action { margin-left:8px; flex:0 0 auto; }
 .stale-row { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
 .stale-row > span { flex: 1 1 260px; }
+.lost-banner { background: rgba(219,68,55,0.10); }
+.lost-list { margin-top:8px; display:flex; flex-direction:column; gap:8px; }
+.lost-device { padding:6px 8px; border-radius:6px; background: var(--card-background-color, rgba(255,255,255,0.6)); }
+.lost-device-head { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+.lost-device-head .muted { flex: 1 1 160px; }
+.lost-device ul { margin:4px 0 0 0; padding-left:18px; }
+.lost-device li { margin:2px 0; }
+a.health-chip-lost { text-decoration:none; cursor:pointer; }
+.drawer-lost { margin:0 0 6px 0; padding-left:18px; }
+.drawer-lost-policy { display:flex; align-items:center; gap:6px; flex-wrap:wrap; margin-top:8px; font-size:0.9em; }
+.drawer-lost-expect { margin-top:4px; font-size:0.88em; }
+.drawer-lost-expect ul { margin:4px 0; padding-left:18px; }
 .table-filter-info { display:flex; flex-wrap:wrap; align-items:center; gap:10px; margin-bottom:8px; padding:6px 10px;
   border-radius:8px; background: rgba(76,154,255,0.12); font-size:0.85em; }
 .dir-cell { white-space:nowrap; font-weight:600; }
@@ -2612,6 +2776,15 @@ a.btn { display:inline-block; text-decoration:none; }
       const controllers = [...byController.values()].map((c) => ({ ...c, clusters: [...c.clusters].sort((a, b) => a - b) }));
       return { groupId, name: g.name || `Group ${groupId}`, members, controllers, others };
     }).sort((a, b) => a.name.localeCompare(b.name, void 0, { sensitivity: "base" }));
+  }
+  function deviceOnlyGroups({ groups, bindings, classify, coordinatorIeee }) {
+    const known = new Set((groups || []).map((g) => Number(g.group_id)));
+    const ids = /* @__PURE__ */ new Set();
+    for (const b of bindings || []) {
+      if (b && b.isGroup && Number.isFinite(Number(b.groupId)) && !known.has(Number(b.groupId))) ids.add(Number(b.groupId));
+    }
+    const fake = [...ids].map((id) => ({ group_id: id, name: `Group ${groupIdHex(id)}`, members: [] }));
+    return groupRows({ groups: fake, bindings, classify, coordinatorIeee }).map(({ groupId, controllers, others }) => ({ groupId, controllers, others })).sort((a, b) => a.groupId - b.groupId);
   }
   function groupUnbindPlan(groupId, bindings, { clustersFor = () => void 0 } = {}) {
     const seen = /* @__PURE__ */ new Set();
@@ -3769,6 +3942,7 @@ a.btn { display:inline-block; text-decoration:none; }
       const first = !this._hass;
       this._hass = hass;
       this._api = new ZhaApi(hass);
+      this._api.watchEnabled = !!this._watchEnabled;
       if (first) {
         this._render();
         this._loadAll();
@@ -4001,6 +4175,8 @@ a.btn { display:inline-block; text-decoration:none; }
       this._backendVersion = probe.version;
       this._bundledCardVersion = probe.bundledCardVersion;
       this._experimental = probe.experimental;
+      this._watchEnabled = !!probe.watch;
+      if (this._api) this._api.watchEnabled = this._watchEnabled;
       this._lqiThr = probe.lqi || { ...LQI_RECOMMENDED };
       this._toggleExperimentalUi();
       if (!this._backendAvailable) {
@@ -4408,6 +4584,177 @@ a.btn { display:inline-block; text-decoration:none; }
       await this._reloadDevices({ initial: true });
       this._openDeepLinkedDevice();
       this._pickUpIntegrationScans();
+      this._lostLoad();
+    }
+    // -------------------------------------------------------------------
+    // Lost bindings (1.8.0, integration only)
+    // -------------------------------------------------------------------
+    /** Reads what the integration's watch knows: bindings that were there
+     *  before and aren't any more. */
+    async _lostLoad() {
+      if (!this._watchEnabled || !this._api) {
+        this._lost = null;
+        this._renderLostBanner();
+        return;
+      }
+      try {
+        this._lost = await this._api.watchGet();
+      } catch (e) {
+        this._lost = null;
+      }
+      this._renderLostBanner();
+      this._renderHealthSummary(this._computeHealthMap());
+      if (this._drawerIeee) this._renderDrawer();
+    }
+    /** After a scan: the integration compares the newly saved scan with what
+     *  it expected, which takes a moment. */
+    _lostSoon() {
+      if (!this._watchEnabled) return;
+      clearTimeout(this._lostTimer);
+      this._lostTimer = setTimeout(() => this._lostLoad(), 1500);
+    }
+    async _lostAction(label, fn) {
+      if (this._lostBusy) return;
+      this._lostBusy = label;
+      this._renderLostBanner();
+      if (this._drawerIeee) this._renderDrawer();
+      try {
+        return await fn();
+      } catch (err) {
+        this._setStatus("error", `${label} failed: ${extractErrorMessage(err)}`, 0);
+        return null;
+      } finally {
+        this._lostBusy = null;
+        await this._lostLoad();
+      }
+    }
+    async _lostPutBack(ieee) {
+      const res = await this._lostAction(ieee ? "Put back" : "Put all back", () => this._api.watchPutBack(ieee));
+      if (!res) return;
+      const nameOf = (i) => {
+        const d = this._devices.find((x) => normIeee(x.ieee) === normIeee(i));
+        return d ? this._deviceLabel(d) : i;
+      };
+      const m = putBackMessage(res.results, nameOf);
+      this._setStatus(m.level, m.text, 0);
+      const done = Object.entries(res.results || {}).filter(([, st]) => st === "put_back").map(([i]) => i);
+      if (done.length) this._scanBindings(done, { tries: 1 });
+    }
+    async _lostForget(ieee, key) {
+      await this._lostAction("Removed on purpose", () => this._api.watchForget(ieee, key ? [key] : null));
+    }
+    async _lostCheckAll() {
+      const res = await this._lostAction("Check for lost bindings", () => this._api.watchCheckAll());
+      if (!res) return;
+      const vals = Object.values(res && res.results || res || {});
+      const asleep = vals.filter((v) => v === "no_answer").length;
+      const lost = lostSummary(this._lost).total;
+      this._setStatus(
+        lost ? "warning" : "success",
+        `Checked ${vals.length} device${vals.length === 1 ? "" : "s"}: ${lost ? `${lost} lost binding${lost === 1 ? "" : "s"}` : "nothing lost"}.${asleep ? ` ${asleep} didn't answer (asleep or off); they're checked again when they next wake up.` : ""}`,
+        0
+      );
+    }
+    _renderLostBanner() {
+      const el = this._q("#lost-banner");
+      if (!el) return;
+      const sum = lostSummary(this._lost);
+      if (!this._watchEnabled || !sum.total) {
+        el.style.display = "none";
+        el.innerHTML = "";
+        return;
+      }
+      const busy = this._lostBusy;
+      const nDev = sum.devices.length;
+      const list2 = this._lostOpen ? `<div class="lost-list">${sum.devices.map(
+        (d) => `<div class="lost-device">
+              <div class="lost-device-head">
+                <a href="#" class="src-link lost-dev-link" data-ieee="${escapeHtml(d.ieee)}"><strong>${escapeHtml(this._ieeeLabel(d.ieee, { plain: true }) || d.name)}</strong></a>
+                <span class="muted">${escapeHtml(POLICY_LABELS[d.policy] || d.policy)}${d.autoPaused ? " \xB7 stopped putting back automatically (3 times today)" : ""}${d.queued ? " \xB7 waiting for it to wake up" : ""}</span>
+                <button class="btn btn-small lost-put-back" data-ieee="${escapeHtml(d.ieee)}" ${busy ? "disabled" : ""}>Put back</button>
+              </div>
+              <ul>${d.lost.map(
+          (b) => `<li><span>${escapeHtml(b.text || b.key)}</span> <span class="muted">${escapeHtml(
+            [NOTICED_BY[b.noticed_by] || "", sinceText(b.since)].filter(Boolean).join(", ")
+          )}</span> \xB7 <a href="#" class="src-link lost-forget" data-ieee="${escapeHtml(d.ieee)}" data-key="${escapeHtml(
+            b.key
+          )}" title="You removed it yourself (outside this card, e.g. by resetting the device). Stop expecting it.">Removed on purpose</a></li>`
+        ).join("")}</ul>
+            </div>`
+      ).join("")}</div>` : "";
+      el.innerHTML = `
+      <div class="stale-row">
+        <span><strong>${sum.total} lost binding${sum.total === 1 ? "" : "s"}</strong> on ${nDev} device${nDev === 1 ? "" : "s"}:
+          ${nDev === 1 ? "it" : "they"} had ${sum.total === 1 ? "this binding" : "these bindings"} before and don't any more, so a button may no longer
+          control what it used to.${sum.queued ? ` ${sum.queued} ${sum.queued === 1 ? "is" : "are"} asleep: ${sum.queued === 1 ? "it'll" : "they'll"} be put back the next time you press one of ${sum.queued === 1 ? "its" : "their"} buttons.` : ""}</span>
+        <button class="btn btn-small" id="btn-lost-show">${this._lostOpen ? "Hide" : "Show"}</button>
+        <button class="btn btn-small" id="btn-lost-check" ${busy ? "disabled" : ""} title="Read every watched device's binding table now">${busy === "Check for lost bindings" ? "Checking\u2026" : "Check again"}</button>
+        <button class="btn btn-small btn-primary" id="btn-lost-put-back-all" ${busy ? "disabled" : ""}>${busy === "Put all back" ? "Putting back\u2026" : "Put all back"}</button>
+      </div>${list2}`;
+      el.style.display = "";
+      const on = (sel, fn) => {
+        const b = this._q(sel);
+        if (b) b.addEventListener("click", fn);
+      };
+      on("#btn-lost-show", () => {
+        this._lostOpen = !this._lostOpen;
+        this._renderLostBanner();
+      });
+      on("#btn-lost-check", () => this._lostCheckAll());
+      on("#btn-lost-put-back-all", () => this._lostPutBack(null));
+      this._qa("#lost-banner .lost-put-back").forEach((b) => b.addEventListener("click", () => this._lostPutBack(b.dataset.ieee)));
+      this._qa("#lost-banner .lost-forget").forEach(
+        (a) => a.addEventListener("click", (e) => {
+          e.preventDefault();
+          this._lostForget(a.dataset.ieee, a.dataset.key);
+        })
+      );
+      this._qa("#lost-banner .lost-dev-link").forEach(
+        (a) => a.addEventListener("click", (e) => {
+          e.preventDefault();
+          const d = this._devices.find((x) => normIeee(x.ieee) === a.dataset.ieee);
+          if (d) this._openDeviceDrawer(d);
+        })
+      );
+    }
+    /** Side panel: lost bindings and the watch setting for one device. */
+    _drawerLostHtml(d, rel) {
+      const hasOwn = rel.controls.length > 0 || this._rawBindings().some((b) => normIeee(b.sourceIeee) === normIeee(d.ieee));
+      if (!this._watchEnabled) {
+        if (this._backendInstalled || !hasOwn) return "";
+        return `<div class="drawer-section"><div class="drawer-section-title">Lost bindings</div>
+        <p class="hint">Devices sometimes lose their bindings (a reset, a firmware update, a power cut on some models). Install the
+        ZHA Bindings Manager integration and it checks every night and tells you, or puts them back for you.</p></div>`;
+      }
+      const w = lostFor(this._lost, d.ieee);
+      if (!hasOwn && !w.expected && w.policy === "notify") return "";
+      const busy = this._lostBusy;
+      const lostList = w.lost.length ? `<ul class="drawer-lost">${w.lost.map(
+        (b) => `<li class="health-error">Lost: ${escapeHtml(b.text || b.key)} <span class="muted">${escapeHtml(sinceText(b.since))}</span></li>`
+      ).join("")}</ul>
+        <button class="btn btn-small btn-primary" id="drawer-lost-put-back" ${busy ? "disabled" : ""}>${busy === "Put back" ? "Putting back\u2026" : "Put back"}</button>
+        <a href="#" class="src-link" id="drawer-lost-forget" title="Stop expecting these: you removed them yourself">Removed on purpose</a>
+        ${w.queued ? `<p class="hint">It didn't answer, probably asleep. It'll be done the next time you press one of its buttons.</p>` : ""}
+        ${w.autoPaused ? `<p class="hint">It lost them 3 times today, so it stopped putting them back automatically. Something keeps removing them: a full binding table, or another app.</p>` : ""}` : `<p class="hint">Nothing lost.${w.lastCheck ? ` Last checked ${escapeHtml(sinceText(w.lastCheck))}.` : ""}</p>`;
+      const opts = POLICIES.map(
+        (p) => `<option value="${p}" ${p === w.policy ? "selected" : ""}>${escapeHtml(POLICY_LABELS[p])}</option>`
+      ).join("");
+      return `<div class="drawer-section drawer-lost-section">
+      <div class="drawer-section-title">Lost bindings</div>
+      ${lostList}
+      <label class="drawer-lost-policy">If it loses a binding:
+        <select id="drawer-lost-policy" ${busy ? "disabled" : ""}>${opts}</select></label>
+      <p class="hint">${escapeHtml(POLICY_HINTS[w.policy] || "")}</p>
+      <details class="drawer-lost-expect"><summary>What to expect</summary>
+        <ul>
+          <li>Battery devices only answer when awake: a lost binding on one is noticed and put back after you press a button.</li>
+          <li>"Put back automatically" is for devices that keep losing bindings. If something removes them on purpose (another app, a
+            Zigbee2MQTT migration), it stops after 3 times a day.</li>
+          <li>Removing a binding in this card is never treated as lost. Removing one somewhere else is: use "Removed on purpose".</li>
+          <li>A device with a full binding table can't take it back; Put back then says it's still missing.</li>
+        </ul>
+      </details>
+    </div>`;
     }
     /** 1.5.0: the integration reads binding tables itself (the device-page
      *  Rescan button, the nightly binding check). Use any read that's newer
@@ -4821,6 +5168,7 @@ a.btn { display:inline-block; text-decoration:none; }
         this._scanPartial.delete(normIeee(ieee));
       });
       await this._saveScanState();
+      this._lostSoon();
       const goneNames = notInZha.map((ieee) => this._ieeeLabel(ieee, { plain: true })).join(", ");
       if (notInZha.length && !targets.length) {
         this._setStatus(
@@ -5279,11 +5627,11 @@ a.btn { display:inline-block; text-decoration:none; }
         const groupExists = this._groups.some((g) => g.group_id === b.groupId);
         if (!groupExists) {
           return {
-            level: "warning",
+            level: "info",
             code: "missing_group",
-            message: "Referenced Zigbee group no longer exists.",
-            why: "This binding sends commands to a Zigbee group that Home Assistant no longer knows about, so nothing receives them.",
-            recommendation: "Recreate the group or remove the binding."
+            message: `Group ${groupIdHex(b.groupId)} isn't a Home Assistant group.`,
+            why: "This binding sends commands to a Zigbee group that Home Assistant doesn't know about. It was probably made on the devices themselves (Find & Bind, a remote's pairing button, or another Zigbee system), or it's a ZHA group that was deleted. Any device that joined the group still receives the commands; Home Assistant just can't show which ones.",
+            recommendation: "Groups tab \u2192 Groups only on devices: add it to Home Assistant to see and change its lights, or remove the binding if you don't use it."
           };
         }
         if (isManufacturerSpecific(b.clusterId)) return manufacturerSpecificRule(b.clusterId);
@@ -7359,6 +7707,7 @@ a.btn { display:inline-block; text-decoration:none; }
         ${this._drawerRelListHtml(rel.controlledBy, "Nothing is bound to it.")}
         ${rel.memberOf.length ? `<p class="hint">Member of ${rel.memberOf.map((g) => escapeHtml(g.name)).join(", ")}.</p>` : ""}
       </div>
+      ${this._drawerLostHtml(d, rel)}
       ${this._drawerMeshHtml(d)}
       <div class="drawer-section drawer-actions">
         <div class="drawer-section-title">Actions</div>
@@ -7390,6 +7739,19 @@ a.btn { display:inline-block; text-decoration:none; }
       };
       on("#drawer-show-bindings", showBindings);
       on("#drawer-problems-link", showBindings);
+      on("#drawer-lost-put-back", () => this._lostPutBack(d.ieee));
+      const lostForget = this._q("#drawer-lost-forget");
+      if (lostForget)
+        lostForget.addEventListener("click", (e) => {
+          e.preventDefault();
+          this._lostForget(d.ieee, null);
+        });
+      const lostPolicy = this._q("#drawer-lost-policy");
+      if (lostPolicy)
+        lostPolicy.addEventListener(
+          "change",
+          () => this._lostAction("Change setting", () => this._api.watchPolicy(d.ieee, lostPolicy.value))
+        );
       on("#drawer-rescan", async () => {
         const btn = this._q("#drawer-rescan");
         if (btn) {
@@ -9289,6 +9651,7 @@ Used by: ${h.uses.join("; ")}`;
       const healthMap = this._computeHealthMap();
       this._renderHealthSummary(healthMap);
       this._renderStaleBanner();
+      this._renderLostBanner();
       this._renderPendingBanner();
       this._updateSortIndicators("#view-table", this._tableSort);
       let rows = this._filteredBindingRows(healthMap).map((b) => {
@@ -9566,6 +9929,7 @@ Used by: ${h.uses.join("; ")}`;
         return;
       }
       const counts = { ok: 0, info: 0, warning: 0, error: 0 };
+      const lost = this._watchEnabled ? lostSummary(this._lost).total : 0;
       bindings.forEach((b) => {
         const h = healthMap.get(b.id);
         if (h) counts[h.level] = (counts[h.level] || 0) + 1;
@@ -9578,7 +9942,17 @@ Used by: ${h.uses.join("; ")}`;
       ${counts.warning ? `<span class="health-chip health-warning">${HEALTH_ICON.warning} ${counts.warning} Warning${counts.warning === 1 ? "" : "s"}</span>` : ""}
       ${counts.error ? `<span class="health-chip health-error">${HEALTH_ICON.error} ${counts.error} Error${counts.error === 1 ? "" : "s"}</span>` : ""}
       ${counts.info ? `<span class="health-chip health-info">${HEALTH_ICON.info} ${counts.info} Info</span>` : ""}
+      ${lost ? `<a href="#" class="health-chip health-error health-chip-lost" id="health-chip-lost" title="Bindings the devices had before and don't any more">${HEALTH_ICON.error} ${lost} Lost</a>` : ""}
     `;
+      const chip = this._q("#health-chip-lost");
+      if (chip)
+        chip.addEventListener("click", (e) => {
+          e.preventDefault();
+          this._lostOpen = true;
+          this._renderLostBanner();
+          const b = this._q("#lost-banner");
+          if (b && b.scrollIntoView) b.scrollIntoView({ block: "nearest", behavior: "smooth" });
+        });
     }
     /** Detail popover for a Health badge — answers what's wrong, why it
      *  matters, and what to do next, reusing the generic dialog. */
@@ -9788,8 +10162,23 @@ Used by: ${h.uses.join("; ")}`;
           and you can change which lights are in it without touching the remote.</p>
         <button class="btn btn-primary" id="groups-new" ${dis} title="Pick a remote and the lights it should control. The card makes or reuses a group, binds the remote to it and checks it works.">New group for a remote\u2026</button>
       </div>`;
+      const orphans = deviceOnlyGroups({ groups: this._groups, bindings: this._rawBindings(), classify: (b) => this._classifyBinding(b), coordinatorIeee: coord });
+      const orphanHtml = orphans.length ? `<section class="group-card group-orphans">
+          <div class="group-card-head"><strong>Groups only on devices</strong>
+            <span class="muted">${orphans.length} group${orphans.length === 1 ? "" : "s"} Home Assistant doesn't know</span></div>
+          <p class="hint">Bindings point at ${orphans.length === 1 ? "this group" : "these groups"}, but ${orphans.length === 1 ? "it isn't" : "they aren't"} in ZHA. Usually
+            made on the devices themselves (Find & Bind, or a remote's pairing button). Devices that joined still receive the commands;
+            Home Assistant can't tell which devices those are. Adding it to Home Assistant lets you see and change its lights here
+            (add them with Add lights\u2026 afterwards: devices already in it are fine to add again).</p>
+          <ul class="groups-list">${orphans.map(
+        (o) => `<li><strong>${groupIdHex(o.groupId)}</strong> <span class="muted">(${o.groupId})</span> used by
+                ${o.controllers.length ? o.controllers.map((c) => devLink(c.sourceIeee, ` <span class="muted">ep ${c.endpoint}: ${escapeHtml(c.clusters.map(clusterName).join(", "))}</span>`)).join(", ") : `<span class="muted">${o.others} reporting binding${o.others === 1 ? "" : "s"}</span>`}
+                <input type="text" class="groups-orphan-name" data-gid="${o.groupId}" value="${escapeHtml(`Group ${groupIdHex(o.groupId)}`)}" aria-label="Name for the new group" ${dis}>
+                <button class="btn btn-small" data-group-adopt="${o.groupId}" ${dis} title="Creates a ZHA group with this same group ID, so the bindings point at a group Home Assistant knows">Add to Home Assistant</button></li>`
+      ).join("")}</ul>
+        </section>` : "";
       if (!rows.length) {
-        el.innerHTML = `${head}<p class="muted">No ZHA groups yet. <strong>New group for a remote\u2026</strong> creates one.</p>`;
+        el.innerHTML = `${head}<p class="muted">No ZHA groups yet. <strong>New group for a remote\u2026</strong> creates one.</p>${orphanHtml}`;
         this._wireGroupsTab(rows);
         return;
       }
@@ -9821,7 +10210,7 @@ Used by: ${h.uses.join("; ")}`;
         ${this._groupsDeleteOpen === r.groupId ? this._groupsDeleteHtml(r) : ""}
       </section>`;
       });
-      el.innerHTML = head + cards.join("");
+      el.innerHTML = head + cards.join("") + orphanHtml;
       this._wireGroupsTab(rows);
       if (this._groupsFocus != null) {
         const sec = this._q(`#view-groups .group-card[data-gid="${this._groupsFocus}"]`);
@@ -9900,6 +10289,11 @@ Used by: ${h.uses.join("; ")}`;
         e.preventDefault();
         const d = this._devices.find((x) => x.ieee === e.currentTarget.dataset.ieee);
         if (d) this._openDeviceDrawer(d);
+      });
+      on("[data-group-adopt]", (e) => {
+        const gid = Number(e.currentTarget.dataset.groupAdopt);
+        const input = root.querySelector(`.groups-orphan-name[data-gid="${gid}"]`);
+        this._groupsAdopt(gid, (input && input.value || "").trim() || `Group ${groupIdHex(gid)}`);
       });
       on("[data-group-remote]", (e) => this._openGroupFlowPickRemote({ groupId: Number(e.currentTarget.dataset.groupRemote) }));
       on("[data-group-add]", async (e) => {
@@ -9992,6 +10386,24 @@ Used by: ${h.uses.join("; ")}`;
         }
       } catch (err) {
         this._setStatus("error", `Couldn't add to ${name}: ${toolkitErrorText(err)}`, 0);
+      } finally {
+        this._groupsBusy = null;
+        this._renderGroupsTab();
+      }
+    }
+    /** Creates a ZHA group with the id a device-only group already uses. */
+    async _groupsAdopt(gid, name) {
+      if (this._groupsBusy != null) return;
+      this._groupsBusy = gid;
+      this._renderGroupsTab();
+      this._setStatus("info", `Adding ${name} to Home Assistant\u2026`, 0);
+      try {
+        await this._api.createGroupWithId(name, gid);
+        await this._groupsRefresh();
+        this._groupsFocus = gid;
+        this._setStatus("success", `${name} is now a Home Assistant group. Use Add lights\u2026 to list the lights that are in it.`, 0);
+      } catch (err) {
+        this._setStatus("error", `Couldn't add ${name}: ${toolkitErrorText(err)}`, 0);
       } finally {
         this._groupsBusy = null;
         this._renderGroupsTab();

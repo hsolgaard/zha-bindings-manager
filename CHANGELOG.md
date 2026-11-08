@@ -3,7 +3,7 @@
 All notable changes to ZHA Bindings Manager are documented here.
 
 
-## [Unreleased]
+## [1.6.0]
 
 ### Added
 

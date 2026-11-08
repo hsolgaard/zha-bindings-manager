@@ -269,7 +269,13 @@ a.health-chip-lost { text-decoration:none; cursor:pointer; }
   background: var(--secondary-background-color, #f5f5f5); }
 .drawer-tags { display:flex; flex-wrap:wrap; gap:4px; margin-bottom:4px; }
 .drawer-tags .chip { cursor: default; }
-.drawer-facts td:first-child { color: var(--secondary-text-color); white-space: nowrap; }
+.drawer-body { overflow-x:hidden; }
+.drawer-head > div { flex: 1 1 auto; min-width: 0; }
+.drawer-facts { width:100%; table-layout: fixed; }
+.drawer-facts td { overflow-wrap: anywhere; vertical-align: top; }
+.drawer-facts td:first-child { color: var(--secondary-text-color); width: 42%; }
+.drawer-check { display:flex; align-items:flex-start; gap:8px; margin-top:8px; font-size:0.95em; }
+.drawer-check input { flex: 0 0 auto; margin-top:3px; }
 .drawer-facts .scan-cell { display:block; }
 .map-route-banner { margin: 6px 0; padding: 8px 10px; border-left: 4px solid var(--primary-color); background: var(--secondary-background-color, #f5f5f5); border-radius: 6px; font-size: 13px; display:flex; gap:8px; align-items:flex-start; flex-wrap: wrap; }
 .map-route-banner .map-route-text { flex: 1 1 260px; }

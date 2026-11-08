@@ -1897,6 +1897,386 @@
     return { level: n("rejected") + n("failed") ? "warning" : n("waiting") ? "info" : "success", text: parts.join(", ") || "Nothing was copied." };
   }
 
+  // src/questions.json
+  var questions_default = {
+    schema: 1,
+    version: 1,
+    about: "Questions about how a Zigbee device behaves in real use: things a capability scan can't show. Shared by every tool that asks them (ZHA Bindings Manager, the issue form, the website). Answers are stored per firmware and per use in each device file under device_answers and summarised in data/answers.json. Ids never change meaning: reword a question freely, but add a new id for a different question.",
+    free_text_max: 280,
+    device_types: [
+      { id: "remote", label: "Remote, button or battery switch (sends commands, no load)" },
+      { id: "wall_switch", label: "Wall switch or rocker with a relay (can switch a load)" },
+      { id: "light", label: "Light, bulb or LED driver" },
+      { id: "plug", label: "Plug, socket or in-line relay" },
+      { id: "cover", label: "Blind, curtain or shutter motor" },
+      { id: "sensor", label: "Sensor (motion, contact, temperature, leak\u2026)" },
+      { id: "other", label: "Something else" }
+    ],
+    context: [
+      {
+        id: "system",
+        text: "Which Zigbee system do you use it with?",
+        answers: [
+          { id: "zha", label: "ZHA (Home Assistant)" },
+          { id: "z2m", label: "Zigbee2MQTT" },
+          { id: "deconz", label: "deCONZ / Phoscon" },
+          { id: "hub", label: "A vendor hub (Hue, IKEA, Aqara\u2026)" },
+          { id: "other", label: "Something else" }
+        ]
+      },
+      {
+        id: "coordinator",
+        text: "What chip is your coordinator?",
+        help: "Some behaviour depends on the coordinator, not the device.",
+        answers: [
+          { id: "silabs", label: "Silicon Labs (EFR32 / EmberZNet, e.g. Sonoff Dongle-E/M, SkyConnect, ZBT-1)" },
+          { id: "ti", label: "Texas Instruments (CC2652 / CC1352, e.g. Sonoff Dongle-P)" },
+          { id: "conbee", label: "ConBee / RaspBee" },
+          { id: "other", label: "Something else" },
+          { id: "not_sure", label: "Not sure" }
+        ]
+      },
+      {
+        id: "owned_for",
+        text: "How long have you had it?",
+        answers: [
+          { id: "lt_month", label: "Less than a month" },
+          { id: "lt_year", label: "1 to 12 months" },
+          { id: "gt_year", label: "Over a year" }
+        ]
+      }
+    ],
+    use: {
+      id: "use",
+      text: "What do you use this one for?",
+      help: "Answer for this one device. Everything else is read in the light of it: a rocker can be great as a wired switch and poor as a remote.",
+      allow_other: true,
+      answers_by_type: {
+        remote: [
+          { id: "control_lights", label: "Controlling lights directly (bound to them or to a group)" },
+          { id: "automations", label: "Buttons for automations only" },
+          { id: "scenes", label: "Scene controller" }
+        ],
+        wall_switch: [
+          { id: "wired_own_load", label: "Wired, switching its own light" },
+          { id: "decoupled_smart_bulbs", label: "Wired, button separated from the relay, controlling smart bulbs" },
+          { id: "remote_only", label: "Not switching a load: used as a remote" },
+          { id: "automations", label: "Buttons for automations only" }
+        ],
+        light: [
+          { id: "main_light", label: "Main room light" },
+          { id: "lamp", label: "Lamp" },
+          { id: "accent", label: "Accent, strip or spot" },
+          { id: "outdoor", label: "Outdoor" }
+        ],
+        plug: [
+          { id: "lamp", label: "A lamp" },
+          { id: "appliance", label: "An appliance" },
+          { id: "power_monitoring", label: "Mainly measuring power" },
+          { id: "router", label: "Mainly as a router (repeater)" }
+        ],
+        cover: [
+          { id: "blind", label: "Roller or venetian blind" },
+          { id: "curtain", label: "Curtain" },
+          { id: "shutter", label: "Shutter or garage door" }
+        ],
+        sensor: [
+          { id: "lighting", label: "Switching lights" },
+          { id: "security", label: "Security or alarm" },
+          { id: "climate", label: "Heating or climate" },
+          { id: "leak", label: "Leak or safety" }
+        ],
+        other: [
+          { id: "general", label: "General use" }
+        ]
+      }
+    },
+    questions: [
+      {
+        id: "stays_connected",
+        topic: "connection",
+        text: "Does it stay connected?",
+        types: ["remote", "wall_switch", "light", "plug", "cover", "sensor", "other"],
+        answers: [
+          { id: "always", label: "Always" },
+          { id: "drops_occasionally", label: "Drops off occasionally" },
+          { id: "drops_often", label: "Drops off often" }
+        ]
+      },
+      {
+        id: "routers",
+        topic: "connection",
+        text: "Which routers does it work through?",
+        help: "Some devices only stay connected through certain brands of router, or only directly to the coordinator.",
+        types: ["remote", "sensor", "other"],
+        answers: [
+          { id: "any", label: "Any router" },
+          { id: "some_brands", label: "Only some brands" },
+          { id: "coordinator_only", label: "Only directly to the coordinator" },
+          { id: "not_sure", label: "Not sure" }
+        ]
+      },
+      {
+        id: "rejoins",
+        topic: "connection",
+        text: "If it drops off, does it come back?",
+        types: ["remote", "wall_switch", "light", "plug", "cover", "sensor", "other"],
+        answers: [
+          { id: "by_itself", label: "Yes, by itself" },
+          { id: "after_press", label: "After a button press" },
+          { id: "needs_repair", label: "Only by pairing it again" },
+          { id: "never_dropped", label: "It has never dropped" }
+        ]
+      },
+      {
+        id: "pairing",
+        topic: "pairing",
+        text: "Did pairing work as the manual says?",
+        types: ["remote", "wall_switch", "light", "plug", "cover", "sensor", "other"],
+        allow_other: true,
+        other_label: "It needed a trick (tell us)",
+        answers: [
+          { id: "first_time", label: "First time" },
+          { id: "several_tries", label: "Took several tries" }
+        ]
+      },
+      {
+        id: "direct_control",
+        topic: "direct_control",
+        text: "Does it control lights directly when your Zigbee system or Home Assistant is off?",
+        help: "Bound straight to the lights, not through an automation.",
+        types: ["remote", "wall_switch"],
+        uses: ["control_lights", "scenes", "decoupled_smart_bulbs", "remote_only"],
+        answers: [
+          { id: "yes", label: "Yes, bound to the lights" },
+          { id: "group_only", label: "Only through a group" },
+          { id: "no", label: "No" },
+          { id: "didnt_try", label: "Didn't try" }
+        ]
+      },
+      {
+        id: "press_sends",
+        topic: "direct_control",
+        text: "What does a press send?",
+        help: "With Toggle, two remotes on the same light can get out of step; separate On and Off can't.",
+        types: ["remote", "wall_switch"],
+        uses: ["control_lights", "scenes", "decoupled_smart_bulbs", "remote_only"],
+        answers: [
+          { id: "toggle", label: "Toggle" },
+          { id: "on_and_off", label: "Separate On and Off" },
+          { id: "depends_on_mode", label: "Depends on a mode setting" },
+          { id: "not_sure", label: "Not sure" }
+        ]
+      },
+      {
+        id: "needed_setting",
+        topic: "direct_control",
+        text: "Did it need a setting changed before it controlled lights directly?",
+        types: ["remote", "wall_switch"],
+        uses: ["control_lights", "scenes", "decoupled_smart_bulbs", "remote_only"],
+        allow_other: true,
+        other_label: "Yes, something else (tell us)",
+        answers: [
+          { id: "no", label: "No" },
+          { id: "mode_setting", label: "Yes, a mode setting" },
+          { id: "button_sequence", label: "Yes, a button sequence" },
+          { id: "never_worked", label: "It never worked" },
+          { id: "not_sure", label: "Not sure" }
+        ]
+      },
+      {
+        id: "presses_arrive",
+        topic: "direct_control",
+        text: "Does every press arrive?",
+        types: ["remote", "wall_switch"],
+        uses: ["control_lights", "scenes", "decoupled_smart_bulbs", "remote_only", "automations"],
+        answers: [
+          { id: "always", label: "Always" },
+          { id: "sometimes_missed", label: "Sometimes missed" },
+          { id: "often_missed", label: "Often missed" }
+        ]
+      },
+      {
+        id: "hold_to_dim",
+        topic: "direct_control",
+        text: "Does holding a button dim the lights?",
+        types: ["remote", "wall_switch"],
+        uses: ["control_lights", "scenes", "decoupled_smart_bulbs", "remote_only"],
+        answers: [
+          { id: "works", label: "Yes" },
+          { id: "no", label: "No" },
+          { id: "no_dim_buttons", label: "It has no dim buttons" },
+          { id: "not_sure", label: "Not sure" }
+        ]
+      },
+      {
+        id: "keeps_bindings",
+        topic: "direct_control",
+        text: "Does it keep its bindings after a battery change, power cut or firmware update?",
+        types: ["remote", "wall_switch"],
+        uses: ["control_lights", "scenes", "decoupled_smart_bulbs", "remote_only"],
+        answers: [
+          { id: "yes", label: "Yes" },
+          { id: "lost_them", label: "It lost them" },
+          { id: "not_seen", label: "Haven't had one yet" }
+        ]
+      },
+      {
+        id: "decoupled",
+        topic: "relay",
+        text: "Can the button be separated from the relay (decoupled mode)?",
+        types: ["wall_switch"],
+        allow_other: true,
+        other_label: "Yes, another way (tell us)",
+        answers: [
+          { id: "system_setting", label: "Yes, a setting in my Zigbee system" },
+          { id: "button_sequence", label: "Yes, a button sequence on the device" },
+          { id: "no", label: "No" },
+          { id: "not_sure", label: "Not sure" }
+        ]
+      },
+      {
+        id: "wiring",
+        topic: "relay",
+        text: "How is it wired?",
+        types: ["wall_switch"],
+        answers: [
+          { id: "with_neutral", label: "With neutral" },
+          { id: "no_neutral_fine", label: "Without neutral, works fine" },
+          { id: "no_neutral_problems", label: "Without neutral, flickers or has problems" },
+          { id: "battery", label: "Battery, not wired" }
+        ]
+      },
+      {
+        id: "power_on",
+        topic: "power_cut",
+        text: "What does it do after a power cut?",
+        help: "Many devices list a power-on setting that they don't actually honour.",
+        types: ["light", "plug", "wall_switch"],
+        uses: ["main_light", "lamp", "accent", "outdoor", "appliance", "power_monitoring", "router", "wired_own_load", "decoupled_smart_bulbs"],
+        answers: [
+          { id: "last_state", label: "Goes back to how it was" },
+          { id: "always_on", label: "Always comes on" },
+          { id: "always_off", label: "Always stays off" },
+          { id: "ignores_setting", label: "Ignores its power-on setting" },
+          { id: "not_sure", label: "Not sure" }
+        ]
+      },
+      {
+        id: "remembers_colour",
+        topic: "power_cut",
+        text: "After a power cut, does it remember brightness and colour too?",
+        types: ["light"],
+        answers: [
+          { id: "yes", label: "Yes" },
+          { id: "on_only", label: "Only on or off" },
+          { id: "no", label: "No" },
+          { id: "not_sure", label: "Not sure" }
+        ]
+      },
+      {
+        id: "router_quality",
+        topic: "connection",
+        text: "Is it a good router for other devices?",
+        types: ["light", "plug", "wall_switch"],
+        answers: [
+          { id: "good", label: "Yes" },
+          { id: "children_drop", label: "Devices connected through it drop off" },
+          { id: "not_sure", label: "Not sure" }
+        ]
+      },
+      {
+        id: "position_accurate",
+        topic: "cover",
+        text: "Does the position it reports match where it really is?",
+        types: ["cover"],
+        answers: [
+          { id: "yes", label: "Yes" },
+          { id: "drifts", label: "Drifts over time" },
+          { id: "no", label: "No" }
+        ]
+      },
+      {
+        id: "reports_promptly",
+        topic: "sensor",
+        text: "Do its reports arrive promptly?",
+        types: ["sensor"],
+        answers: [
+          { id: "instant", label: "Straight away" },
+          { id: "delayed", label: "Noticeably delayed" },
+          { id: "misses_some", label: "Some go missing" }
+        ]
+      },
+      {
+        id: "battery_life",
+        topic: "battery",
+        text: "How long do its batteries last?",
+        types: ["remote", "sensor", "cover", "wall_switch"],
+        answers: [
+          { id: "lt_1m", label: "Less than a month" },
+          { id: "m1_6", label: "1 to 6 months" },
+          { id: "m6_12", label: "6 to 12 months" },
+          { id: "gt_1y", label: "Over a year" },
+          { id: "too_early", label: "Too early to say" },
+          { id: "not_battery", label: "It isn't battery powered" }
+        ]
+      },
+      {
+        id: "battery_report",
+        topic: "battery",
+        text: "Is the battery level it reports right?",
+        types: ["remote", "sensor", "cover", "wall_switch"],
+        answers: [
+          { id: "accurate", label: "Yes" },
+          { id: "drops_suddenly", label: "Drops suddenly near the end" },
+          { id: "stuck", label: "Stuck or never changes" },
+          { id: "not_reported", label: "It doesn't report one" },
+          { id: "not_battery", label: "It isn't battery powered" }
+        ]
+      },
+      {
+        id: "ota",
+        topic: "firmware",
+        text: "Has your Zigbee system offered it a firmware update?",
+        types: ["remote", "wall_switch", "light", "plug", "cover", "sensor", "other"],
+        answers: [
+          { id: "worked", label: "Yes, and it worked" },
+          { id: "failed", label: "Yes, but it failed" },
+          { id: "never_offered", label: "Never offered" },
+          { id: "not_sure", label: "Not sure" }
+        ]
+      },
+      {
+        id: "update_changed",
+        topic: "firmware",
+        text: "Did a firmware update change any of the above?",
+        help: "Asked when you answered before on a different firmware.",
+        types: ["remote", "wall_switch", "light", "plug", "cover", "sensor", "other"],
+        after_firmware_change: true,
+        allow_other: true,
+        other_label: "Yes, something specific (tell us)",
+        answers: [
+          { id: "better", label: "Better" },
+          { id: "worse", label: "Worse" },
+          { id: "no_change", label: "No change" }
+        ]
+      }
+    ],
+    rating: {
+      id: "rating",
+      text: "Ignoring price, how good is it at what you use it for?",
+      min: 1,
+      max: 5,
+      labels: { "1": "Poor", "2": "Not great", "3": "OK", "4": "Good", "5": "Excellent" },
+      min_ratings_for_average: 3
+    },
+    tip: {
+      id: "tip",
+      text: "Anything the next person should know?",
+      help: "Optional, up to 280 characters. No names, places or addresses. Shown after review."
+    }
+  };
+
   // src/lost.js
   var POLICIES = ["off", "notify", "auto"];
   var POLICY_LABELS = {
@@ -3271,7 +3651,13 @@ a.health-chip-lost { text-decoration:none; cursor:pointer; }
   background: var(--secondary-background-color, #f5f5f5); }
 .drawer-tags { display:flex; flex-wrap:wrap; gap:4px; margin-bottom:4px; }
 .drawer-tags .chip { cursor: default; }
-.drawer-facts td:first-child { color: var(--secondary-text-color); white-space: nowrap; }
+.drawer-body { overflow-x:hidden; }
+.drawer-head > div { flex: 1 1 auto; min-width: 0; }
+.drawer-facts { width:100%; table-layout: fixed; }
+.drawer-facts td { overflow-wrap: anywhere; vertical-align: top; }
+.drawer-facts td:first-child { color: var(--secondary-text-color); width: 42%; }
+.drawer-check { display:flex; align-items:flex-start; gap:8px; margin-top:8px; font-size:0.95em; }
+.drawer-check input { flex: 0 0 auto; margin-top:3px; }
 .drawer-facts .scan-cell { display:block; }
 .map-route-banner { margin: 6px 0; padding: 8px 10px; border-left: 4px solid var(--primary-color); background: var(--secondary-background-color, #f5f5f5); border-radius: 6px; font-size: 13px; display:flex; gap:8px; align-items:flex-start; flex-wrap: wrap; }
 .map-route-banner .map-route-text { flex: 1 1 260px; }
@@ -5287,13 +5673,19 @@ a.health-chip-lost { text-decoration:none; cursor:pointer; }
     }
     /** Remembers (in this browser) that a scan of this device was shared, so
      *  its questions open before the scan has been merged into the database. */
+    _scanShared(ieee) {
+      const key = normIeee(ieee);
+      return this._sharedThisSession && this._sharedThisSession.has(key) || !!this._answersStoreRead("zbm-shared-scans")[key];
+    }
     _markScanShared(ieee, record) {
+      (this._sharedThisSession = this._sharedThisSession || /* @__PURE__ */ new Set()).add(normIeee(ieee));
       const all = this._answersStoreRead("zbm-shared-scans");
       all[normIeee(ieee)] = {
         at: (/* @__PURE__ */ new Date()).toISOString(),
         sw_build_id: record && record.identity && record.identity.sw_build_id || null
       };
       this._answersStoreWrite("zbm-shared-scans", all);
+      if (this._drawerIeee) this._renderDrawer();
     }
     /** The firmware to file answers under: sw_build_id from a command check
      *  this session (or a remembered share), plus Home Assistant's version. */
@@ -5318,15 +5710,23 @@ a.health-chip-lost { text-decoration:none; cursor:pointer; }
       if (this._answersLoading) return;
       this._answersLoading = true;
       try {
-        const [q, doc] = await Promise.all([fetchQuestions({ force }), fetchAnswersDoc({ force })]);
-        this._answersQ = q;
+        const [q, doc] = await Promise.all([fetchQuestions({ force }).catch(() => null), fetchAnswersDoc({ force }).catch(() => ({}))]);
+        this._answersQ = q && (q.version || 0) >= (questions_default.version || 0) ? q : questions_default;
         this._answersDoc = doc || {};
         this._answersError = null;
       } catch (err) {
-        this._answersError = err && err.message || String(err);
+        this._answersQ = questions_default;
+        this._answersDoc = {};
       }
       this._answersLoading = false;
       if (this._drawerIeee) this._renderDrawer();
+    }
+    /** Facts row pointing at the questions section further down. */
+    _drawerAnswersFact(d) {
+      const community = this._answersQ ? answersForFirmware(this._answersDoc, d, this._deviceFirmware(d)) : { total: 0 };
+      const mine = this._answersStoreRead("zbm-device-answers")[normIeee(d.ieee)];
+      const said = community.total ? `${community.total} owner${community.total === 1 ? "" : "s"} answered` : "Nobody has said yet";
+      return `${escapeHtml(said)}. <a href="#" class="src-link" id="drawer-answers-link">${mine ? "Your answers" : "Answer questions"}</a>`;
     }
     _drawerAnswersHtml(d) {
       if (!d.manufacturer && !d.model) return "";
@@ -5335,18 +5735,18 @@ a.health-chip-lost { text-decoration:none; cursor:pointer; }
         return "";
       }
       const q = this._answersQ;
-      if (!q || this._answersError) return "";
+      if (!q) return "";
       const fw = this._deviceFirmware(d);
       const community = answersForFirmware(this._answersDoc, d, fw);
       const inDb = this._capExpIndex ? matchLocalDevices([d], this._capExpIndex).length > 0 : false;
-      const shared = !!this._answersStoreRead("zbm-shared-scans")[normIeee(d.ieee)];
+      const shared = this._scanShared(d.ieee);
       const mine = this._answersStoreRead("zbm-device-answers")[normIeee(d.ieee)] || null;
       const unlocked = inDb || shared;
       const draft = this._answerDraft && this._answerDraft.ieee === normIeee(d.ieee) ? this._answerDraft : null;
       const communityHtml = this._answersCommunityHtml(q, community);
       let body;
       if (draft) {
-        body = this._answersFormHtml(q, d, fw, draft, mine);
+        body = this._answersFormHtml(q, d, fw, draft, mine, unlocked);
       } else if (!unlocked) {
         const type = detectDeviceType(this._clusterCache.get(d.ieee), d.power_source);
         const preview = questionsFor(q, type, null).slice(0, 3).map((x) => `<li><strong>${escapeHtml(x.text)}</strong> <span class="muted">${escapeHtml(x.answers.map((a) => a.label).join(" \xB7 "))}</span></li>`).join("");
@@ -5354,8 +5754,9 @@ a.health-chip-lost { text-decoration:none; cursor:pointer; }
           <p>Things a scan can't show: whether it stays connected, what a press really sends, whether it keeps its settings after a power cut.
             Answering takes about a minute and helps the next person with this model.</p>
           <ul class="answers-preview">${preview}</ul>
-          <p class="hint">Share this device's capability scan first, so your answers are tied to its real firmware.</p>
-          <button class="btn btn-small btn-primary" id="drawer-answers-share">Check and share capabilities\u2026</button>
+          <p class="hint">This model isn't in the community database yet, so its capability scan goes in together with your answers:
+            answer now, then share the scan before you submit.</p>
+          <button class="btn btn-small btn-primary" id="drawer-answers-start">Answer a few questions (about 1 minute)</button>
         </div>`;
       } else {
         const again = mine ? `<p class="hint">You answered on ${escapeHtml(new Date(mine.at).toLocaleDateString())}${mine.firmware && mine.firmware !== (fw.sw_build_id || fw.registry_sw_version) ? `, on firmware ${escapeHtml(mine.firmware)}` : ""}.</p>` : "";
@@ -5385,7 +5786,7 @@ a.health-chip-lost { text-decoration:none; cursor:pointer; }
       const linked = community.here.scan_linked ? "" : ` <span class="muted">(no scan of this firmware in the database yet)</span>`;
       return `<p class="hint">On firmware ${escapeHtml(community.hereKey)}${linked}:</p>${html}${otherFw}`;
     }
-    _answersFormHtml(q, d, fw, draft, mine) {
+    _answersFormHtml(q, d, fw, draft, mine, unlocked = true) {
       const fwText = fw.sw_build_id || fw.registry_sw_version;
       const sel = (name, options, value, extra = "") => `<select data-answer="${escapeHtml(name)}" ${extra}><option value="">\u2013</option>${options.map((o) => `<option value="${escapeHtml(o.id)}" ${o.id === value ? "selected" : ""}>${escapeHtml(o.label)}</option>`).join("")}</select>`;
       const otherBox = (key, value, placeholder) => `<input type="text" class="answers-other" data-other="${escapeHtml(key)}" maxlength="${q.free_text_max || 280}" value="${escapeHtml(
@@ -5407,7 +5808,10 @@ a.health-chip-lost { text-decoration:none; cursor:pointer; }
       const qHtml = main.map(qRow).join("") + (more.length ? `<details class="answers-more" ${moreAnswered || this._answersMoreOpen ? "open" : ""}><summary>More questions (${more.length})</summary>${more.map(qRow).join("")}</details>` : "");
       const ratingOpts = Object.entries(q.rating.labels).map(([n, l]) => ({ id: n, label: `${"\u2605".repeat(Number(n))} ${l}` }));
       const ctx = (q.context || []).map((c) => `<label class="answers-q"><span>${escapeHtml(c.text)}</span>${sel(`ctx:${c.id}`, c.answers, (draft.context || {})[c.id] || "")}</label>`).join("");
-      const problem = draftProblem(q, fw, draft);
+      const problem = draftProblem(q, fw, draft) || (unlocked ? "" : "Share this device's capability scan first: the model isn't in the community database yet.");
+      const shareFirst = unlocked ? "" : `<div class="flow-callout flow-result-warning">This model isn't in the community database yet. Share its capability scan too, so your
+          answers are tied to a scan anyone can check. Your answers are kept while you do.
+          <button class="btn btn-small" id="drawer-answers-share">Check and share capabilities\u2026</button></div>`;
       return `<div class="answers-form">
       <p class="hint">Answer for this one device, firmware ${fwText ? escapeHtml(fwText) : "<strong>unknown</strong>"}. Skip anything you're not sure about.
         Free text is checked before it's shown, so leave out names, places and addresses.</p>
@@ -5420,11 +5824,12 @@ a.health-chip-lost { text-decoration:none; cursor:pointer; }
              <details class="answers-context"><summary>About your setup (optional)</summary>${ctx}</details>
              <label class="answers-q"><span>${escapeHtml(q.tip.text)} <span class="muted">${escapeHtml(q.tip.help || "")}</span></span>
                <textarea class="answers-tip" maxlength="${q.free_text_max || 280}" rows="2">${escapeHtml(draft.tip || "")}</textarea></label>` : ""}
+      ${shareFirst}
       <div class="dialog-actions">
         <a class="btn btn-small btn-primary ${problem ? "disabled" : ""}" id="drawer-answers-submit" href="#" ${problem ? `aria-disabled="true" title="${escapeHtml(problem)}"` : ""}>Review on GitHub and submit</a>
         <button class="btn btn-small" id="drawer-answers-cancel">Cancel</button>
       </div>
-      ${problem && draft.use ? `<p class="hint">${escapeHtml(problem)}</p>` : ""}
+      ${problem && (draft.use || !unlocked) ? `<p class="hint">${escapeHtml(problem)}</p>` : ""}
       <p class="hint">Opens a pre-filled GitHub issue; nothing is sent until you press Submit there. Not using GitHub? The same questions are on the
         <a href="${escapeHtml(ISSUE_FORM_URL)}" target="_blank" rel="noopener">community form</a>.</p>
     </div>`;
@@ -5434,6 +5839,12 @@ a.health-chip-lost { text-decoration:none; cursor:pointer; }
       if (!root) return;
       const ieee = normIeee(d.ieee);
       const share = root.querySelector("#drawer-answers-share");
+      const jump = this._q("#drawer-answers-link");
+      if (jump)
+        jump.addEventListener("click", (e) => {
+          e.preventDefault();
+          if (root.scrollIntoView) root.scrollIntoView({ block: "start", behavior: "smooth" });
+        });
       if (share)
         share.addEventListener("click", () => {
           this._drawerShareOpen = true;
@@ -5496,7 +5907,9 @@ a.health-chip-lost { text-decoration:none; cursor:pointer; }
           e.preventDefault();
           const q = this._answersQ;
           const fw = this._deviceFirmware(d);
-          const problem = draftProblem(q, fw, draft);
+          const inDb = this._capExpIndex ? matchLocalDevices([d], this._capExpIndex).length > 0 : false;
+          const shared = this._scanShared(ieee);
+          const problem = draftProblem(q, fw, draft) || (inDb || shared ? "" : "Share this device's capability scan first (Check and share capabilities\u2026).");
           if (problem) {
             this._setStatus("warning", problem);
             return;
@@ -5523,7 +5936,9 @@ a.health-chip-lost { text-decoration:none; cursor:pointer; }
     _answersRefreshSubmit(d) {
       const btn = this._q("#drawer-answers-submit");
       if (!btn || !this._answerDraft) return;
-      const problem = draftProblem(this._answersQ, this._deviceFirmware(d), this._answerDraft);
+      const inDb = this._capExpIndex ? matchLocalDevices([d], this._capExpIndex).length > 0 : false;
+      const shared = this._scanShared(d.ieee);
+      const problem = draftProblem(this._answersQ, this._deviceFirmware(d), this._answerDraft) || (inDb || shared ? "" : "Share the capability scan first.");
       btn.classList.toggle("disabled", !!problem);
       if (problem) btn.setAttribute("title", problem);
       else btn.removeAttribute("title");
@@ -5560,8 +5975,8 @@ a.health-chip-lost { text-decoration:none; cursor:pointer; }
       <label class="drawer-lost-policy">If it loses a binding:
         <select id="drawer-lost-policy" ${busy ? "disabled" : ""}>${opts}</select></label>
       <p class="hint">${escapeHtml(POLICY_HINTS[w.policy] || "")}</p>
-      ${w.policy !== "off" && this._isRemoteLike(d) ? `<label class="drawer-lost-policy"><input type="checkbox" id="drawer-lost-fallback" ${w.fallback ? "checked" : ""} ${busy ? "disabled" : ""}>
-              Switch the lights from Home Assistant if a press doesn't reach them</label>
+      ${w.policy !== "off" && this._isRemoteLike(d) ? `<label class="drawer-check"><input type="checkbox" id="drawer-lost-fallback" ${w.fallback ? "checked" : ""} ${busy ? "disabled" : ""}>
+              <span>Switch the lights from Home Assistant if a press doesn't reach them</span></label>
              <p class="hint">After On, Off or Toggle, any light it's bound to directly that hasn't changed within 2 seconds is switched by Home Assistant,
                logged, and this device's bindings are checked straight away.</p>` : ""}
       <details class="drawer-lost-expect"><summary>What to expect</summary>
@@ -8523,7 +8938,8 @@ a.health-chip-lost { text-decoration:none; cursor:pointer; }
         ["Power", d.power_source || "Unknown"],
         ["Bindings read", this._lastScanCellInfo(d).html.replace(/<button[\s\S]*?<\/button>/, "")],
         ["Community database", this._drawerCommunityStatus(d)],
-        this._drawerActivityText(d) != null ? ["Messages to Home Assistant", this._drawerActivityText(d)] : null
+        this._drawerActivityText(d) != null ? ["Messages to Home Assistant", this._drawerActivityText(d)] : null,
+        d.manufacturer || d.model ? ["How it behaves", this._drawerAnswersFact(d)] : null
       ].filter(Boolean);
       const battery = this._isBatteryDevice(d);
       const haUrl = deviceHaUrl(d);
@@ -8545,7 +8961,7 @@ a.health-chip-lost { text-decoration:none; cursor:pointer; }
         ${photo}
         <div>
           ${tags.length ? `<div class="drawer-tags">${tags.map((t) => `<span class="chip">${escapeHtml(t)}</span>`).join("")}</div>` : ""}
-          <table class="detail-table drawer-facts">${facts.map(([k, v]) => `<tr><td>${escapeHtml(k)}</td><td>${k === "Bindings read" || k === "Community database" ? v : escapeHtml(String(v))}</td></tr>`).join("")}</table>
+          <table class="detail-table drawer-facts">${facts.map(([k, v]) => `<tr><td>${escapeHtml(k)}</td><td>${k === "Bindings read" || k === "Community database" || k === "How it behaves" ? v : escapeHtml(String(v))}</td></tr>`).join("")}</table>
         </div>
       </div>
       ${problems}

@@ -57,6 +57,7 @@ import {
 } from "./device-answers.js";
 const LOST_EDGE_COLOR = "#db4437";
 import { replacementCandidates, commandGaps, VERDICT, RESULT_LABEL, defaultSelection, runSummary } from "./replace.js";
+import BUNDLED_QUESTIONS from "./questions.json";
 import { lostSummary, lostFor, putBackMessage, sinceText, NOTICED_BY, POLICIES, POLICY_LABELS, POLICY_HINTS } from "./lost.js";
 import { SHELL_HTML } from "./template.js";
 import { LocalStorageProvider } from "./storage/local-storage-provider.js";
@@ -1599,13 +1600,20 @@ export class ZhaBindingMapCard extends HTMLElement {
 
   /** Remembers (in this browser) that a scan of this device was shared, so
    *  its questions open before the scan has been merged into the database. */
+  _scanShared(ieee) {
+    const key = normIeee(ieee);
+    return (this._sharedThisSession && this._sharedThisSession.has(key)) || !!this._answersStoreRead("zbm-shared-scans")[key];
+  }
+
   _markScanShared(ieee, record) {
+    (this._sharedThisSession = this._sharedThisSession || new Set()).add(normIeee(ieee));
     const all = this._answersStoreRead("zbm-shared-scans");
     all[normIeee(ieee)] = {
       at: new Date().toISOString(),
       sw_build_id: (record && record.identity && record.identity.sw_build_id) || null,
     };
     this._answersStoreWrite("zbm-shared-scans", all);
+    if (this._drawerIeee) this._renderDrawer();
   }
 
   /** The firmware to file answers under: sw_build_id from a command check
@@ -1632,15 +1640,26 @@ export class ZhaBindingMapCard extends HTMLElement {
     if (this._answersLoading) return;
     this._answersLoading = true;
     try {
-      const [q, doc] = await Promise.all([fetchQuestions({ force }), fetchAnswersDoc({ force })]);
-      this._answersQ = q;
+      // The database's questions when it has them (newer wording or new
+      // questions without a card release), else the copy built into the card.
+      const [q, doc] = await Promise.all([fetchQuestions({ force }).catch(() => null), fetchAnswersDoc({ force }).catch(() => ({}))]);
+      this._answersQ = q && (q.version || 0) >= (BUNDLED_QUESTIONS.version || 0) ? q : BUNDLED_QUESTIONS;
       this._answersDoc = doc || {};
       this._answersError = null;
     } catch (err) {
-      this._answersError = (err && err.message) || String(err);
+      this._answersQ = BUNDLED_QUESTIONS;
+      this._answersDoc = {};
     }
     this._answersLoading = false;
     if (this._drawerIeee) this._renderDrawer();
+  }
+
+  /** Facts row pointing at the questions section further down. */
+  _drawerAnswersFact(d) {
+    const community = this._answersQ ? answersForFirmware(this._answersDoc, d, this._deviceFirmware(d)) : { total: 0 };
+    const mine = this._answersStoreRead("zbm-device-answers")[normIeee(d.ieee)];
+    const said = community.total ? `${community.total} owner${community.total === 1 ? "" : "s"} answered` : "Nobody has said yet";
+    return `${escapeHtml(said)}. <a href="#" class="src-link" id="drawer-answers-link">${mine ? "Your answers" : "Answer questions"}</a>`;
   }
 
   _drawerAnswersHtml(d) {
@@ -1650,11 +1669,11 @@ export class ZhaBindingMapCard extends HTMLElement {
       return "";
     }
     const q = this._answersQ;
-    if (!q || this._answersError) return ""; // the database doesn't ask questions yet, or couldn't be reached
+    if (!q) return "";
     const fw = this._deviceFirmware(d);
     const community = answersForFirmware(this._answersDoc, d, fw);
     const inDb = this._capExpIndex ? matchLocalDevices([d], this._capExpIndex).length > 0 : false;
-    const shared = !!this._answersStoreRead("zbm-shared-scans")[normIeee(d.ieee)];
+    const shared = this._scanShared(d.ieee);
     const mine = this._answersStoreRead("zbm-device-answers")[normIeee(d.ieee)] || null;
     const unlocked = inDb || shared;
     const draft = this._answerDraft && this._answerDraft.ieee === normIeee(d.ieee) ? this._answerDraft : null;
@@ -1662,7 +1681,7 @@ export class ZhaBindingMapCard extends HTMLElement {
     const communityHtml = this._answersCommunityHtml(q, community);
     let body;
     if (draft) {
-      body = this._answersFormHtml(q, d, fw, draft, mine);
+      body = this._answersFormHtml(q, d, fw, draft, mine, unlocked);
     } else if (!unlocked) {
       const type = detectDeviceType(this._clusterCache.get(d.ieee), d.power_source);
       const preview = questionsFor(q, type, null)
@@ -1673,8 +1692,9 @@ export class ZhaBindingMapCard extends HTMLElement {
           <p>Things a scan can't show: whether it stays connected, what a press really sends, whether it keeps its settings after a power cut.
             Answering takes about a minute and helps the next person with this model.</p>
           <ul class="answers-preview">${preview}</ul>
-          <p class="hint">Share this device's capability scan first, so your answers are tied to its real firmware.</p>
-          <button class="btn btn-small btn-primary" id="drawer-answers-share">Check and share capabilities…</button>
+          <p class="hint">This model isn't in the community database yet, so its capability scan goes in together with your answers:
+            answer now, then share the scan before you submit.</p>
+          <button class="btn btn-small btn-primary" id="drawer-answers-start">Answer a few questions (about 1 minute)</button>
         </div>`;
     } else {
       const again = mine
@@ -1726,7 +1746,7 @@ export class ZhaBindingMapCard extends HTMLElement {
     return `<p class="hint">On firmware ${escapeHtml(community.hereKey)}${linked}:</p>${html}${otherFw}`;
   }
 
-  _answersFormHtml(q, d, fw, draft, mine) {
+  _answersFormHtml(q, d, fw, draft, mine, unlocked = true) {
     const fwText = fw.sw_build_id || fw.registry_sw_version;
     const sel = (name, options, value, extra = "") =>
       `<select data-answer="${escapeHtml(name)}" ${extra}><option value="">–</option>${options
@@ -1760,7 +1780,14 @@ export class ZhaBindingMapCard extends HTMLElement {
     const ctx = (q.context || [])
       .map((c) => `<label class="answers-q"><span>${escapeHtml(c.text)}</span>${sel(`ctx:${c.id}`, c.answers, (draft.context || {})[c.id] || "")}</label>`)
       .join("");
-    const problem = draftProblem(q, fw, draft);
+    const problem =
+      draftProblem(q, fw, draft) ||
+      (unlocked ? "" : "Share this device's capability scan first: the model isn't in the community database yet.");
+    const shareFirst = unlocked
+      ? ""
+      : `<div class="flow-callout flow-result-warning">This model isn't in the community database yet. Share its capability scan too, so your
+          answers are tied to a scan anyone can check. Your answers are kept while you do.
+          <button class="btn btn-small" id="drawer-answers-share">Check and share capabilities…</button></div>`;
     return `<div class="answers-form">
       <p class="hint">Answer for this one device, firmware ${fwText ? escapeHtml(fwText) : "<strong>unknown</strong>"}. Skip anything you're not sure about.
         Free text is checked before it's shown, so leave out names, places and addresses.</p>
@@ -1781,11 +1808,12 @@ export class ZhaBindingMapCard extends HTMLElement {
                <textarea class="answers-tip" maxlength="${q.free_text_max || 280}" rows="2">${escapeHtml(draft.tip || "")}</textarea></label>`
           : ""
       }
+      ${shareFirst}
       <div class="dialog-actions">
         <a class="btn btn-small btn-primary ${problem ? "disabled" : ""}" id="drawer-answers-submit" href="#" ${problem ? `aria-disabled="true" title="${escapeHtml(problem)}"` : ""}>Review on GitHub and submit</a>
         <button class="btn btn-small" id="drawer-answers-cancel">Cancel</button>
       </div>
-      ${problem && draft.use ? `<p class="hint">${escapeHtml(problem)}</p>` : ""}
+      ${problem && (draft.use || !unlocked) ? `<p class="hint">${escapeHtml(problem)}</p>` : ""}
       <p class="hint">Opens a pre-filled GitHub issue; nothing is sent until you press Submit there. Not using GitHub? The same questions are on the
         <a href="${escapeHtml(ISSUE_FORM_URL)}" target="_blank" rel="noopener">community form</a>.</p>
     </div>`;
@@ -1796,6 +1824,12 @@ export class ZhaBindingMapCard extends HTMLElement {
     if (!root) return;
     const ieee = normIeee(d.ieee);
     const share = root.querySelector("#drawer-answers-share");
+    const jump = this._q("#drawer-answers-link");
+    if (jump)
+      jump.addEventListener("click", (e) => {
+        e.preventDefault();
+        if (root.scrollIntoView) root.scrollIntoView({ block: "start", behavior: "smooth" });
+      });
     if (share)
       share.addEventListener("click", () => {
         this._drawerShareOpen = true;
@@ -1858,7 +1892,9 @@ export class ZhaBindingMapCard extends HTMLElement {
         e.preventDefault();
         const q = this._answersQ;
         const fw = this._deviceFirmware(d);
-        const problem = draftProblem(q, fw, draft);
+        const inDb = this._capExpIndex ? matchLocalDevices([d], this._capExpIndex).length > 0 : false;
+        const shared = this._scanShared(ieee);
+        const problem = draftProblem(q, fw, draft) || (inDb || shared ? "" : "Share this device's capability scan first (Check and share capabilities…).");
         if (problem) {
           this._setStatus("warning", problem);
           return;
@@ -1886,7 +1922,9 @@ export class ZhaBindingMapCard extends HTMLElement {
   _answersRefreshSubmit(d) {
     const btn = this._q("#drawer-answers-submit");
     if (!btn || !this._answerDraft) return;
-    const problem = draftProblem(this._answersQ, this._deviceFirmware(d), this._answerDraft);
+    const inDb = this._capExpIndex ? matchLocalDevices([d], this._capExpIndex).length > 0 : false;
+    const shared = this._scanShared(d.ieee);
+    const problem = draftProblem(this._answersQ, this._deviceFirmware(d), this._answerDraft) || (inDb || shared ? "" : "Share the capability scan first.");
     btn.classList.toggle("disabled", !!problem);
     if (problem) btn.setAttribute("title", problem);
     else btn.removeAttribute("title");
@@ -1933,8 +1971,8 @@ export class ZhaBindingMapCard extends HTMLElement {
       <p class="hint">${escapeHtml(POLICY_HINTS[w.policy] || "")}</p>
       ${
         w.policy !== "off" && this._isRemoteLike(d)
-          ? `<label class="drawer-lost-policy"><input type="checkbox" id="drawer-lost-fallback" ${w.fallback ? "checked" : ""} ${busy ? "disabled" : ""}>
-              Switch the lights from Home Assistant if a press doesn't reach them</label>
+          ? `<label class="drawer-check"><input type="checkbox" id="drawer-lost-fallback" ${w.fallback ? "checked" : ""} ${busy ? "disabled" : ""}>
+              <span>Switch the lights from Home Assistant if a press doesn't reach them</span></label>
              <p class="hint">After On, Off or Toggle, any light it's bound to directly that hasn't changed within 2 seconds is switched by Home Assistant,
                logged, and this device's bindings are checked straight away.</p>`
           : ""
@@ -5385,6 +5423,7 @@ export class ZhaBindingMapCard extends HTMLElement {
       ["Bindings read", this._lastScanCellInfo(d).html.replace(/<button[\s\S]*?<\/button>/, "")],
       ["Community database", this._drawerCommunityStatus(d)],
       this._drawerActivityText(d) != null ? ["Messages to Home Assistant", this._drawerActivityText(d)] : null,
+      d.manufacturer || d.model ? ["How it behaves", this._drawerAnswersFact(d)] : null,
     ].filter(Boolean);
     const battery = this._isBatteryDevice(d);
     const haUrl = deviceHaUrl(d);
@@ -5416,7 +5455,7 @@ export class ZhaBindingMapCard extends HTMLElement {
         <div>
           ${tags.length ? `<div class="drawer-tags">${tags.map((t) => `<span class="chip">${escapeHtml(t)}</span>`).join("")}</div>` : ""}
           <table class="detail-table drawer-facts">${facts
-            .map(([k, v]) => `<tr><td>${escapeHtml(k)}</td><td>${k === "Bindings read" || k === "Community database" ? v : escapeHtml(String(v))}</td></tr>`)
+            .map(([k, v]) => `<tr><td>${escapeHtml(k)}</td><td>${k === "Bindings read" || k === "Community database" || k === "How it behaves" ? v : escapeHtml(String(v))}</td></tr>`)
             .join("")}</table>
         </div>
       </div>

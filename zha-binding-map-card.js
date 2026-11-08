@@ -21,7 +21,7 @@
  * zha_toolkit MUST be installed (via HACS) and working for bind/unbind/scan
  * to function. See README.md for details.
  *
- * Version: 1.6.1
+ * Version: 1.9.0
  */
 (() => {
   // src/capexplorer-constants.js
@@ -78,7 +78,7 @@
 
   // src/constants.js
   var ZTK_DOMAIN = "zha_toolkit";
-  var CARD_VERSION = "1.6.1";
+  var CARD_VERSION = "1.9.0";
   var CHANGELOG_URL = "https://github.com/hsolgaard/zha-bindings-manager/blob/main/CHANGELOG.md";
   var DEFAULT_BINDABLE_OUT_CLUSTERS = [5, 6, 8, 258, 768];
   var MEMBERSHIP_EDGE_COLOR = "#8e24aa";
@@ -681,10 +681,124 @@
     return { bindings: out, dropped };
   }
 
+  // src/activity.js
+  var CHATTY_MIN_RATE = 20;
+  var CHATTY_FACTOR = 10;
+  var FLOOD_RATE = 60;
+  var TOP_ROWS = 8;
+  var MIN_MINUTES_FOR_USUAL = 10;
+  function clusterLabel(id) {
+    const n = Number(id);
+    if (n >= 64512) return `Manufacturer-specific (0x${n.toString(16).toUpperCase().padStart(4, "0")})`;
+    return clusterName(n);
+  }
+  function countedMinutes(snapshot, nowMs = Date.now()) {
+    const len = snapshot && snapshot.window_minutes || 60;
+    const since = snapshot && snapshot.since ? Date.parse(snapshot.since) : NaN;
+    if (!Number.isFinite(since)) return len;
+    const minutes = Math.floor(nowMs / 6e4) - Math.floor(since / 6e4) + 1;
+    return Math.max(1, Math.min(len, minutes));
+  }
+  function median(values) {
+    const v = [...values || []].sort((a, b) => a - b);
+    if (!v.length) return 0;
+    const mid = Math.floor(v.length / 2);
+    return v.length % 2 ? v[mid] : (v[mid - 1] + v[mid]) / 2;
+  }
+  var round1 = (n) => Math.round(n * 10) / 10;
+  function activityRows(snapshot, { coordinatorIeee = null, nowMs = Date.now() } = {}) {
+    const counted = countedMinutes(snapshot, nowMs);
+    const coord = normIeee(coordinatorIeee || snapshot && snapshot.coordinator_ieee || "");
+    const rows = [];
+    let fromCoordinator = null;
+    for (const [ieee, d] of Object.entries(snapshot && snapshot.by_device || {})) {
+      const pm = Array.isArray(d.per_minute) ? d.per_minute.map(Number) : [];
+      if (!pm.length) continue;
+      const last5 = pm.slice(-Math.min(5, counted));
+      const now = round1(last5.reduce((a, b) => a + b, 0) / last5.length);
+      const hour = Math.round(pm.reduce((a, b) => a + b, 0));
+      const typical = counted >= MIN_MINUTES_FOR_USUAL ? round1(median(pm.slice(-counted))) : null;
+      const clusters = Object.entries(d.clusters || {}).map(([id, n]) => [id, Number(n)]).sort((a, b) => b[1] - a[1]);
+      const chatty = now >= CHATTY_MIN_RATE && (typical != null && now >= CHATTY_FACTOR * Math.max(typical, 0.5) || now >= FLOOD_RATE);
+      const row = { ieee: normIeee(ieee), nwk: d.nwk, now, hour, typical, clusters, chatty };
+      if (coord && row.ieee === coord) fromCoordinator = row;
+      else rows.push(row);
+    }
+    rows.sort((a, b) => b.now - a.now || b.hour - a.hour);
+    return { rows, chatty: rows.filter((r) => r.chatty), fromCoordinator };
+  }
+  function timesTypical(row) {
+    if (!row || row.typical == null || row.typical <= 0) return "";
+    const x = row.now / row.typical;
+    return x >= 2 ? `\xD7${Math.round(x)}` : "";
+  }
+  function interestingCounters(snapshot) {
+    return (snapshot && snapshot.coordinator_counters || []).filter((c) => c && Number(c.value) > 0).sort((a, b) => b.value - a.value);
+  }
+
   // src/api-client.js
   var ZhaApi = class {
     constructor(hass) {
       this.hass = hass;
+      this.watchEnabled = false;
+    }
+    // --- Replace a device (integration 1.9.0) -----------------------------------
+    async replacePlan(oldIeee, newIeee, { oldClusters, newClusters, endpointMap } = {}) {
+      const clean = (list2) => (list2 || []).map((c) => ({ endpoint_id: Number(c.endpoint_id), id: Number(c.id), type: c.type }));
+      const msg = { type: "zha_bindings_manager/replace_plan", old_ieee: oldIeee, new_ieee: newIeee };
+      if (oldClusters && oldClusters.length) msg.old_clusters = clean(oldClusters);
+      if (newClusters && newClusters.length) msg.new_clusters = clean(newClusters);
+      if (endpointMap && Object.keys(endpointMap).length) msg.endpoint_map = endpointMap;
+      return this.hass.callWS(msg);
+    }
+    async replaceRun(planId, items) {
+      return this.hass.callWS({ type: "zha_bindings_manager/replace_run", plan_id: planId, items });
+    }
+    async replaceCleanup(planId, unbindOld) {
+      return this.hass.callWS({ type: "zha_bindings_manager/replace_cleanup", plan_id: planId, unbind_old: !!unbindOld });
+    }
+    /** Removes a device from ZHA (ZHA's own zha.remove action). */
+    async removeZhaDevice(ieee) {
+      return this.hass.callService("zha", "remove", { ieee });
+    }
+    // --- Lost bindings (integration 1.8.0) -------------------------------------
+    async watchGet() {
+      return this.hass.callWS({ type: "zha_bindings_manager/watch_get" });
+    }
+    /** Puts lost bindings back: one device, or every device when ieee is omitted. */
+    async watchPutBack(ieee) {
+      const msg = { type: "zha_bindings_manager/watch_put_back" };
+      if (ieee) msg.ieee = ieee;
+      return this.hass.callWS(msg);
+    }
+    /** Stops expecting bindings (all of a device's, or just these keys). */
+    async watchForget(ieee, keys) {
+      const msg = { type: "zha_bindings_manager/watch_forget", ieee };
+      if (keys && keys.length) msg.keys = keys;
+      return this.hass.callWS(msg);
+    }
+    async watchPolicy(ieee, policy) {
+      return this.hass.callWS({ type: "zha_bindings_manager/watch_policy", ieee, policy });
+    }
+    /** Switch the lights from Home Assistant when a press doesn't reach them. */
+    async watchFallback(ieee, enabled) {
+      return this.hass.callWS({ type: "zha_bindings_manager/watch_fallback", ieee, enabled: !!enabled });
+    }
+    async watchCheckAll() {
+      return this.hass.callWS({ type: "zha_bindings_manager/watch_check_all" });
+    }
+    /** Tells the watch which bindings were removed on purpose. Patterns:
+     *  {sourceIeee, sourceEndpoint?, clusterIds?, isGroup?, groupId?,
+     *  targetIeee?, targetEndpoint?}; anything left out matches all. Never
+     *  throws: this is bookkeeping, the unbind itself already happened. */
+    async _reportRemoved(pattern) {
+      if (!this.watchEnabled) return;
+      const clean = {};
+      for (const [k, v] of Object.entries(pattern)) if (v != null) clean[k] = v;
+      try {
+        await this.hass.callWS({ type: "zha_bindings_manager/watch_removed", bindings: [clean] });
+      } catch (e) {
+      }
     }
     async fetchDevices() {
       return this.hass.callWS({ type: "zha/devices" });
@@ -705,6 +819,10 @@
     /** Experimental: every stored entry, {devices: {ieee: entry}}. */
     async meshGet() {
       return this.hass.callWS({ type: "zha_bindings_manager/mesh_get" });
+    }
+    /** Experimental (1.7.0): messages per device to Home Assistant. */
+    async activityGet() {
+      return this.hass.callWS({ type: "zha_bindings_manager/activity_get" });
     }
     async fetchClusters(ieee) {
       return this.hass.callWS({ type: "zha/devices/clusters", ieee });
@@ -840,7 +958,15 @@
       if (clusterIds && clusterIds.length) data.cluster = clusterIds;
       if (opts.endpoint != null) data.endpoint = opts.endpoint;
       if (opts.dstEndpoint != null) data.dst_endpoint = opts.dstEndpoint;
-      return this.callToolkit("binds_remove_all", data);
+      const res = await this.callToolkit("binds_remove_all", data);
+      await this._reportRemoved({
+        sourceIeee,
+        sourceEndpoint: opts.endpoint,
+        clusterIds: clusterIds && clusterIds.length ? clusterIds.map(Number) : null,
+        targetIeee,
+        targetEndpoint: opts.dstEndpoint
+      });
+      return res;
     }
     /** Live per-device command-discovery scan via zha_toolkit.scan_device —
      *  separate from the passive binds_get-based network scan this card
@@ -882,6 +1008,11 @@
         members: members.map((m) => ({ ieee: m.ieee, endpoint_id: Number(m.endpoint) }))
       });
     }
+    /** Creates a ZHA group with a given group ID (one that devices already
+     *  use, e.g. made by Find & Bind). */
+    async createGroupWithId(name, groupId) {
+      return this.hass.callWS({ type: "zha/group/add", group_name: name, group_id: Number(groupId) });
+    }
     /** Adds [{ieee, endpoint}] to an existing ZHA group. */
     async addGroupMembers(groupId, members) {
       return this.hass.callWS({
@@ -895,7 +1026,9 @@
      *  group bindings included. Used for a light's reporting binding to a
      *  group, which unbind_group can't remove (see groups.js). */
     async removeBindingsOnCluster(sourceIeee, endpoint, clusterId) {
-      return this.callToolkit("binds_remove_all", { ieee: sourceIeee, endpoint: Number(endpoint), cluster: [Number(clusterId)] });
+      const res = await this.callToolkit("binds_remove_all", { ieee: sourceIeee, endpoint: Number(endpoint), cluster: [Number(clusterId)] });
+      await this._reportRemoved({ sourceIeee, sourceEndpoint: Number(endpoint), clusterIds: [Number(clusterId)] });
+      return res;
     }
     /** Removes [{ieee, endpoint}] from a ZHA group (ZHA's own websocket). */
     async removeGroupMembers(groupId, members) {
@@ -913,2042 +1046,17 @@
       const data = { ieee: sourceIeee, command_data: groupId };
       if (clusterIds && clusterIds.length === 1) data.cluster = clusterIds[0];
       if (opts.endpoint != null) data.endpoint = opts.endpoint;
-      return this.callToolkit("unbind_group", data);
-    }
-  };
-
-  // src/template.js
-  var SHELL_HTML = `
-<div class="card">
-  <div class="toolbar">
-    <div class="tabs">
-      <button class="tab active" data-view="graph">Map</button>
-      <button class="tab" data-view="floorplan">Floor Plan</button>
-      <button class="tab" data-view="table">Bindings</button>
-      <button class="tab" data-view="devices">Devices</button>
-      <button class="tab" data-view="groups">Groups</button>
-      <button class="tab" data-view="capexplorer">Zigbee Capability Explorer</button>
-      <button class="tab" data-view="advanced">Advanced</button>
-      <button class="tab" data-view="mesh" id="tab-mesh" style="display:none" title="Beta: link quality and routes in your Zigbee mesh. Still being tested; it may change.">Network<sup class="tab-beta">beta</sup></button>
-    </div>
-    <input id="search" class="search" placeholder="Search devices\u2026">
-    <span id="storage-mode-badge" class="storage-mode-badge muted"></span>
-    <button class="btn" id="btn-refresh-devices" title="Reload device list">\u27F3 Devices</button>
-    <button class="btn btn-primary" id="btn-scan" title="Read current bindings from your Zigbee devices">Scan bindings</button>
-    <button class="btn btn-small" id="btn-rescan-settings" title="Scan settings">\u2699</button>
-    <a id="card-version" class="card-version muted" href="${CHANGELOG_URL}" target="_blank" rel="noopener"
-      title="ZHA Bindings Manager v${CARD_VERSION}. Click to open the changelog.">v${CARD_VERSION}</a>
-  </div>
-  <div id="rescan-settings-panel" class="filter-panel">
-    <div class="filter-group">
-      <label class="row" for="scan-batch-size">Devices scanned at once (full network scan)
-        <input type="number" id="scan-batch-size" min="1" max="30" style="width:4em; margin-left:6px;">
-      </label>
-      <p class="hint">Only applies to the full "Scan bindings" network scan \u2014 devices are read in concurrent
-        batches of this size rather than one at a time, confirmed via live testing to genuinely overlap rather
-        than just queue behind each other. A larger batch makes it less likely that several sleepy/offline
-        devices happen to land in different batches and each drag their own batch out by ~45 seconds \u2014 but
-        bigger isn't free: testing found that batches much above ~10-12 can cause otherwise-healthy devices to
-        occasionally fail to respond (Zigbee airtime/collision contention from that much traffic at once, not
-        a real device problem \u2014 retrying individually or rescanning usually succeeds). Increase cautiously and
-        only if you've confirmed it holds up reliably on your own network. Default is ${DEFAULT_SCAN_BATCH_SIZE}.</p>
-    </div>
-    <div class="filter-group">
-      <label class="row" for="rescan-retry-count">Retries for single-device rescan
-        <input type="number" id="rescan-retry-count" min="1" max="10" style="width:4em; margin-left:6px;">
-      </label>
-      <p class="hint">Only applies when you rescan one device (e.g. the Devices tab or "Scan this device") \u2014
-        the full "Scan bindings" network scan is unaffected. Each extra retry costs about 45 seconds if the
-        device genuinely doesn't respond, so more isn't free \u2014 it's a real trade-off between a better chance
-        of catching a briefly-unreachable device and a longer wait. Default is ${DEFAULT_RETRY_COUNT}.</p>
-    </div>
-    <div class="filter-group">
-      <div class="filter-group-title">Storage</div>
-      <div id="storage-mode-detail" class="hint"></div>
-      <button type="button" class="btn btn-small" id="btn-use-shared-storage" style="display:none">Use shared storage</button>
-      <button type="button" class="btn btn-small" id="btn-use-local-storage" style="display:none">Use this browser only</button>
-      <div id="storage-backend-hint" class="hint" style="display:none">
-        Your data is only saved in this browser. The optional ZHA Bindings Manager integration can save it
-        centrally in Home Assistant instead, so it's available from every browser and device.
-        <a href="https://github.com/hsolgaard/zha-bindings-manager-integration" target="_blank" rel="noopener">Learn more \u2192</a>
-        <button type="button" class="btn btn-small" id="btn-dismiss-storage-hint">Dismiss</button>
-      </div>
-    </div>
-    <div class="filter-group">
-      <div class="filter-group-title">About</div>
-      <div class="hint">ZHA Bindings Manager v${CARD_VERSION} \xB7
-        <a href="${CHANGELOG_URL}" target="_blank" rel="noopener">Changelog</a></div>
-      <div id="backend-version-line" class="hint"></div>
-    </div>
-  </div>
-  <div id="status" class="status" style="display:none"></div>
-
-  <div id="view-graph" class="view active">
-    <div class="graph-toolbar">
-      <label class="row"><input type="checkbox" id="f-coordinator"> Coordinator</label>
-      <label class="row"><input type="checkbox" id="f-routers"> Routers</label>
-      <label class="row"><input type="checkbox" id="f-endDevices"> End devices</label>
-      <label class="row"><input type="checkbox" id="f-groups"> Groups</label>
-      <label class="row"><input type="checkbox" id="f-unbound"> Unbound devices</label>
-      <label class="row" title="Also filters the Bindings tab, not just this Map view"><input type="checkbox" id="f-hideCoordinatorBindings" checked> Hide coordinator bindings (Map &amp; Bindings tab)</label>
-      <label class="row" title="Some real bindings are a device reporting its own state (e.g. a light reporting to a group it belongs to) rather than controlling anything. These are hidden here by default so the map reads as &quot;who controls what&quot; \u2014 they're still real and still shown in full on the Bindings tab."><input type="checkbox" id="f-showReportingBindings"> Show reporting-only bindings (Map only)</label>
-      <span class="spacer"></span>
-      <span id="scan-info" class="scan-info muted"></span>
-      <button class="btn btn-small" id="btn-filters">Filters \u25BE</button>
-      <button class="btn btn-small" id="btn-zoom-out">\uFF0D</button>
-      <button class="btn btn-small" id="btn-zoom-fit">Fit</button>
-      <button class="btn btn-small" id="btn-zoom-in">\uFF0B</button>
-      <button class="btn btn-small" id="btn-fullscreen" title="Toggle fullscreen">\u26F6</button>
-    </div>
-    <div id="filter-panel" class="filter-panel">
-      <div class="filter-group">
-        <div class="filter-group-title">Type</div>
-        <div id="chips-types" class="chips"></div>
-      </div>
-      <div class="filter-group">
-        <div class="filter-group-title">Manufacturer</div>
-        <div id="chips-manufacturers" class="chips"></div>
-      </div>
-      <div class="filter-group">
-        <div class="filter-group-title">Area</div>
-        <div id="chips-areas" class="chips"></div>
-      </div>
-      <button class="btn btn-small" id="btn-clear-filters">Clear type / manufacturer / area filters</button>
-    </div>
-    <div id="map-route-banner" class="map-route-banner" style="display:none"></div>
-    <div class="graph-wrap">
-      <svg id="graph-svg" viewBox="0 0 1200 840" preserveAspectRatio="xMidYMid meet"></svg>
-      <div id="graph-empty" class="graph-empty"></div>
-    </div>
-    <p class="hint">Drag a device onto another device (or onto a group) to create a binding. Click a line to inspect / remove it<span id="map-route-hint" style="display:none">, or to show the route its commands take through your routers (Network, beta)</span>.</p>
-    <p id="graph-role-legend" class="hint" style="display:none">\u{1F579} badge = this device also has its own Light/Switch/Cover/Fan role, in addition to what's shown by the edges here (e.g. a wired/local load alongside a Zigbee-bound one) \u2014 click the device, then Show endpoints\u2026, to see the per-endpoint breakdown.</p>
-  </div>
-
-  <div id="view-table" class="view">
-    <div id="health-summary" class="health-summary" style="display:none"></div>
-    <div id="stale-banner" class="stale-banner" style="display:none"></div>
-    <div id="pending-banner" class="stale-banner pending-banner" style="display:none"></div>
-    <div id="table-filter-info" class="table-filter-info" style="display:none"></div>
-    <div class="table-toolbar">
-      <span class="health-filters" id="health-filters">
-        <button class="chip active" data-health-filter="all">All</button>
-        <button class="chip" data-health-filter="problems">Problems Only</button>
-        <button class="chip" data-health-filter="error">Errors</button>
-        <button class="chip" data-health-filter="warning">Warnings</button>
-        <button class="chip" data-health-filter="info">Info</button>
-      </span>
-      <span class="spacer"></span>
-      <button class="btn btn-small" id="btn-export-csv">Export CSV</button>
-      <button class="btn btn-small" id="btn-export-json">Export JSON</button>
-      <button class="btn btn-small" id="btn-export-print">Print / Save as PDF</button>
-    </div>
-    <div class="table-scroll">
-    <table class="bindings-table">
-      <thead><tr>
-        <th id="th-direction" data-sort="directionRank" style="display:none">Direction</th>
-        <th data-sort="sourceLabel">Source</th>
-        <th data-sort="typeLabel">Type</th>
-        <th data-sort="areaLabel">Area</th>
-        <th data-sort="manModel">Manufacturer / Model</th>
-        <th data-sort="clusterLabel">Cluster</th>
-        <th data-sort="targetLabel">Target</th>
-        <th data-sort="healthRank">Health</th>
-        <th></th>
-      </tr></thead>
-      <tbody id="table-body"></tbody>
-    </table>
-    </div>
-  </div>
-
-  <div id="view-groups" class="view"></div>
-  <div id="view-devices" class="view">
-    <div class="table-scroll">
-    <table class="bindings-table">
-      <thead><tr>
-        <th data-sort="name">Name</th>
-        <th data-sort="type">Type</th>
-        <th data-sort="manufacturer">Manufacturer</th>
-        <th data-sort="model">Model</th>
-        <th data-sort="area">Area</th>
-        <th data-sort="power">Power</th>
-        <th data-sort="count">Bindings</th>
-        <th data-sort="scanRank">Last scan</th>
-      </tr></thead>
-      <tbody id="devices-table-body"></tbody>
-    </table>
-    </div>
-  </div>
-
-  <div id="view-floorplan" class="view">
-    <div class="graph-toolbar">
-      <label class="row" id="fp-floor-wrap" style="display:none">Floor <select id="fp-floor"></select></label>
-      <label class="row fp-image-row">Image URL
-        <input type="text" id="fp-image-url" placeholder="/local/floorplan.png">
-      </label>
-      <button class="btn btn-small" id="fp-set-image">Set image</button>
-      <span class="spacer"></span>
-      <button class="btn btn-small" id="btn-fp-zoom-out">\uFF0D</button>
-      <button class="btn btn-small" id="btn-fp-zoom-fit">Fit</button>
-      <button class="btn btn-small" id="btn-fp-zoom-in">\uFF0B</button>
-      <label class="row fp-marker-row" for="fp-marker-scale" title="Scales device markers independently of image resolution \u2014 useful when a lower-resolution floor plan leaves markers looking oversized.">Marker size
-        <input type="number" id="fp-marker-scale" min="40" max="200" step="10" style="width:4.5em; margin-left:6px;">%
-      </label>
-    </div>
-    <div id="fp-floor-help" class="fp-floor-help hint"></div>
-    <div class="floorplan-layout">
-      <div class="fp-sidebar">
-        <div class="filter-group-title">Unplaced devices</div>
-        <div id="fp-unplaced-list" class="fp-unplaced-list"></div>
-      </div>
-      <div class="graph-wrap">
-        <svg id="fp-svg" viewBox="0 0 1200 840" preserveAspectRatio="xMidYMid meet"></svg>
-        <div id="fp-empty" class="graph-empty"></div>
-      </div>
-    </div>
-    <p class="hint">Drop an image into your <code>www/</code> folder (e.g. <code>config/www/floorplan.png</code>) and reference it above as <code>/local/floorplan.png</code>. Drag a device from the list onto its spot on the plan to place it; drag a placed device to move it; click a placed device (without dragging) to send it back to the list.</p>
-    <p id="fp-role-legend" class="hint" style="display:none">\u{1F579} badge = this device also has its own Light/Switch/Cover/Fan role, in addition to what's shown by the edges here (e.g. a wired/local load alongside a Zigbee-bound one) \u2014 click the device, then Show endpoints\u2026, to see the per-endpoint breakdown.</p>
-  </div>
-
-  <div id="view-capexplorer" class="view"></div>
-
-  <div id="view-advanced" class="view"></div>
-
-  <div id="view-mesh" class="view"></div>
-
-  <div id="drawer" class="drawer" aria-hidden="true">
-    <div class="drawer-header">
-      <span id="drawer-title"></span>
-      <button id="drawer-close" class="btn btn-small" title="Close">\u2715</button>
-    </div>
-    <div id="drawer-body" class="drawer-body"></div>
-  </div>
-
-  <div id="dialog" class="dialog">
-    <div id="dialog-backdrop" class="dialog-backdrop"></div>
-    <div class="dialog-panel">
-      <div class="dialog-header">
-        <span id="dialog-title"></span>
-        <button id="dialog-close" class="btn btn-small">\u2715</button>
-      </div>
-      <div id="dialog-body" class="dialog-body"></div>
-    </div>
-  </div>
-</div>`;
-
-  // src/storage/storage-provider.js
-  var StorageProvider = class {
-    /**
-     * Generic per-card-instance key/value storage for simple preferences —
-     * filters, node positions, endpoint annotations, floor plan state,
-     * settings (retry count, scan batch size, etc). `key` is an opaque
-     * string the caller chooses; the provider doesn't need to know what it
-     * means, only how to namespace it per card instance.
-     *
-     * @param {string} cardId - this._config.id (or "default")
-     * @param {string} key
-     * @returns {Promise<any>} the stored value, or null if absent/unreadable
-     */
-    async getItem(cardId, key) {
-      throw new Error("StorageProvider.getItem not implemented");
-    }
-    /** @returns {Promise<boolean>} true on success, false on a soft failure
-     *  (quota exceeded, storage disabled) — never throws, matching the
-     *  fail-soft behavior the scattered localStorage try/catch blocks had
-     *  before this boundary existed. */
-    async setItem(cardId, key, value) {
-      throw new Error("StorageProvider.setItem not implemented");
-    }
-    /**
-     * The one piece of state with real persistence semantics beyond plain
-     * key/value — scan results. See the delivery plan's "latest /
-     * last_complete observation split":
-     *
-     *   last_complete — the best known-good data per device, built up over
-     *     time. Never regresses: a device that fails one scan attempt keeps
-     *     whatever binding data its last successful scan produced.
-     *   latest — the outcome of the most recent scan attempt as a whole,
-     *     including which devices failed to respond or only partially
-     *     responded. Fixes the bug where that information lived in memory
-     *     only and silently vanished on a page reload, making a device that
-     *     just failed to respond look identical to one that's fine.
-     *
-     * @returns {Promise<{
-     *   last_complete: {savedAt: string, bindings: object} | null,
-     *   latest: {attemptedAt: string, failures: string[], partial: object} | null
-     * }>}
-     */
-    async getScanState(cardId) {
-      throw new Error("StorageProvider.getScanState not implemented");
-    }
-    async setScanState(cardId, state) {
-      throw new Error("StorageProvider.setScanState not implemented");
-    }
-    /** Learned per-device response-time/outcome history (see
-     *  _recordScanOutcome/_historyFor in card.js) — kept separate from scan
-     *  state since it's additive/rolling rather than latest-vs-complete.
-     *  @returns {Promise<object>} ieee(lower) -> {successMs, outcomes, ...} */
-    async getHistory(cardId) {
-      throw new Error("StorageProvider.getHistory not implemented");
-    }
-    async setHistory(cardId, history) {
-      throw new Error("StorageProvider.setHistory not implemented");
-    }
-  };
-
-  // src/storage/local-storage-provider.js
-  var LocalStorageProvider = class extends StorageProvider {
-    _keyFor(cardId, key) {
-      return `zha-binding-map-card:${cardId || "default"}:${key}`;
-    }
-    async getItem(cardId, key) {
-      try {
-        const raw = localStorage.getItem(this._keyFor(cardId, key));
-        return raw == null ? null : JSON.parse(raw);
-      } catch (e) {
-        return null;
-      }
-    }
-    async setItem(cardId, key, value) {
-      try {
-        localStorage.setItem(this._keyFor(cardId, key), JSON.stringify(value));
-        return true;
-      } catch (e) {
-        return false;
-      }
-    }
-    async getScanState(cardId) {
-      const raw = await this.getItem(cardId, "scan-state");
-      if (raw && (raw.last_complete || raw.latest)) return raw;
-      const legacy = await this.getItem(cardId, "bindings");
-      if (legacy && legacy.bindings) {
-        return { last_complete: legacy, latest: null };
-      }
-      return { last_complete: null, latest: null };
-    }
-    async setScanState(cardId, state) {
-      return this.setItem(cardId, "scan-state", state);
-    }
-    async getHistory(cardId) {
-      const raw = await this.getItem(cardId, "history");
-      return raw && typeof raw === "object" ? raw : {};
-    }
-    async setHistory(cardId, history) {
-      return this.setItem(cardId, "history", history);
-    }
-  };
-
-  // src/storage/ha-storage-provider.js
-  var WS_GET_STATE = "zha_bindings_manager/get_state";
-  var WS_SAVE_STATE = "zha_bindings_manager/save_state";
-  var WS_GET_CAPABILITIES = "zha_bindings_manager/get_capabilities";
-  var SAVE_DEBOUNCE_MS = 1500;
-  var HaStorageProvider = class _HaStorageProvider extends StorageProvider {
-    constructor(hass, cardId) {
-      super();
-      this._hass = hass;
-      this._cardId = cardId || "default";
-      this._state = null;
-      this._updatedAt = null;
-      this._loadPromise = null;
-      this._saveTimer = null;
-      this._savePromise = null;
-      this._resolveSave = null;
-    }
-    /** Feature detection — a static-ish helper rather than an instance
-     *  method, since card.js needs an answer *before* deciding whether to
-     *  construct a HaStorageProvider at all. Returns false (not a thrown
-     *  error) for "not installed", same as for any other failure — the
-     *  caller only needs yes/no, not why. */
-    static async isAvailable(hass) {
-      return (await _HaStorageProvider.probe(hass)).available;
-    }
-    /** What the ZHA Bindings Manager integration reports about itself.
-     *  - installed: the integration answered at all.
-     *  - available: shared storage can be used (installed, and not switched
-     *    off in the integration's options; integrations older than 1.0.0
-     *    don't report features, so storage counts as on).
-     *  - version: the integration's version (reported since 0.1.0).
-     *  - bundledCardVersion: the card version the integration ships (1.0.0+).
-     *  Unknown values are null. */
-    static async probe(hass) {
-      const none = { installed: false, available: false, version: null, bundledCardVersion: null, experimental: false, lqi: null };
-      try {
-        const res = await hass.connection.sendMessagePromise({ type: WS_GET_CAPABILITIES });
-        if (!res || !res.available) return none;
-        const str = (v) => typeof v === "string" && v ? v : null;
-        const storageOff = !!(res.features && res.features.shared_storage === false);
-        return {
-          installed: true,
-          available: !storageOff,
-          version: str(res.version),
-          bundledCardVersion: str(res.bundled_card_version),
-          // 1.5.0 (local build): experimental features + link-quality thresholds.
-          experimental: !!(res.features && res.features.experimental_features === true),
-          lqi: res.lqi_thresholds && Number.isInteger(res.lqi_thresholds.good) && Number.isInteger(res.lqi_thresholds.weak) ? { good: res.lqi_thresholds.good, weak: res.lqi_thresholds.weak } : null
-        };
-      } catch (e) {
-        return none;
-      }
-    }
-    async _ensureLoaded() {
-      if (this._state) return this._state;
-      if (!this._loadPromise) {
-        this._loadPromise = this._hass.connection.sendMessagePromise({ type: WS_GET_STATE, card_id: this._cardId }).then((res) => {
-          this._updatedAt = res ? res.updated_at : null;
-          this._state = res && res.state || { items: {}, scanState: null, history: {} };
-          return this._state;
-        }).catch((e) => {
-          console.warn("ZHA Binding Map: could not load shared state, starting empty:", e.message || e);
-          this._state = { items: {}, scanState: null, history: {} };
-          return this._state;
-        });
-      }
-      return this._loadPromise;
-    }
-    _scheduleSave() {
-      if (this._saveTimer) clearTimeout(this._saveTimer);
-      if (!this._savePromise) {
-        this._savePromise = new Promise((resolve) => {
-          this._resolveSave = resolve;
-        });
-      }
-      this._saveTimer = setTimeout(() => this._flushSave(), SAVE_DEBOUNCE_MS);
-      return this._savePromise;
-    }
-    async _flushSave() {
-      this._saveTimer = null;
-      try {
-        const res = await this._hass.connection.sendMessagePromise({
-          type: WS_SAVE_STATE,
-          card_id: this._cardId,
-          state: this._state,
-          base_updated_at: this._updatedAt
-        });
-        this._updatedAt = res.updated_at;
-      } catch (e) {
-        if (e && e.code === "stale_write") {
-          try {
-            const fresh = await this._hass.connection.sendMessagePromise({
-              type: WS_GET_STATE,
-              card_id: this._cardId
-            });
-            this._updatedAt = fresh ? fresh.updated_at : null;
-            const res2 = await this._hass.connection.sendMessagePromise({
-              type: WS_SAVE_STATE,
-              card_id: this._cardId,
-              state: this._state,
-              base_updated_at: this._updatedAt
-            });
-            this._updatedAt = res2.updated_at;
-          } catch (e2) {
-            console.warn("ZHA Binding Map: shared save failed after a conflict retry:", e2.message || e2);
-          }
-        } else {
-          console.warn("ZHA Binding Map: shared save failed:", e.message || e);
-        }
-      } finally {
-        if (this._resolveSave) this._resolveSave();
-        this._savePromise = null;
-        this._resolveSave = null;
-      }
-    }
-    /** Flushes a pending debounced save immediately instead of waiting it
-     *  out — not called anywhere yet in this milestone, kept available for
-     *  call sites that later want to confirm a save actually landed (e.g.
-     *  right before showing a "saved" confirmation) rather than trusting
-     *  the debounce timer alone. */
-    async flush() {
-      if (this._saveTimer) {
-        clearTimeout(this._saveTimer);
-        await this._flushSave();
-      } else if (this._savePromise) {
-        await this._savePromise;
-      }
-    }
-    async getItem(cardId, key) {
-      const state = await this._ensureLoaded();
-      return state.items && key in state.items ? state.items[key] : null;
-    }
-    async setItem(cardId, key, value) {
-      const state = await this._ensureLoaded();
-      if (!state.items) state.items = {};
-      state.items[key] = value;
-      this._scheduleSave();
-      return true;
-    }
-    async getScanState(cardId) {
-      const state = await this._ensureLoaded();
-      return state.scanState || { last_complete: null, latest: null };
-    }
-    async setScanState(cardId, scanState) {
-      const state = await this._ensureLoaded();
-      state.scanState = scanState;
-      this._scheduleSave();
-      return true;
-    }
-    async getHistory(cardId) {
-      const state = await this._ensureLoaded();
-      return state.history || {};
-    }
-    async setHistory(cardId, history) {
-      const state = await this._ensureLoaded();
-      state.history = history;
-      this._scheduleSave();
-      return true;
-    }
-  };
-
-  // src/stale-bindings.js
-  function knownIeees(devices) {
-    return new Set((devices || []).map((d) => normIeee(d.ieee)));
-  }
-  function removedSources(bindingsMap, devices) {
-    const known = knownIeees(devices);
-    const out = [];
-    for (const [ieee, list2] of bindingsMap || []) {
-      if (!known.has(normIeee(ieee))) out.push({ ieee, count: (list2 || []).length });
-    }
-    return out;
-  }
-  function deadTargetBindings(bindingsMap, devices) {
-    const known = knownIeees(devices);
-    const out = [];
-    for (const [ieee, list2] of bindingsMap || []) {
-      if (!known.has(normIeee(ieee))) continue;
-      for (const b of list2 || []) {
-        if (!b.isGroup && b.targetIeee && !known.has(normIeee(b.targetIeee))) out.push(b);
-      }
-    }
-    return out;
-  }
-  function pruneRemovedSources(bindingsMap, devices) {
-    if (!devices || !devices.length || !bindingsMap) return [];
-    const removed = removedSources(bindingsMap, devices).map((r) => r.ieee);
-    removed.forEach((ieee) => bindingsMap.delete(ieee));
-    return removed;
-  }
-  function forgetSource(bindingsMap, ieee) {
-    let dropped = 0;
-    for (const key of [...bindingsMap.keys()]) {
-      if (normIeee(key) === normIeee(ieee)) {
-        dropped += (bindingsMap.get(key) || []).length;
-        bindingsMap.delete(key);
-      }
-    }
-    return dropped;
-  }
-  function vanishedDevices(prev, next) {
-    if (!next || !next.length) return [];
-    const now = knownIeees(next);
-    return (prev || []).map((d) => normIeee(d.ieee)).filter((ieee) => !now.has(ieee));
-  }
-  function rememberDevices(known, devices, label) {
-    let changed = false;
-    for (const d of devices || []) {
-      const ieee = normIeee(d.ieee);
-      if (!ieee) continue;
-      const info = {
-        name: label(d) || "",
-        manufacturer: d.manufacturer || "",
-        model: d.model || "",
-        area_id: d.area_id || null
-      };
-      const old = known.get(ieee);
-      if (!old || old.name !== info.name || old.manufacturer !== info.manufacturer || old.model !== info.model || old.area_id !== info.area_id) {
-        known.set(ieee, info);
-        changed = true;
-      }
-    }
-    return changed;
-  }
-  function knownDevicesToSave(known, devices, bindingsMap) {
-    const keep = knownIeees(devices);
-    for (const [ieee, list2] of bindingsMap || []) {
-      keep.add(normIeee(ieee));
-      for (const b of list2 || []) if (b.targetIeee) keep.add(normIeee(b.targetIeee));
-    }
-    const out = {};
-    [...(known || /* @__PURE__ */ new Map()).keys()].filter((ieee) => keep.has(ieee)).sort().forEach((ieee) => out[ieee] = known.get(ieee));
-    return out;
-  }
-
-  // src/about.js
-  function aboutIntegrationText({ checked, installed, storageOn, version, bundledCardVersion, cardVersion }) {
-    if (!checked) return "";
-    if (!installed) {
-      return "Card-only install. The ZHA Bindings Manager integration adds shared storage, a sidebar page and notices when a bound device is removed.";
-    }
-    const parts = [`ZHA Bindings Manager integration ${version ? "v" + version : "(version not reported)"} is installed.`];
-    if (bundledCardVersion && bundledCardVersion !== cardVersion) {
-      parts.push(
-        `This page is running card v${cardVersion}, but the integration includes card v${bundledCardVersion}: another copy of the card loaded first. See Settings \u2192 Repairs.`
-      );
-    }
-    if (!storageOn) parts.push("Shared storage is switched off in the integration's options.");
-    return parts.join(" ");
-  }
-
-  // src/scan-summary.js
-  function isBatteryPowered(device) {
-    return !!(device && device.power_source && /battery/i.test(device.power_source));
-  }
-  function toolkitAvailable(hass, service = "binds_get") {
-    return !!(hass && hass.services && hass.services.zha_toolkit && hass.services.zha_toolkit[service]);
-  }
-  function shortError(err) {
-    const text = String(err && (err.message || err) || "").replace(/\s+/g, " ").trim();
-    return text.length > 180 ? `${text.slice(0, 177)}\u2026` : text;
-  }
-  function nameList(names, max = 3) {
-    if (names.length <= max) return names.join(", ");
-    return `${names.slice(0, max).join(", ")} and ${names.length - max} more`;
-  }
-  function summarizeScan({ okCount, partialCount, failures, skippedNames = [], prunedCount = 0 }) {
-    const failed = failures || [];
-    const battery = failed.filter((f) => isBatteryPowered(f.device));
-    const mains = failed.filter((f) => !isBatteryPowered(f.device));
-    const extras = [];
-    if (skippedNames.length) extras.push(`skipped ${skippedNames.join(", ")} (no longer in ZHA)`);
-    if (prunedCount) extras.push(`cleared saved data for ${prunedCount} device(s) no longer in ZHA`);
-    const tail = extras.length ? ` Also ${extras.join("; ")}.` : "";
-    if (okCount === 0 && partialCount === 0 && failed.length >= 2 && mains.length > 0) {
-      const firstError = shortError((mains[0] || failed[0]).error);
-      return {
-        level: "error",
-        message: `Scan failed: no device responded (${failed.length} of ${failed.length}), including mains-powered devices that never sleep, so this isn't sleepy devices. It usually means zha-toolkit isn't working. ` + (firstError ? `First error: "${firstError}". ` : "") + `Check Settings \u2192 System \u2192 Logs for zha_toolkit errors.` + tail
-      };
-    }
-    const parts = [`${okCount} device(s) read`];
-    if (partialCount) parts.push(`${partialCount} partial (a later page timed out \u2014 rescan for the rest)`);
-    if (mains.length) {
-      parts.push(
-        `${mains.length} mains-powered device(s) did not respond (check they're online in ZHA): ${nameList(
-          mains.map((f) => f.name)
-        )}`
-      );
-    }
-    if (battery.length) {
-      parts.push(
-        `${battery.length} battery device(s) did not respond (normal, they sleep: wake one and use its Rescan)`
-      );
-    }
-    const level = mains.length ? "error" : battery.length || partialCount ? "info" : "success";
-    return { level, message: `Scan complete: ${parts.join(", ")}.${tail}` };
-  }
-
-  // src/health-rules.js
-  var BASIC_CLUSTER = 0;
-  function isManufacturerSpecific(clusterId) {
-    const id = Number(clusterId);
-    return id >= 64512 && id <= 65535;
-  }
-  function manufacturerSpecificRule(clusterId) {
-    const hex2 = `0x${Number(clusterId).toString(16).padStart(4, "0")}`;
-    return {
-      level: "info",
-      code: "manufacturer_specific",
-      message: `Manufacturer-specific cluster (${hex2}), not checked.`,
-      why: "Clusters from 0xFC00 up aren't part of the Zigbee standard: each manufacturer uses them for its own features, and devices usually set these bindings up themselves. The card can't tell what they do, so it doesn't check them.",
-      recommendation: "Leave it in place unless you know the device doesn't need it."
-    };
-  }
-  function unusualDeviceBindingRule({ clusterId, classification }) {
-    if (Number(clusterId) === BASIC_CLUSTER) {
-      return {
-        level: "warning",
-        code: "unusual_basic",
-        message: "Unusual binding: Basic cluster bound to another device.",
-        why: "The Basic cluster only holds device information such as the manufacturer and model. Binding it to another device doesn't let either one control the other. Bindings like this are usually left by a manufacturer's pairing routine or created by mistake, often in the wrong direction (for example from a light to its remote).",
-        recommendation: "Unless a device's manual says it needs this, it's safe to remove. To control a light from a switch, bind On/Off (and Level Control for dimming) from the switch to the light."
-      };
-    }
-    if (classification === "reporting") {
-      return {
-        level: "info",
-        code: "reporting_to_device",
-        message: "Reporting binding to another device, not a control binding.",
-        why: "The source sends its own status for this cluster to the target, rather than sending it commands. That is sometimes intended (for example a temperature sensor reporting to a thermostat), but it doesn't let the source control the target.",
-        recommendation: "If you meant the source to control the target, check the direction: the binding should start on the device that sends the commands, such as a switch or remote."
-      };
-    }
-    return null;
-  }
-
-  // src/deep-link.js
-  function deepLinkIeee(search) {
-    let raw;
-    try {
-      raw = new URLSearchParams(search || "").get("device");
-    } catch (e) {
-      return null;
-    }
-    if (!raw) return null;
-    const hex2 = raw.toLowerCase().replace(/[^0-9a-f]/g, "");
-    if (hex2.length !== 16) return null;
-    return hex2.match(/../g).join(":");
-  }
-  function withoutDeviceParam(search) {
-    const params = new URLSearchParams(search || "");
-    params.delete("device");
-    const s = params.toString();
-    return s ? `?${s}` : "";
-  }
-
-  // src/group-support.js
-  function groupClusterSupport({ members, clusterId, clustersFor }) {
-    const out = { total: 0, supported: [], unsupported: [], unknown: [] };
-    for (const m of members || []) {
-      if (m.isCoordinator) continue;
-      out.total++;
-      const clusters = clustersFor(m.ieee);
-      if (!clusters) {
-        out.unknown.push(m.name);
-        continue;
-      }
-      const has = clusters.some(
-        (c) => c.type === "in" && Number(c.endpoint_id) === Number(m.endpoint) && Number(c.id) === Number(clusterId)
-      );
-      (has ? out.supported : out.unsupported).push(m.name);
-    }
-    return out;
-  }
-  var plural = (n, one, many) => `${n} ${n === 1 ? one : many}`;
-  var list = (names) => names.join(", ");
-  function groupSupportSummary(res, clusterLabel, groupName) {
-    if (!res.total) {
-      return {
-        level: "empty",
-        text: `${groupName} has no members yet, so nothing will act on ${clusterLabel} commands sent to it.`
-      };
-    }
-    const known = res.supported.length + res.unsupported.length;
-    const unknownNote = res.unknown.length ? ` Not checked yet: ${list(res.unknown)}.` : "";
-    if (!known) {
-      return { level: "unknown", text: `Checking which devices in ${groupName} support ${clusterLabel}\u2026` };
-    }
-    if (!res.unsupported.length) {
-      return {
-        level: "ok",
-        text: `${res.supported.length === res.total ? res.total === 1 ? "The device" : `All ${res.total} devices` : plural(res.supported.length, "device", "devices")} in ${groupName} support${res.supported.length === 1 ? "s" : ""} ${clusterLabel}.${unknownNote}`
-      };
-    }
-    if (!res.supported.length) {
-      return {
-        level: "warning",
-        text: `No device in ${groupName} supports ${clusterLabel} (${list(res.unsupported)}). The binding can still be made, but nothing in the group will act on these commands.${unknownNote}`
-      };
-    }
-    return {
-      level: "info",
-      text: `${res.supported.length} of ${res.total} devices in ${groupName} support ${clusterLabel} (${list(
-        res.supported
-      )}). Not supported: ${list(res.unsupported)}, which will ignore these commands.${unknownNote}`
-    };
-  }
-  function groupSupportHealth(res, clusterLabel, groupName) {
-    if (!res.total) {
-      return {
-        level: "warning",
-        code: "group_empty",
-        message: `${groupName} has no members.`,
-        why: "Commands sent to an empty group reach nothing. This often happens when the lights in a group were removed or re-paired.",
-        recommendation: "Add devices to the group in ZHA, or remove this binding."
-      };
-    }
-    if (!res.unsupported.length) return null;
-    if (!res.supported.length) {
-      return {
-        level: "warning",
-        code: "group_cluster_unsupported",
-        message: `No device in ${groupName} supports ${clusterLabel}.`,
-        why: `The source sends ${clusterLabel} commands to the group, but none of its members (${list(
-          res.unsupported
-        )}) can act on them. The binding is valid but does nothing, and it uses one of the source's binding-table slots.`,
-        recommendation: `Remove this binding, or add a device that supports ${clusterLabel} to the group.`
-      };
-    }
-    return {
-      level: "info",
-      code: "group_cluster_partial",
-      message: `${res.supported.length} of ${res.total} devices in ${groupName} support ${clusterLabel}.`,
-      why: `Not supported: ${list(res.unsupported)}. Those devices ignore these commands, while the others act on them.`,
-      recommendation: null
-    };
-  }
-
-  // src/group-flow.js
-  var FLOW_CLUSTERS = [6, 8, 768, 258];
-  function testInstruction(clusterIds) {
-    const ids = new Set([...clusterIds || []].map(Number));
-    const parts = [];
-    if (ids.has(6)) parts.push("press on/off");
-    if (ids.has(8)) parts.push(ids.has(6) ? "then hold to dim" : "hold to dim");
-    if (ids.has(258)) parts.push(parts.length ? "and press open/close" : "press open, then close");
-    if (!parts.length) parts.push("press its buttons");
-    const text = parts.join(", ").replace(/, and /, " and ");
-    return text.charAt(0).toUpperCase() + text.slice(1);
-  }
-  var DIRECT_BINDING_MAX_LIGHTS = 4;
-  var RESULTS = ["works", "partial", "stored_ignored", "rejected"];
-  var GROUPS_CLUSTER = 4;
-  function endpointHasGroups(clusters, endpoint) {
-    return (clusters || []).some(
-      (c) => c.type === "in" && Number(c.id) === GROUPS_CLUSTER && Number(c.endpoint_id) === Number(endpoint)
-    );
-  }
-  function controllerEndpoints(clusters) {
-    const byEp = /* @__PURE__ */ new Map();
-    for (const c of clusters || []) {
-      if (c.type !== "out" || !FLOW_CLUSTERS.includes(Number(c.id))) continue;
-      const ep = Number(c.endpoint_id);
-      if (!byEp.has(ep)) byEp.set(ep, /* @__PURE__ */ new Set());
-      byEp.get(ep).add(Number(c.id));
-    }
-    return [...byEp.entries()].sort((a, b) => a[0] - b[0]).map(([endpoint, set]) => ({ endpoint, clusters: [...set].sort((a, b) => a - b) }));
-  }
-  function candidateTargets({ devices, clustersFor, sourceIeee, clusterIds }) {
-    const out = [];
-    for (const d of devices || []) {
-      if (d.isCoordinator || String(d.ieee).toLowerCase() === String(sourceIeee).toLowerCase()) continue;
-      const clusters = clustersFor(d.ieee);
-      if (!clusters) continue;
-      const byEp = /* @__PURE__ */ new Map();
-      for (const c of clusters) {
-        if (c.type !== "in" || !clusterIds.includes(Number(c.id))) continue;
-        const ep = Number(c.endpoint_id);
-        if (!byEp.has(ep)) byEp.set(ep, /* @__PURE__ */ new Set());
-        byEp.get(ep).add(Number(c.id));
-      }
-      const multi = byEp.size > 1;
-      for (const [endpoint, set] of byEp) {
-        out.push({
-          ieee: d.ieee,
-          endpoint,
-          name: multi ? `${d.name} (ep ${endpoint})` : d.name,
-          clusters: [...set].sort((a, b) => a - b),
-          groupable: endpointHasGroups(clusters, endpoint)
-        });
-      }
-    }
-    return out.sort((a, b) => a.name.localeCompare(b.name, void 0, { sensitivity: "base" }));
-  }
-  function modeOptions(targets, { clusterCount = 1 } = {}) {
-    const list2 = targets || [];
-    const blocked = list2.filter((t) => t.groupable === false).map((t) => t.name);
-    const n = list2.length;
-    const slots = n * Math.max(1, clusterCount);
-    return {
-      direct: {
-        ok: true,
-        warning: n > DIRECT_BINDING_MAX_LIGHTS ? `Directly, ${n} devices need about ${slots} binding-table slots on the remote. Many remotes run out sooner; the card checks each binding, so any that don't fit will show as failed.` : ""
-      },
-      group: {
-        ok: blocked.length === 0,
-        blocked,
-        reason: blocked.length ? `${blocked.join(", ")} can't join groups (no Groups cluster), so ${blocked.length === 1 ? "it needs" : "they need"} to be controlled directly.` : ""
-      }
-    };
-  }
-  function suggestMode(targets, { groupKnown = null, directKnown = null } = {}) {
-    const list2 = targets || [];
-    if (!modeOptions(list2).group.ok) return "direct";
-    const groupBad = !!groupKnown && groupKnown.state === "problems";
-    const directBad = !!directKnown && directKnown.state === "problems";
-    if (groupBad && !directBad) return "direct";
-    if (directBad && !groupBad) return "group";
-    if (list2.length > DIRECT_BINDING_MAX_LIGHTS) return "group";
-    return list2.length <= 1 ? "direct" : "group";
-  }
-  var targetKey = (t) => `${String(t.ieee).toLowerCase()}:${Number(t.endpoint)}`;
-  function findMatchingGroup(groups, targets, coordinatorIeee) {
-    const want = new Set(targets.map(targetKey));
-    const coord = String(coordinatorIeee || "").toLowerCase();
-    return (groups || []).find((g) => {
-      const have = (g.members || []).filter((m) => m.device && String(m.device.ieee).toLowerCase() !== coord).map((m) => targetKey({ ieee: m.device.ieee, endpoint: m.endpoint_id }));
-      return have.length === want.size && have.every((k) => want.has(k));
-    }) || null;
-  }
-  function missingMembers(group, targets) {
-    const have = new Set(
-      (group && group.members || []).filter((m) => m.device).map((m) => targetKey({ ieee: m.device.ieee, endpoint: m.endpoint_id }))
-    );
-    return targets.filter((t) => !have.has(targetKey(t)));
-  }
-  function planClusters(sourceClusters, targets, clustersFor) {
-    return (sourceClusters || []).map((clusterId) => {
-      const support = groupClusterSupport({
-        members: targets.map((t) => ({ ieee: t.ieee, endpoint: t.endpoint, name: t.name })),
-        clusterId,
-        clustersFor
+      const res = await this.callToolkit("unbind_group", data);
+      await this._reportRemoved({
+        sourceIeee,
+        sourceEndpoint: opts.endpoint,
+        clusterIds: clusterIds && clusterIds.length === 1 ? [Number(clusterIds[0])] : null,
+        isGroup: true,
+        groupId: Number(groupId)
       });
-      return { clusterId, support, include: support.supported.length > 0 };
-    });
-  }
-  function flowResult(bindOutcomes, testAnswer) {
-    const outs = bindOutcomes || [];
-    if (outs.length && outs.every((o) => o === "failed")) return "rejected";
-    if (outs.some((o) => o === "unconfirmed")) return "unconfirmed";
-    if (!testAnswer) return "pending_test";
-    if (testAnswer === "all") return outs.some((o) => o === "failed") ? "partial" : "works";
-    if (testAnswer === "some") return "partial";
-    return "stored_ignored";
-  }
-  var hex = (id) => `0x${Number(id).toString(16).padStart(4, "0")}`;
-  function buildBehaviourReport({ manufacturer, model, firmware, mode, endpoint, clusters, targetCount, result, cardVersion, now }) {
-    return {
-      kind: "behaviour_report",
-      schema: 1,
-      behaviour: mode === "direct" ? "direct_binding" : "group_binding",
-      manufacturer: manufacturer || null,
-      model: model || null,
-      firmware: {
-        sw_build_id: firmware && firmware.sw_build_id || null,
-        registry_sw_version: firmware && firmware.registry_sw_version || null
-      },
-      endpoint,
-      clusters: (clusters || []).map(hex),
-      target_count: targetCount,
-      result,
-      card_version: cardVersion,
-      provenance: { submitted_at: (now || /* @__PURE__ */ new Date()).toISOString() }
-    };
-  }
-  function reportsForClusters(byClusters, clusterIds) {
-    const want = new Set([...clusterIds].map(hex));
-    let out = null;
-    for (const [key, group] of Object.entries(byClusters || {})) {
-      if (!key.split(",").some((c) => want.has(c.trim().toLowerCase()))) continue;
-      out = out || { counts: {}, by_firmware: {} };
-      for (const [r, n] of Object.entries(group.counts || {})) out.counts[r] = (out.counts[r] || 0) + n;
-      for (const [fw, counts] of Object.entries(group.by_firmware || {})) {
-        const t = out.by_firmware[fw] = out.by_firmware[fw] || {};
-        for (const [r, n] of Object.entries(counts)) t[r] = (t[r] || 0) + n;
-      }
+      return res;
     }
-    return out;
-  }
-  var RESULT_TEXT = {
-    works: "works",
-    partial: "works for some lights",
-    stored_ignored: "stored but ignored",
-    rejected: "rejected"
   };
-  function firmwareKey(fw) {
-    return fw && (fw.sw_build_id || fw.registry_sw_version) || "unknown";
-  }
-  function knownBehaviour(doc, slugKey, behaviour, firmware, clusterIds = null) {
-    let entry = doc && doc[slugKey] && doc[slugKey][behaviour];
-    if (entry && entry.by_clusters && clusterIds && [...clusterIds].length) {
-      entry = reportsForClusters(entry.by_clusters, clusterIds);
-    }
-    if (!entry || !entry.counts) {
-      return {
-        state: "unknown",
-        total: 0,
-        text: "Nobody has reported how this remote handles this yet. The card will test it, and you can share the result."
-      };
-    }
-    const fwKey = firmwareKey(firmware);
-    const fwCounts = entry.by_firmware && entry.by_firmware[fwKey];
-    const counts = fwCounts || entry.counts;
-    const total = RESULTS.reduce((n, r) => n + (counts[r] || 0), 0);
-    const good = (counts.works || 0) + (counts.partial || 0);
-    const bad = (counts.stored_ignored || 0) + (counts.rejected || 0);
-    const state = !total ? "unknown" : bad === 0 ? "works" : good === 0 ? "problems" : "mixed";
-    const parts = RESULTS.filter((r) => counts[r]).map((r) => `${counts[r]} ${RESULT_TEXT[r]}`);
-    const scope = fwCounts ? fwKey === "unknown" ? "" : ` on firmware ${fwKey}` : ` (on other firmware than yours${fwKey === "unknown" ? "" : `, ${fwKey}`})`;
-    const lead = state === "works" ? "Reported to work" : state === "problems" ? "Other users found this doesn't work" : "Reports are mixed";
-    return {
-      state,
-      total,
-      counts,
-      firmwareMatched: !!fwCounts,
-      text: `${lead}${scope}: ${parts.join(", ")} (${total} report${total === 1 ? "" : "s"}).`
-    };
-  }
-  function suggestGroupName(areaName, remoteName) {
-    const base = areaName && areaName !== "No area" ? areaName : remoteName || "Remote";
-    return `${base} lights`;
-  }
-
-  // src/command-check.js
-  var COMMAND_CHECK_LIMIT_MS = 12e4;
-  function formatElapsed(ms) {
-    const total = Math.max(0, Math.floor((ms || 0) / 1e3));
-    const m = Math.floor(total / 60);
-    const s = total % 60;
-    return `${m}:${String(s).padStart(2, "0")}`;
-  }
-  function shouldApplyResult(entry, token, ok) {
-    if (!entry) return false;
-    if (ok) return entry.status !== "done" || entry.token === token;
-    return entry.token === token && entry.status !== "done";
-  }
-
-  // src/action-verify.js
-  function bindOutcome({ present, sourceRead }) {
-    if (present) return "confirmed";
-    return sourceRead ? "failed" : "unconfirmed";
-  }
-  function unbindOutcome({ before, present, sourceRead }) {
-    if (sourceRead) {
-      if (present) return "failed";
-      return before === false ? "absent" : "confirmed";
-    }
-    return before === false && !present ? "absent" : "unconfirmed";
-  }
-  var OUTCOME_LEVEL = {
-    confirmed: "success",
-    absent: "success",
-    unconfirmed: "warning",
-    failed: "error"
-  };
-  function pendingKey(p) {
-    const t = p.target && p.target.isGroup ? `g:${p.target.groupId}` : `d:${String(p.target && p.target.ieee || "").toLowerCase()}:${p.target ? p.target.endpoint : ""}`;
-    return `${p.kind}|${String(p.sourceIeee).toLowerCase()}|${p.sourceEndpoint}|${p.clusterId}|${t}`;
-  }
-  function reconcilePending(entries, { isPresent, wasRead }) {
-    const pending = [];
-    const resolved = [];
-    for (const entry of entries || []) {
-      if (!wasRead(entry.sourceIeee)) {
-        pending.push(entry);
-        continue;
-      }
-      const present = !!isPresent(entry);
-      const outcome = entry.kind === "unbind" ? unbindOutcome({ before: true, present, sourceRead: true }) : bindOutcome({ present, sourceRead: true });
-      resolved.push({ entry, outcome });
-    }
-    return { pending, resolved };
-  }
-
-  // src/styles.js
-  var STYLE = `
-:host { display:block; max-width:100%; }
-.card {
-  background: var(--ha-card-background, var(--card-background-color, #fff));
-  border-radius: var(--ha-card-border-radius, 12px);
-  box-shadow: var(--ha-card-box-shadow, none);
-  border: 1px solid var(--ha-card-border-color, var(--divider-color, #e0e0e0));
-  padding: 12px 16px 16px;
-  color: var(--primary-text-color);
-  font-family: var(--paper-font-body1_-_font-family, inherit);
-  box-sizing: border-box; max-width:100%; overflow-x:hidden;
-}
-.toolbar { display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin-bottom:8px; }
-.tabs { display:flex; gap:4px; flex-wrap:wrap; }
-/* Any element that would otherwise force the card wider than the screen
-   (a wide table, a long unbreakable label) scrolls within itself instead. */
-.table-scroll { max-width:100%; overflow-x:auto; -webkit-overflow-scrolling:touch; }
-.tab {
-  background: none; border: none; padding: 6px 12px; border-radius: 8px;
-  color: var(--secondary-text-color); cursor: pointer; font-weight:500;
-}
-.tab.active { background: var(--primary-color); color: var(--text-primary-color, #fff); }
-.search {
-  flex: 1 1 120px; min-width: 120px; padding: 6px 10px; border-radius: 8px;
-  border: 1px solid var(--divider-color, #ccc); background: var(--card-background-color);
-  color: var(--primary-text-color);
-}
-.btn {
-  border: 1px solid var(--divider-color, #ccc); background: var(--card-background-color);
-  color: var(--primary-text-color); border-radius: 8px; padding: 6px 12px; cursor: pointer; font-size: 0.9em;
-}
-a.btn { display:inline-block; text-decoration:none; }
-.btn:hover { filter: brightness(0.97); }
-.btn:disabled { opacity: 0.6; cursor: default; }
-.btn-primary { background: var(--primary-color); color: var(--text-primary-color, #fff); border-color: transparent; }
-.btn-danger { background: var(--error-color, #db4437); color: #fff; border-color: transparent; }
-.btn-small { padding: 3px 8px; font-size: 0.8em; }
-.status { margin: 4px 0 10px; padding: 8px 12px; border-radius: 8px; font-size: 0.9em; display: flex; align-items: center; justify-content: space-between; gap: 8px; }
-.status-info { background: rgba(3,169,244,0.12); color: var(--primary-text-color); }
-.status-success { background: rgba(76,175,80,0.15); color: var(--primary-text-color); }
-.status-error { background: rgba(244,67,54,0.15); color: var(--primary-text-color); }
-.status-text { flex: 1; }
-.status-close {
-  flex: none; border: none; background: transparent; cursor: pointer; font-size: 1.1em;
-  line-height: 1; padding: 0 2px; color: inherit; opacity: 0.6;
-}
-.status-close:hover { opacity: 1; }
-.scan-cell { display:flex; flex-direction:column; align-items:flex-start; gap:4px; min-width:150px; }
-.scan-cell-status { font-size:0.85em; }
-.scan-cell-failed .scan-cell-status, .scan-cell-never .scan-cell-status { color: var(--error-color, #db4437); }
-.scan-cell-partial .scan-cell-status { color: var(--warning-color, #ff9800); }
-.scan-cell-ok .scan-cell-status { color: var(--success-color, #4caf50); }
-.scan-wake-hint { font-size:0.78em; color: var(--secondary-text-color); font-style:italic; }
-.scan-cell-btn { align-self:flex-start; }
-.view { display:none; }
-.view.active { display:block; }
-.graph-toolbar { display:flex; align-items:center; gap:14px; flex-wrap:wrap; margin-bottom:6px; font-size:0.85em; }
-.graph-toolbar .row { display:flex; align-items:center; gap:4px; cursor:pointer; user-select:none; }
-.spacer { flex:1; }
-.scan-info { font-size: 0.85em; white-space: nowrap; }
-.storage-mode-badge { font-size: 0.8em; white-space: nowrap; }
-.card-version { font-size: 0.8em; white-space: nowrap; text-decoration: none; }
-.card-version:hover { text-decoration: underline; }
-.filter-panel { display:none; border:1px solid var(--divider-color, #e0e0e0); border-radius:10px;
-  padding:10px 12px 12px; margin-bottom:10px; background: var(--secondary-background-color, #fafafa); }
-.filter-panel.open { display:block; }
-.filter-group { margin-bottom:8px; }
-.filter-group-title { font-size:0.72em; text-transform:uppercase; letter-spacing:.04em;
-  color: var(--secondary-text-color); margin-bottom:5px; }
-.chips { display:flex; flex-wrap:wrap; gap:6px; }
-.chip { border:1px solid var(--divider-color, #ccc); background: var(--card-background-color);
-  color: var(--primary-text-color); border-radius: 999px; padding: 3px 10px; font-size: 0.78em; cursor: pointer; }
-.chip:hover { filter: brightness(0.97); }
-.chip.active { background: var(--primary-color); color: var(--text-primary-color, #fff); border-color: transparent; }
-/* Base (in-dashboard card) graph height scales with viewport so it isn't
-   cramped on a laptop-sized window, but stays reasonable on small screens. */
-.graph-wrap { position:relative; width:100%; height: clamp(420px, 62vh, 820px); border-radius: 10px; overflow:hidden;
-  background: var(--secondary-background-color, #fafafa); border: 1px solid var(--divider-color, #e0e0e0); }
-#graph-svg { width:100%; height:100%; touch-action:none; cursor: grab; }
-/* Fullscreen mode: card takes over the whole browser viewport, graph fills
-   all remaining vertical space after the toolbars. */
-.card.fullscreen {
-  position: fixed; inset: 0; z-index: 1000; border-radius: 0;
-  display: flex; flex-direction: column; overflow: auto;
-}
-.card.fullscreen #view-graph.active { display:flex; flex-direction:column; flex:1; min-height:0; }
-.card.fullscreen .graph-wrap { flex:1; height:auto; min-height: 260px; }
-
-/* Floor plan tab */
-.fp-image-row { flex: 1 1 320px; display:flex; align-items:center; gap:6px; }
-.fp-image-row input { flex:1; padding:5px 8px; border-radius:6px; border:1px solid var(--divider-color, #ccc);
-  background: var(--card-background-color); color: var(--primary-text-color); }
-.floorplan-layout { display:flex; gap:10px; align-items:stretch; }
-.fp-sidebar { flex: 0 0 180px; width:180px; border:1px solid var(--divider-color, #e0e0e0); border-radius:10px;
-  padding:8px; overflow-y:auto; max-height: clamp(420px, 62vh, 820px);
-  background: var(--secondary-background-color, #fafafa); }
-.fp-unplaced-list { display:flex; flex-direction:column; gap:6px; }
-.fp-chip { border:1px solid var(--divider-color, #ccc); background: var(--card-background-color);
-  color: var(--primary-text-color); border-radius:8px; padding:5px 8px; font-size:0.8em; cursor:grab; user-select:none; }
-.fp-chip:active { cursor:grabbing; }
-.floorplan-layout .graph-wrap { flex:1; min-width:0; }
-.fp-ghost { position:fixed; z-index:2000; background: var(--primary-color); color: var(--text-primary-color, #fff);
-  padding:4px 10px; border-radius:8px; font-size:0.8em; pointer-events:none; box-shadow:0 4px 12px rgba(0,0,0,0.3); }
-.card.fullscreen #view-floorplan.active { display:flex; flex-direction:column; flex:1; min-height:0; }
-.card.fullscreen #view-floorplan.active .floorplan-layout { flex:1; min-height:0; }
-.card.fullscreen #view-floorplan.active .graph-wrap { height:auto; }
-.card.fullscreen #view-floorplan.active .fp-sidebar { max-height:none; }
-.graph-empty { position:absolute; inset:0; display:none; align-items:center; justify-content:center; color: var(--secondary-text-color); }
-.hint { font-size: 0.8em; color: var(--secondary-text-color); margin: 8px 2px 0; }
-.node { cursor: grab; }
-.node-shape { stroke: var(--card-background-color, #fff); stroke-width: 2; }
-.node-device { fill: #607d8b; }
-.node-coordinator { fill: #ffb300; }
-.node-group { fill: none; stroke: #8e24aa; stroke-width: 2.5; }
-.node.drop-target .node-shape { filter: drop-shadow(0 0 6px var(--primary-color)); stroke: var(--primary-color); }
-.node-icon { font-size: 18px; pointer-events:none; }
-.node-role-badge-bg { fill: var(--card-background-color, #fff); stroke: #8e24aa; stroke-width: 1.5; }
-.node-role-badge-icon { pointer-events:none; }
-.node-label { font-size: 11px; text-anchor: middle; fill: var(--primary-text-color); pointer-events:none; }
-/* Floor Plan labels sit on an arbitrary uploaded image, not the card's own
-   background, so trusting the theme's text color (as the Map view safely
-   does) can go invisible \u2014 e.g. dark theme = light text, sitting on a white
-   blueprint. A halo outline in the card's background color keeps the label
-   readable against light or dark image content either way. */
-.fp-node .node-label {
-  paint-order: stroke;
-  stroke: var(--card-background-color, #fff);
-  stroke-width: 3px;
-  stroke-linejoin: round;
-}
-.edge { stroke-width: 2.5; cursor:pointer; opacity: 0.85; }
-.edge:hover { stroke-width: 4; opacity: 1; }
-/* Reporting-type bindings (see _isControlBinding) \u2014 only ever drawn when
-   "Show reporting-only bindings" is on, so they need to read as secondary
-   background info rather than compete with real control arrows. */
-.edge-reporting { stroke-width: 1.2; stroke-dasharray: 4,3; opacity: 0.45; }
-.edge-reporting:hover { stroke-width: 2; opacity: 0.8; }
-/* Distinct from both control (solid) and reporting (faint dashed) \u2014 this
-   binding hasn't been classified yet (device not cluster-scanned, or the
-   cluster isn't declared on this endpoint at all), and stays visible by
-   default same as control, just visually flagged as unresolved. */
-.edge-unknown { stroke-width: 1.6; stroke-dasharray: 2,2; opacity: 0.7; }
-.edge-unknown:hover { stroke-width: 2.2; opacity: 1; }
-.stale-banner { margin-bottom:10px; padding:8px 12px; border-radius:8px; background: rgba(255,152,0,0.14); font-size:0.9em;
-  display:flex; flex-direction:column; gap:6px; }
-.pending-banner { background: rgba(255,193,7,0.16); }
-.flow-steps { display:flex; flex-wrap:wrap; gap:6px 14px; list-style:none; padding:0; margin:0 0 12px; font-size:0.85em; color: var(--secondary-text-color); }
-.flow-steps li.active { color: var(--primary-text-color); font-weight:600; }
-.flow label { display:block; margin:8px 0; }
-.flow-targets { max-height: 320px; overflow:auto; border:1px solid var(--divider-color, rgba(127,127,127,0.3)); border-radius:8px; padding:4px 8px; }
-.flow .flow-target { display:flex; align-items:center; gap:8px; margin:4px 0; }
-.flow .flow-target .muted { margin-left:auto; font-size:0.85em; }
-.flow-known, .flow-result, .flow-share, .flow-callout { padding:8px 12px; border-radius:8px; margin:8px 0; }
-.flow-tag { display:inline-block; font-size:0.8em; padding:0 6px; margin-left:6px; border-radius:8px; background: rgba(255,152,0,0.16); color: var(--warning-color, #c77700); }
-.flow-suggested { display:inline-block; font-size:0.8em; padding:0 6px; margin-left:6px; border-radius:8px; background: rgba(33,150,243,0.14); color: var(--primary-color, #1976d2); }
-.flow-known-unknown { background: rgba(127,127,127,0.12); }
-.flow-known-works, .flow-result-success { background: rgba(76,175,80,0.14); }
-.flow-known-mixed, .flow-result-info { background: rgba(3,169,244,0.12); }
-.flow-known-problems, .flow-result-warning { background: rgba(255,152,0,0.18); }
-.flow-share, .flow-callout { background: rgba(3,169,244,0.10); }
-.flow-pitfalls { margin:8px 0; }
-.flow-pitfalls summary { cursor:pointer; font-weight:600; }
-.flow-pitfalls ul, .flow-clusters, .flow-log { margin:6px 0; padding-left:20px; }
-.flow-mode { border:none; padding:0; margin:8px 0; }
-.flow-mode legend { font-weight:600; padding:0; }
-.flow-support { display:block; font-size:0.85em; margin:0 0 6px 24px; }
-.flow-support-warning { color: var(--warning-color, #c77700); }
-.flow-log { list-style:none; padding-left:0; }
-.flow-log li { margin:3px 0; }
-.adv-group-support { margin:4px 0 8px; padding:6px 10px; border-radius:6px; font-style:normal; }
-.adv-group-support-ok { background: rgba(76,175,80,0.12); }
-.adv-group-support-info { background: rgba(3,169,244,0.12); }
-.adv-group-support-warning, .adv-group-support-empty { background: rgba(255,152,0,0.18); }
-.adv-group-support-unknown { opacity: 0.8; }
-.pending-list { margin:0; padding-left:20px; }
-.status-warning { background: rgba(255,152,0,0.16); color: var(--primary-text-color); }
-.status .status-action { margin-left:8px; flex:0 0 auto; }
-.stale-row { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
-.stale-row > span { flex: 1 1 260px; }
-.table-filter-info { display:flex; flex-wrap:wrap; align-items:center; gap:10px; margin-bottom:8px; padding:6px 10px;
-  border-radius:8px; background: rgba(76,154,255,0.12); font-size:0.85em; }
-.dir-cell { white-space:nowrap; font-weight:600; }
-.dir-cell.dir-outbound { color: var(--primary-color); }
-.dir-cell.dir-inbound { color: var(--secondary-text-color); }
-.table-toolbar { display:flex; align-items:center; gap:8px; margin-bottom:8px; font-size:0.85em; flex-wrap:wrap; }
-.health-filters { display:flex; gap:6px; flex-wrap:wrap; }
-.removed-note { color: var(--error-color, #db4437); font-weight:600; font-size:0.9em; }
-.removed-note code { font-weight:400; }
-.bindings-table { width:100%; border-collapse: collapse; font-size: 0.9em; }
-.bindings-table th, .bindings-table td { text-align:left; padding: 8px 10px; border-bottom: 1px solid var(--divider-color, #eee); }
-.bindings-table th[data-sort] { cursor: pointer; user-select: none; white-space: nowrap; }
-.bindings-table th[data-sort]:hover { color: var(--primary-color); }
-.bindings-table th.sort-asc::after { content: " \\25B2"; font-size: 0.75em; }
-.bindings-table th.sort-desc::after { content: " \\25BC"; font-size: 0.75em; }
-.health-summary { display:flex; align-items:center; gap:10px; margin-bottom:10px; padding:8px 12px;
-  border-radius:8px; background: var(--secondary-background-color, #fafafa); border:1px solid var(--divider-color, #eee);
-  font-size:0.85em; flex-wrap:wrap; }
-.health-summary-title { font-weight:600; }
-.health-chip { display:inline-flex; align-items:center; gap:4px; padding:3px 9px; border-radius:12px; font-size:0.9em; }
-.health-badge { border:none; border-radius:12px; padding:4px 10px; font-size:0.85em; cursor:pointer; white-space:nowrap; }
-.health-ok, .health-badge.health-ok, .health-chip.health-ok { background: rgba(76,206,172,0.15); color: #2e9e83; }
-.health-info, .health-badge.health-info, .health-chip.health-info { background: rgba(76,154,255,0.15); color: #2f6fce; }
-.health-warning, .health-badge.health-warning, .health-chip.health-warning { background: rgba(255,179,0,0.18); color: #b26a00; }
-.health-error, .health-badge.health-error, .health-chip.health-error { background: rgba(219,68,55,0.15); color: var(--error-color, #db4437); }
-.src-link { color: var(--primary-color); cursor: pointer; text-decoration: none; }
-.src-link:hover { text-decoration: underline; }
-.muted { color: var(--secondary-text-color); }
-.dot { display:inline-block; width:9px; height:9px; border-radius:50%; margin-right:4px; vertical-align:middle; }
-.advanced-form-wrap { display:flex; gap:16px; flex-wrap:wrap; align-items:flex-start; }
-.advanced-form { display:flex; flex-direction:column; gap:10px; flex: 1 1 340px; max-width: 480px; }
-.advanced-form label { display:flex; flex-direction:column; gap:4px; font-size:0.85em; color: var(--secondary-text-color); }
-.advanced-form select, .advanced-form input { padding:6px 8px; border-radius:6px; border:1px solid var(--divider-color, #ccc);
-  background: var(--card-background-color); color: var(--primary-text-color); }
-.advanced-side { display:flex; flex-direction:column; gap:12px; flex: 1 1 280px; min-width:0; }
-.advanced-panel { border:1px solid var(--divider-color, #e0e0e0); border-radius:10px; padding:8px 10px;
-  background: var(--secondary-background-color, #fafafa); }
-.advanced-binding-list { display:flex; flex-direction:column; gap:6px; font-size:0.85em; max-height:280px; overflow-y:auto; margin-top:6px; }
-.advanced-binding-row { display:flex; align-items:center; gap:6px; padding:5px 8px; border-radius:6px;
-  background: var(--card-background-color); }
-.advanced-empty { color: var(--secondary-text-color); font-size:0.85em; padding:4px 0 0; margin:0; }
-.dialog { position: fixed; inset:0; display:none; z-index: 20; align-items:center; justify-content:center; }
-.dialog.open { display:flex; }
-.dialog-backdrop { position:absolute; inset:0; background: rgba(0,0,0,0.4); }
-.dialog-panel { position:relative; background: var(--card-background-color, #fff); color: var(--primary-text-color);
-  border-radius: 12px; padding: 16px 18px; width: min(560px, 92vw); max-height: 82vh; overflow:auto; box-shadow: 0 8px 30px rgba(0,0,0,0.3); }
-.dialog-panel.wide { width: min(760px, 94vw); }
-.dialog-header { display:flex; align-items:center; justify-content:space-between; font-weight:600; margin-bottom:10px; }
-.row { display:flex; align-items:center; gap:6px; font-size:0.92em; }
-.dialog-actions { display:flex; gap:8px; margin-top:14px; }
-.detail-table td { padding: 4px 8px; font-size: 0.9em; }
-
-/* Device drawer (1.4.0): side panel opened by clicking a device anywhere. */
-.drawer { position: fixed; top:0; right:0; bottom:0; width: min(400px, 100vw); z-index: 15;
-  background: var(--card-background-color, #fff); color: var(--primary-text-color);
-  box-shadow: -6px 0 24px rgba(0,0,0,0.25); transform: translateX(105%); transition: transform 0.18s ease-out;
-  display:flex; flex-direction:column; }
-.drawer.open { transform: none; }
-.drawer-header { display:flex; align-items:center; justify-content:space-between; gap:8px; font-weight:600;
-  padding: 14px 16px 10px; border-bottom: 1px solid var(--divider-color, rgba(0,0,0,0.12)); }
-.drawer-body { overflow-y:auto; padding: 12px 16px 24px; font-size: 0.92em; }
-.drawer-head { display:flex; gap:12px; align-items:flex-start; }
-.drawer-photo { width: 84px; height: 84px; object-fit: contain; flex: 0 0 auto; border-radius: 8px;
-  background: var(--secondary-background-color, #f5f5f5); }
-.drawer-tags { display:flex; flex-wrap:wrap; gap:4px; margin-bottom:4px; }
-.drawer-tags .chip { cursor: default; }
-.drawer-facts td:first-child { color: var(--secondary-text-color); white-space: nowrap; }
-.drawer-facts .scan-cell { display:block; }
-.map-route-banner { margin: 6px 0; padding: 8px 10px; border-left: 4px solid var(--primary-color); background: var(--secondary-background-color, #f5f5f5); border-radius: 6px; font-size: 13px; display:flex; gap:8px; align-items:flex-start; flex-wrap: wrap; }
-.map-route-banner .map-route-text { flex: 1 1 260px; }
-.map-route-hop { stroke-width: 5; stroke-dasharray: 10 6; opacity: .9; pointer-events: stroke; }
-.map-route-lqi { font-size: 12px; font-weight: 700; paint-order: stroke; stroke: var(--card-background-color, #fff); stroke-width: 3px; }
-.node.map-route-node .node-shape { stroke: var(--primary-color); stroke-width: 4; }
-.groups-head { display:flex; gap:12px; align-items:flex-start; flex-wrap:wrap; margin: 8px 0 12px; }
-.groups-head p { flex: 1 1 320px; margin: 0; }
-.group-card { border: 1px solid var(--divider-color, #e0e0e0); border-radius: 10px; padding: 10px 12px; margin-bottom: 10px; }
-.group-card.group-focus { border-color: var(--primary-color); box-shadow: 0 0 0 2px var(--primary-color); }
-.group-card-head { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
-.group-card-head .spacer { flex: 1; }
-.group-cols { display:grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 12px; margin-top: 8px; }
-.groups-list { list-style:none; padding:0; margin: 4px 0; }
-.groups-list li { display:flex; align-items:center; gap:6px; flex-wrap:wrap; padding: 3px 0; }
-.groups-list li .btn { margin-left:auto; }
-.groups-reasons { margin: 4px 0 8px; padding-left: 18px; }
-.groups-reasons li { margin: 2px 0; }
-.groups-pick { display:flex; flex-direction:column; gap:4px; max-height: 260px; overflow:auto; margin: 6px 0; }
-.drawer-db-missing { color: var(--warning-color, #b26a00); font-weight: 500; }
-.drawer-section { margin-top: 16px; }
-.drawer-section-title { font-weight: 600; margin-bottom: 6px; }
-.drawer-rel { list-style:none; padding:0; margin:0; display:flex; flex-direction:column; gap:6px; }
-.drawer-rel li { display:flex; flex-wrap:wrap; gap:4px 8px; align-items:baseline; }
-.drawer-clusters { font-size: 0.85em; }
-.drawer-empty { margin: 0; }
-.drawer-problems ul { margin: 0 0 6px; padding-left: 18px; }
-.drawer-problems .health-error { color: var(--error-color, #db4437); }
-.drawer-problems .health-warning { color: var(--warning-color, #f4b400); }
-.drawer-actions { display:flex; flex-direction:column; align-items:stretch; gap:8px; }
-.drawer-actions .btn { text-align:center; text-decoration:none; }
-.drawer-share { border: 1px solid var(--divider-color, rgba(0,0,0,0.12)); border-radius: 8px; padding: 8px 12px; }
-.drawer-share ol { padding-left: 18px; margin: 6px 0; }
-.drawer-share li { margin-bottom: 4px; }
-.ep-check-all { display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin-bottom:8px; }
-.flow-group-choice label { display:flex; align-items:center; gap:6px; flex-wrap:wrap; }
-.flow-group-choice input[type="text"], .flow-group-choice select { flex: 1 1 180px; min-width: 0; }
-.adv-guided-hint { display:flex; align-items:center; gap:6px; flex-wrap:wrap; }
-
-/* Experimental (1.5.0 local build): Network tab and route check. */
-.exp-badge { display:inline-block; font-size:0.7em; font-weight:600; letter-spacing:0.02em; padding:1px 6px; border-radius:8px;
-  margin-left:4px; vertical-align:middle; color: var(--warning-color, #ffa000); border:1px solid var(--warning-color, #ffa000); }
-.tab-beta { font-size:0.62em; font-weight:500; margin-left:2px; opacity:0.75; letter-spacing:0.02em; color: inherit; }
-.mesh-intro p { margin: 0 0 8px; }
-.mesh-toolbar { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
-.mesh-progress { display:flex; align-items:center; gap:8px; margin:6px 0; font-size:0.9em; }
-.mesh-progress:empty { display:none; }
-.mesh-layout { display:flex; gap:16px; align-items:flex-start; margin-top:8px; }
-.mesh-picture { flex: 1 1 auto; min-width:0; }
-.mesh-side { flex: 0 0 300px; font-size:0.9em; }
-.mesh-svg { width:100%; height:auto; max-height:70vh; border:1px solid var(--divider-color, rgba(0,0,0,0.12)); border-radius:8px;
-  background: var(--card-background-color, #fff); }
-.mesh-node { cursor:pointer; }
-.mesh-picture { position:relative; }
-.mesh-zoom { position:absolute; top:8px; right:8px; display:flex; gap:4px; z-index:1; }
-.mesh-svg { touch-action:none; cursor:grab; }
-.mesh-link { cursor:pointer; }
-.mesh-svg .mesh-zs { transform: scale(var(--mz, 1)); transform-origin: 0 0; transform-box: view-box; }
-.mesh-svg [style*="--sw"] { stroke-width: calc(var(--sw) * var(--mz, 1) * 1px); }
-.mesh-picture { position: relative; }
-.mesh-picture > .mesh-selected { position: absolute; left: 8px; top: 8px; z-index: 2; max-width: min(340px, calc(100% - 16px)); background: var(--card-background-color, #fff); box-shadow: 0 2px 8px rgba(0,0,0,0.25); }
-.edge-pending { stroke-dasharray: 6 5; opacity: 0.85; cursor: pointer; }
-.mesh-show-hint { margin:4px 0 0; }
-.mesh-battery circle { fill: var(--card-background-color, #fff); stroke-width:2; }
-.mesh-battery.orphan circle { stroke: var(--disabled-text-color, #999) !important; stroke-dasharray: 2 2; }
-.mesh-battery-label { fill: var(--secondary-text-color); }
-.mesh-failed { list-style:none; padding:0; margin:0 0 12px; display:flex; flex-direction:column; gap:4px; }
-.mesh-failed li { display:flex; justify-content:space-between; align-items:center; gap:8px; }
-.mesh-routes { padding-left:18px; margin:0 0 12px; }
-.mesh-routes li { margin-bottom:4px; }
-.mesh-link-hit { stroke: transparent; pointer-events: stroke; }
-.mesh-link:hover line:first-child { stroke-opacity:1; }
-.mesh-selected { border:1px solid var(--divider-color, rgba(0,0,0,0.12)); border-radius:8px; padding:8px 10px; margin-bottom:12px; }
-.mesh-selected ul { margin:6px 0; padding-left:18px; }
-.mesh-selected p { margin:4px 0 6px; font-size:0.9em; }
-.mesh-unplaced { margin-top:6px; font-size:0.9em; }
-.mesh-legend span { display:inline-flex; align-items:center; gap:4px; margin-right:10px; }
-.mesh-legend-note { font-size:0.85em; margin-top:4px; }
-.mesh-floor-badge { fill: var(--primary-color); font-weight:700; paint-order: stroke; stroke: var(--card-background-color, #fff); stroke-width:3px; }
-.mesh-node circle.via-ceiling { fill:none; stroke: var(--warning-color, #ffa000); stroke-dasharray: 3 3; stroke-width:1.5; }
-.mesh-floors-help, .fp-floor-help details { font-size:0.9em; margin:4px 0 8px; }
-.mesh-floors-help summary, .fp-floor-help summary { cursor:pointer; color: var(--primary-color); }
-.mesh-floors-help ol, .fp-floor-help ol { margin:6px 0; padding-left:20px; }
-.fp-floor-help { margin: 0 0 6px; }
-.mesh-unplaced summary { cursor:pointer; }
-.mesh-node circle, .mesh-node rect { fill: var(--card-background-color, #fff); stroke: var(--primary-text-color); stroke-width:1.5; }
-.mesh-node circle.unread { stroke-dasharray: 3 3; stroke: var(--secondary-text-color); }
-.mesh-node rect { fill: var(--primary-color); }
-.mesh-label { fill: var(--primary-text-color); paint-order: stroke; stroke: var(--card-background-color, #fff); stroke-width:3px; }
-.mesh-kids { fill: var(--secondary-text-color); font-weight:600; }
-.mesh-legend { display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-top:6px; font-size:0.85em; }
-.mesh-tips { padding-left:18px; margin:0 0 12px; }
-.mesh-tips li { margin-bottom:6px; }
-.mesh-tip-error { color: var(--error-color, #db4437); font-weight: 500; }
-.mesh-tip-warning { color: var(--primary-text-color); }
-.mesh-tip-info { color: var(--secondary-text-color); }
-.mesh-links tr { cursor:pointer; }
-.mesh-links tr.active td { background: var(--secondary-background-color, rgba(0,0,0,0.05)); }
-.lqi-chip { display:inline-block; font-size:0.8em; padding:0 6px; border-radius:8px; white-space:nowrap; border:1px solid currentColor; }
-.lqi-good { color: var(--success-color, #43a047); }
-.lqi-fair { color: var(--warning-color, #ffa000); }
-.lqi-weak { color: var(--error-color, #db4437); }
-.lqi-unknown { color: var(--secondary-text-color); }
-.route-list { list-style:none; padding:0; margin:6px 0; display:flex; flex-direction:column; gap:10px; }
-.route-chain { margin:4px 0; line-height:1.9; }
-.route-arrow { color: var(--secondary-text-color); }
-.route-members { margin:4px 0; padding-left:18px; }
-.route-verdict { font-size:0.9em; margin-top:2px; }
-.route-good { color: var(--success-color, #43a047); }
-.route-weak { color: var(--error-color, #db4437); }
-.route-none, .route-unknown { color: var(--secondary-text-color); }
-@media (max-width: 800px) { .mesh-layout { flex-direction: column; } .mesh-side { flex-basis:auto; width:100%; } }
-
-/* Exploded device view \u2014 per-endpoint cards inside the (widened) dialog. */
-.ep-photo-toggle { font-size:0.82em; color: var(--secondary-text-color); margin-bottom:10px; }
-.ep-device-header { display:flex; align-items:flex-start; gap:14px; }
-.ep-device-visual { flex: 0 0 auto; width:64px; }
-.ep-device-photo { width:64px; max-height:110px; object-fit:contain; border-radius:6px;
-  background: var(--card-background-color); }
-.ep-device-shape { width:64px; }
-.ep-shape-svg { display:block; }
-.ep-shape-plate { fill: var(--secondary-background-color, #eee); stroke: var(--divider-color, #ccc); }
-.ep-shape-gang { fill: var(--primary-color, #039be5); opacity:0.75; }
-.ep-device-header .detail-table { flex:1; }
-.ep-grid { display:grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap:10px; margin-top:12px; }
-.ep-card { border:1px solid var(--divider-color, #e0e0e0); border-radius:10px; padding:10px 12px;
-  background: var(--secondary-background-color, #fafafa); }
-.ep-card-head { display:flex; align-items:center; justify-content:space-between; gap:8px; margin-bottom:8px; }
-.ep-card-title { font-weight:600; font-size:0.95em; }
-.ep-badges { display:flex; flex-wrap:wrap; gap:4px; margin-bottom:6px; }
-.ep-badge { display:inline-block; font-size:0.78em; padding:3px 8px; border-radius:10px; line-height:1.5; }
-.ep-badge-clusters { display:block; font-size:0.88em; opacity:0.75; }
-.ep-badge-self { background:#ede7f6; color:#4a2f8f; }
-.ep-badge-out { background:#e1f5ee; color:#0a5c46; }
-.ep-badge-in { background:#faece7; color:#8f3d1c; }
-.ep-badge-member { background:#f3e5f5; color:#6a1b78; }
-.ep-badge-unknown { background:#fff3e0; color:#8a5a00; }
-.ep-badge-reporting { background: var(--divider-color, #e0e0e0); color: var(--secondary-text-color); }
-.ep-badge-muted { background: var(--divider-color, #e0e0e0); color: var(--secondary-text-color); }
-.ep-report { font-size:0.82em; color: var(--secondary-text-color); margin: 4px 0 8px; }
-.ep-picker-label { display:block; font-size:0.8em; color: var(--secondary-text-color); margin-bottom:3px; }
-.ep-cmd-section { margin:10px 0; padding:8px 0; border-top:1px solid var(--divider-color, #e0e0e0); border-bottom:1px solid var(--divider-color, #e0e0e0); }
-.ep-cmd-status { margin:4px 0; }
-.ep-cmd-actions { display:flex; gap:6px; flex-wrap:wrap; margin-bottom:8px; }
-.ep-cmd-discovery-note { margin: 0 0 8px; padding:6px 8px; border-radius:8px;
-  background: var(--secondary-background-color, #fafafa); border:1px solid var(--divider-color, #eee); }
-.ep-cmd-results { display:flex; flex-direction:column; gap:6px; margin-bottom:8px; }
-.ep-cmd-cluster { border:1px solid var(--divider-color, #e0e0e0); border-radius:8px; padding:6px 8px; }
-.ep-cmd-cluster-head {
-  display:flex; align-items:center; gap:6px; width:100%; text-align:left;
-  border:none; background:none; padding:0; margin:0; font: inherit; font-size:0.85em; font-weight:600;
-  color:inherit; cursor:pointer;
-}
-.ep-cmd-cluster-head:hover { color: var(--primary-color); }
-.ep-cmd-chevron { flex:none; opacity:0.6; font-size:0.9em; }
-.ep-cmd-cluster-title { flex:1; }
-.ep-cmd-summary { flex:none; font-weight:400; font-size:0.82em; opacity:0.7; white-space:nowrap; }
-.ep-cmd-cluster-body { margin-top:6px; display:flex; flex-direction:column; gap:4px; }
-.ep-cmd-cluster-id { font-weight:400; opacity:0.65; margin-left:4px; }
-.ep-cmd-row { display:flex; align-items:center; gap:6px; padding:3px 6px; border-radius:6px; font-size:0.82em; }
-.ep-cmd-row.ep-cmd-yes { }
-.ep-cmd-row.ep-cmd-no { background:#faece7; }
-.ep-cmd-yes .ep-cmd-icon { color:#0a5c46; }
-.ep-cmd-no .ep-cmd-icon { color:#8f3d1c; }
-.ep-cmd-no .ep-cmd-name, .ep-cmd-no .ep-cmd-hex { color:#8f3d1c; }
-.ep-cmd-name { flex:1; }
-.ep-cmd-hex { opacity:0.65; font-size:0.9em; }
-.ep-cmd-share-draft { border:1px dashed var(--divider-color, #ccc); border-radius:8px; padding:8px; margin-top:4px; }
-.ep-cmd-share-json {
-  width:100%; box-sizing:border-box; font-family: var(--code-font-family, monospace); font-size:0.72em;
-  background: var(--card-background-color); color: var(--primary-text-color);
-  border:1px solid var(--divider-color, #ccc); border-radius:6px; padding:6px; resize:vertical;
-}
-.ep-cmd-share-actions { display:flex; gap:6px; flex-wrap:wrap; margin-top:6px; }
-.ep-control-select { width:100%; }
-
-/* Capability Explorer tab */
-.capexp-strip { display:flex; align-items:center; gap:8px; background: rgba(76,154,255,0.1);
-  border:1px solid rgba(76,154,255,0.3); border-radius:10px; padding:8px 12px; margin-bottom:10px; font-size:0.85em; }
-.capexp-mission { font-size:1em; font-weight:600; margin: 0 0 4px; }
-.capexp-discoveries { background: var(--secondary-background-color, #fafafa); border:1px solid var(--divider-color, #eee);
-  border-radius:10px; padding:8px 12px; margin: 8px 0; }
-.capexp-discoveries-label { font-size:0.78em; font-weight:600; color: var(--secondary-text-color); margin-bottom:4px; }
-.capexp-discoveries-lead { margin:0 0 6px; font-size:0.88em; }
-.capexp-discoveries-list { margin:0; padding-left:18px; display:flex; flex-direction:column; gap:3px; font-size:0.88em; }
-.capexp-modes { display:flex; gap:8px; flex-wrap:wrap; margin-bottom:2px; }
-.capexp-mode-btn { display:flex; flex-direction:column; align-items:flex-start; gap:2px; text-align:left;
-  border:1px solid var(--divider-color, #ccc); background: var(--card-background-color); color: var(--primary-text-color);
-  border-radius:10px; padding:7px 12px; cursor:pointer; }
-.capexp-mode-btn:hover { filter: brightness(0.97); }
-.capexp-mode-btn.active { background: var(--primary-color); border-color: transparent; }
-.capexp-mode-btn .capexp-mode-title { font-size:0.88em; font-weight:600; }
-.capexp-mode-btn.active .capexp-mode-title { color: var(--text-primary-color, #fff); }
-.capexp-mode-btn .capexp-mode-sub { font-size:0.76em; color: var(--secondary-text-color); }
-.capexp-mode-btn.active .capexp-mode-sub { color: var(--text-primary-color, #fff); opacity:0.85; }
-.capexp-status-row { display:flex; align-items:center; justify-content:space-between; gap:10px; margin-bottom:8px; }
-.capexp-status-row .hint { margin:0; }
-.capexp-error { color: var(--error-color, #db4437); }
-.capexp-section-title { font-weight:600; margin: 14px 0 6px; }
-.capexp-section-title:first-child { margin-top:6px; }
-.capexp-device-list { display:flex; flex-direction:column; gap:8px; }
-.capexp-device-card { border:1px solid var(--divider-color, #e0e0e0); border-radius:10px; padding:10px 12px;
-  background: var(--secondary-background-color, #fafafa); }
-.capexp-device-top { display:flex; gap:12px; align-items:flex-start; }
-.capexp-device-main { flex:1 1 auto; min-width:0; }
-.capexp-device-photo, .capexp-device-photo-fallback { width:56px; height:56px; border-radius:8px; flex:0 0 auto;
-  background: var(--card-background-color, #fff); border:1px solid var(--divider-color, #e0e0e0); object-fit:contain; }
-.capexp-device-photo-fallback { position:relative; background: var(--secondary-background-color, #fafafa); }
-.capexp-device-photo-fallback::after { content:""; position:absolute; inset:15px;
-  background-color: var(--secondary-text-color, #727272); opacity:0.45;
-  mask-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'><rect x='3' y='3' width='18' height='18' rx='3' fill='none' stroke='black' stroke-width='2'/><circle cx='12' cy='12' r='3' fill='black'/></svg>");
-  -webkit-mask-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'><rect x='3' y='3' width='18' height='18' rx='3' fill='none' stroke='black' stroke-width='2'/><circle cx='12' cy='12' r='3' fill='black'/></svg>");
-  mask-size:contain; -webkit-mask-size:contain; mask-repeat:no-repeat; -webkit-mask-repeat:no-repeat;
-  mask-position:center; -webkit-mask-position:center; }
-.capexp-device-header { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
-.capexp-device-name { font-weight:600; }
-.capexp-website-link { margin-left:auto; font-size:0.78em; font-weight:500; color: var(--primary-color);
-  text-decoration:none; white-space:nowrap; }
-.capexp-website-link:hover { text-decoration:underline; }
-.capexp-external-refs { font-size:0.78em; margin-top:6px; }
-.capexp-external-refs a { color: var(--primary-color); text-decoration:none; }
-.capexp-external-refs a:hover { text-decoration:underline; }
-.capexp-chevron { margin-left:auto; opacity:0.6; }
-.capexp-techtoggle { display:flex; align-items:center; gap:4px; cursor:pointer; user-select:none;
-  margin-top:10px; padding-top:8px; border-top:1px solid var(--divider-color, #e0e0e0);
-  font-size:0.78em; font-weight:600; color: var(--secondary-text-color); }
-.capexp-techtoggle:hover { color: var(--primary-text-color); }
-.capexp-chevron-inline { opacity:0.7; }
-.capexp-tech-panel { margin-top:6px; }
-.capexp-trust-panel { display:flex; align-items:center; gap:8px; margin-top:6px; }
-.capexp-trust-stars { font-size:1.05em; letter-spacing:1px; color:#e0a400; white-space:nowrap; }
-.capexp-trust-conflict { font-size:0.82em; letter-spacing:normal; color: var(--error-color, #db4437); font-weight:600; }
-.capexp-trust-text { display:flex; flex-direction:column; }
-.capexp-trust-label { font-size:0.78em; font-weight:600; color: var(--secondary-text-color); }
-.capexp-evidence-tag { display:inline-block; align-self:flex-start; font-size:0.68em; font-weight:500;
-  padding:1px 7px; border-radius:8px; margin:2px 0; background: var(--divider-color, #e0e0e0);
-  color: var(--secondary-text-color); }
-.capexp-trust-detail { font-size:0.8em; }
-.capexp-cap-label { font-size:0.78em; color: var(--secondary-text-color); margin-top:8px; margin-bottom:2px; }
-.capexp-cap-groups { display:flex; flex-direction:column; gap:6px; margin-top:2px; }
-.capexp-cap-group-label { font-size:0.85em; font-weight:600; }
-.capexp-cap-tags { display:flex; flex-wrap:wrap; gap:5px; margin-top:3px; }
-.capexp-cap-reportsonly { margin-top:2px; }
-.capexp-cap-group-unidentified .capexp-cap-group-label { font-weight:500; font-style:italic; }
-.capexp-device-overview { margin:6px 0 4px; font-size:0.88em; line-height:1.5; }
-.capexp-badge { display:inline-block; font-size:0.72em; padding:2px 8px; border-radius:10px; cursor:help; }
-.capexp-badge-input { background: rgba(158,158,158,0.18); color: var(--secondary-text-color); }
-.capexp-badge-output { background: rgba(76,175,80,0.16); color: #2e7d32; }
-.capexp-badge-both { background: rgba(142,36,170,0.13); color: #6a1b78; }
-.capexp-badge-unknown { background: rgba(158,158,158,0.18); color: var(--secondary-text-color); font-style: italic; }
-.capexp-tag { display:inline-block; font-size:0.78em; padding:3px 9px; border-radius:10px;
-  background: rgba(76,154,255,0.15); color: #2f6fce; }
-.capexp-tag-conflict { background: rgba(219,68,55,0.15); color: var(--error-color, #db4437); }
-.capexp-tag-fwdep { background: rgba(142,36,170,0.13); color: #6a1b78; }
-.capexp-report-line { font-size:0.85em; margin-top:8px; }
-.capexp-discovery-note { font-size:0.8em; margin-top:6px; padding:4px 8px; border-radius:6px;
-  background: rgba(76,154,255,0.10); color: #2f6fce; display:inline-block; }
-.capexp-goodfor { margin-top:8px; }
-.capexp-goodfor-tags { display:flex; flex-wrap:wrap; gap:5px; margin-top:3px; }
-.capexp-goodfor-tag { background: rgba(76,206,172,0.15); color: #1f7a63; }
-.capexp-fwgap-alert { margin-top:8px; padding:7px 10px; border-radius:8px; font-size:0.82em;
-  background: rgba(255,179,0,0.12); border:1px solid rgba(255,179,0,0.35); color: var(--primary-text-color); }
-.capexp-confidence-badge { display:inline-block; font-size:0.72em; padding:3px 9px; border-radius:10px;
-  white-space:nowrap; background: var(--divider-color, #e0e0e0); color: var(--secondary-text-color); }
-.capexp-confidence-strong-evidence { background: rgba(76,206,172,0.18); color: #2e9e83; }
-.capexp-confidence-well-confirmed { background: rgba(76,154,255,0.15); color: #2f6fce; }
-.capexp-confidence-repeated-observation { background: rgba(76,154,255,0.15); color: #2f6fce; }
-.capexp-confidence-single-observation { background: rgba(255,179,0,0.18); color: #b26a00; }
-.capexp-confidence-conflicting-evidence { background: rgba(219,68,55,0.15); color: var(--error-color, #db4437); }
-.capexp-device-detail { margin-top:10px; padding-top:8px; border-top:1px solid var(--divider-color, #e0e0e0);
-  display:flex; flex-direction:column; gap:10px; opacity:0.85; }
-.capexp-techlabel { font-size:0.7em; font-weight:600; text-transform:uppercase; letter-spacing:0.04em;
-  color: var(--secondary-text-color); margin-bottom:2px; }
-.capexp-entry-title { font-size:0.8em; font-weight:400; color: var(--secondary-text-color); margin-bottom:4px; }
-.capexp-nomatch-list { display:flex; flex-direction:column; gap:6px; }
-.capexp-nomatch-row { display:flex; align-items:center; justify-content:space-between; gap:10px;
-  padding:6px 10px; border-radius:8px; background: var(--secondary-background-color, #fafafa);
-  border:1px solid var(--divider-color, #eee); font-size:0.9em; }
-.capexp-search-example-group { margin-bottom:8px; }
-.capexp-search-example-category { font-size:0.72em; font-weight:600; text-transform:uppercase; letter-spacing:0.04em;
-  color: var(--secondary-text-color); margin-bottom:4px; }
-.capexp-search-examples { display:flex; flex-wrap:wrap; gap:6px; margin-bottom:2px; }
-.capexp-advanced-filters { margin:10px 0; }
-.capexp-advanced-filters summary { cursor:pointer; font-size:0.85em; font-weight:600; color: var(--secondary-text-color); }
-.capexp-search-form { display:flex; flex-wrap:wrap; gap:8px; margin-top:8px; margin-bottom:8px; }
-.capexp-search-form input, .capexp-search-form select { flex: 1 1 150px; min-width:120px; padding:6px 8px; border-radius:6px;
-  border:1px solid var(--divider-color, #ccc); background: var(--card-background-color); color: var(--primary-text-color); }
-.capexp-empty-search { padding:12px; border-radius:10px; background: var(--secondary-background-color, #fafafa);
-  border:1px solid var(--divider-color, #eee); }
-.capexp-empty-search p { margin: 0 0 6px; }
-.capexp-compare-form { display:flex; flex-wrap:wrap; gap:12px; margin-bottom:12px; }
-.capexp-compare-form label { display:flex; flex-direction:column; gap:4px; font-size:0.85em;
-  color: var(--secondary-text-color); flex: 1 1 160px; }
-.capexp-compare-form select { padding:6px 8px; border-radius:6px; border:1px solid var(--divider-color, #ccc);
-  background: var(--card-background-color); color: var(--primary-text-color); }
-.capexp-compare-my-device { margin:10px 0; padding:10px 12px; border-radius:10px;
-  background: var(--secondary-background-color, #fafafa); border:1px solid var(--divider-color, #eee);
-  display:flex; flex-direction:column; gap:6px; font-size:0.9em; }
-.capexp-compare-my-device.muted { color: var(--secondary-text-color); }
-.capexp-compare-my-device.capexp-compare-ok { border-color: var(--success-color, #2e7d32); }
-.capexp-compare-fw-row { display:flex; justify-content:space-between; gap:10px; }
-.capexp-compare-label { font-weight:600; font-size:0.85em; margin-top:2px; }
-.capexp-compare-list { list-style:none; margin:0; padding:0; display:flex; flex-direction:column; gap:4px; }
-.capexp-compare-list li { padding:2px 0; }
-.capexp-diff-wrap { display:flex; flex-direction:column; gap:6px; }
-.capexp-diff-row { padding:8px 10px; border-radius:8px; background: var(--secondary-background-color, #fafafa);
-  border:1px solid var(--divider-color, #eee); font-size:0.9em; }
-
-/* Narrow (phone) screens: stack the floor-plan sidebar above the map
-   instead of beside it, and trim padding so nothing forces extra width. */
-@media (max-width: 600px) {
-  .card { padding: 10px 10px 12px; }
-  .floorplan-layout { flex-direction: column; }
-  .fp-sidebar { width:100%; flex: 0 0 auto; max-height: 160px; }
-  .card.fullscreen #view-floorplan.active .fp-sidebar { max-height: 160px; }
-  .dialog-panel { width: min(560px, 96vw); padding: 12px 14px; }
-  .dialog-panel.wide { width: min(560px, 96vw); }
-  .ep-grid { grid-template-columns: 1fr; }
-  .capexp-search-form { flex-direction: column; }
-  .capexp-compare-form { flex-direction: column; }
-  .capexp-modes { flex-direction: column; }
-  .capexp-mode-btn { width: 100%; }
-}
-`;
-
-  // src/unbind-errors.js
-  function toolkitErrorText(err) {
-    const msg = err && (err.message || String(err)) || "";
-    return msg.replace(/^binds_remove_all failed:\s*/i, "").trim();
-  }
-  function explainUnbindFailure({ errors = [], targetRemoved = false } = {}) {
-    const real = [...new Set(errors.filter(Boolean))];
-    if (targetRemoved && (!real.length || real.some((e) => /keyerror|unknown error/i.test(e)))) {
-      return "zha-toolkit can't remove a binding to a device that's no longer in ZHA: it looks the removed device up, fails, and never sends the unbind (a known zha-toolkit bug, reported to its developer). Until it's fixed, these bindings stay. They only use a slot in the switch's binding table. If you need the slot now, pair the removed device again (it keeps its address), then unbind it normally.";
-    }
-    if (real.length) return `zha-toolkit said: ${real.slice(0, 2).join("; ")}${real.length > 2 ? " (and more)" : ""}.`;
-    return "";
-  }
-
-  // src/groups.js
-  function groupRows({ groups, bindings, classify, coordinatorIeee }) {
-    const coord = coordinatorIeee ? normIeee(coordinatorIeee) : null;
-    return (groups || []).map((g) => {
-      const groupId = Number(g.group_id);
-      const members = (g.members || []).filter((m) => m && m.device && m.device.ieee && normIeee(m.device.ieee) !== coord).map((m) => ({ ieee: normIeee(m.device.ieee), endpoint: Number(m.endpoint_id) }));
-      const byController = /* @__PURE__ */ new Map();
-      let others = 0;
-      for (const b of bindings || []) {
-        if (!b || !b.isGroup || Number(b.groupId) !== groupId) continue;
-        const cls = classify(b);
-        if (cls === "reporting" || cls === "manufacturer") {
-          others++;
-          continue;
-        }
-        const key = `${normIeee(b.sourceIeee)}:${Number(b.sourceEndpoint)}`;
-        if (!byController.has(key)) byController.set(key, { sourceIeee: normIeee(b.sourceIeee), endpoint: Number(b.sourceEndpoint), clusters: /* @__PURE__ */ new Set() });
-        byController.get(key).clusters.add(Number(b.clusterId));
-      }
-      const controllers = [...byController.values()].map((c) => ({ ...c, clusters: [...c.clusters].sort((a, b) => a - b) }));
-      return { groupId, name: g.name || `Group ${groupId}`, members, controllers, others };
-    }).sort((a, b) => a.name.localeCompare(b.name, void 0, { sensitivity: "base" }));
-  }
-  function groupUnbindPlan(groupId, bindings, { clustersFor = () => void 0 } = {}) {
-    const seen = /* @__PURE__ */ new Set();
-    const out = [];
-    const all = bindings || [];
-    for (const b of all) {
-      if (!b || !b.isGroup || Number(b.groupId) !== Number(groupId)) continue;
-      const op = { sourceIeee: normIeee(b.sourceIeee), endpoint: Number(b.sourceEndpoint), clusterId: Number(b.clusterId) };
-      const key = `${op.sourceIeee}:${op.endpoint}:${op.clusterId}`;
-      if (seen.has(key)) continue;
-      seen.add(key);
-      const clusters = clustersFor(op.sourceIeee);
-      const sends = (clusters || []).some((c) => c.type === "out" && Number(c.id) === op.clusterId && Number(c.endpoint_id) === op.endpoint);
-      if (sends || !clusters) {
-        op.method = "group";
-      } else {
-        const others = all.some(
-          (x) => x && normIeee(x.sourceIeee) === op.sourceIeee && Number(x.sourceEndpoint) === op.endpoint && Number(x.clusterId) === op.clusterId && !(x.isGroup && Number(x.groupId) === Number(groupId))
-        );
-        op.method = others ? "skip" : "remove";
-      }
-      out.push(op);
-    }
-    return out;
-  }
-  function noAnswerError(text) {
-    return !text || /unknown[_ ]error|no details|timeout|timed out|delivery|not ?responding|didn't answer|no answer|deliveryerror|mac_no_ack|nwk_route/i.test(text);
-  }
-  function groupDeleteReasons(devices) {
-    return devices.map((d) => {
-      if (d.skipped) {
-        return `${d.name}: it reports its own state to the group on a cluster it also uses for other bindings, and zha-toolkit can only remove them all together, so this one was left.`;
-      }
-      const errs = [...new Set((d.errors || []).filter(Boolean))];
-      if (!d.answered || errs.length && errs.every(noAnswerError)) {
-        return d.battery ? `${d.name} didn't answer: it's on battery, so wake it (press a button) and try again.` : `${d.name} didn't answer: it may be offline or switched off at the wall.`;
-      }
-      if (errs.length) return `${d.name}: zha-toolkit said ${errs.slice(0, 2).join("; ")}.`;
-      return `${d.name}: zha-toolkit reported success, but the binding is still there.`;
-    });
-  }
-  var groupIdHex = (id) => `0x${Number(id).toString(16).padStart(4, "0")}`;
-
-  // src/mesh.js
-  var LQI_RECOMMENDED = Object.freeze({ good: 150, weak: 80 });
-  var MAX_HOPS = 10;
-  function nwkNumber(value) {
-    if (typeof value === "number" && Number.isInteger(value) && value >= 0 && value <= 65535) return value;
-    if (typeof value === "string" && /^0x[0-9a-f]{1,4}$/i.test(value.trim())) return parseInt(value.trim(), 16);
-    return null;
-  }
-  function rateLqi(lqi, thr = LQI_RECOMMENDED) {
-    if (typeof lqi !== "number") return "unknown";
-    if (lqi >= thr.good) return "good";
-    if (lqi >= thr.weak) return "fair";
-    return "weak";
-  }
-  var RANK = { weak: 0, unknown: 1, fair: 2, good: 3 };
-  function linkKey(a, b) {
-    return a < b ? `${a}|${b}` : `${b}|${a}`;
-  }
-  function buildMesh(snapshot, devices = []) {
-    const snap = snapshot && typeof snapshot === "object" ? snapshot : {};
-    const nwkToIeee = /* @__PURE__ */ new Map();
-    const typeOf = /* @__PURE__ */ new Map();
-    for (const d of devices) {
-      const ieee = normIeee(d.ieee);
-      const n = nwkNumber(d.nwk);
-      if (n != null) nwkToIeee.set(n, ieee);
-      if (d.device_type) typeOf.set(ieee, d.device_type === "EndDevice" ? "EndDevice" : d.device_type);
-    }
-    const links = /* @__PURE__ */ new Map();
-    const parentOf = /* @__PURE__ */ new Map();
-    const children = /* @__PURE__ */ new Map();
-    let staleEntries = 0;
-    for (const [rawReporter, entry] of Object.entries(snap)) {
-      const reporter = normIeee(rawReporter);
-      for (const n of entry && entry.neighbours || []) {
-        const other = normIeee(n.ieee);
-        if (!other || other === reporter) continue;
-        if (n.nwk != null && !nwkToIeee.has(n.nwk)) nwkToIeee.set(n.nwk, other);
-        if (n.type && !typeOf.has(other)) typeOf.set(other, n.type);
-        const key = linkKey(reporter, other);
-        if (!links.has(key)) {
-          const [a, b] = reporter < other ? [reporter, other] : [other, reporter];
-          links.set(key, { a, b, heard: {} });
-        }
-        const usable = typeof n.lqi === "number" && n.lqi > 0;
-        links.get(key).heard[reporter] = usable ? n.lqi : null;
-        if (!usable) staleEntries++;
-        if (n.rel === "Child" && n.type === "EndDevice") {
-          parentOf.set(other, { parent: reporter, lqi: typeof n.lqi === "number" && n.lqi > 0 ? n.lqi : null });
-          children.set(reporter, (children.get(reporter) || 0) + 1);
-        }
-      }
-    }
-    for (const l of links.values()) {
-      const vals = Object.values(l.heard).filter((v) => typeof v === "number");
-      l.lqi = vals.length ? Math.min(...vals) : null;
-    }
-    const conflicts = addressConflicts(snap, devices);
-    return { snapshot: snap, nwkToIeee, typeOf, links, parentOf, children, staleEntries, conflicts };
-  }
-  function addressConflicts(snapshot, devices = []) {
-    const claims = /* @__PURE__ */ new Map();
-    const claim = (nwk, ieee) => {
-      if (nwk == null || !ieee) return;
-      if (!claims.has(nwk)) claims.set(nwk, /* @__PURE__ */ new Set());
-      claims.get(nwk).add(ieee);
-    };
-    let coord = null;
-    for (const d of devices) {
-      const ieee = normIeee(d.ieee);
-      if (d.device_type === "Coordinator") coord = ieee;
-      claim(nwkNumber(d.nwk), ieee);
-    }
-    for (const [rawReporter, entry] of Object.entries(snapshot || {})) {
-      const reporter = normIeee(rawReporter);
-      for (const n of entry && entry.neighbours || []) {
-        const ieee = normIeee(n.ieee);
-        if (!ieee || ieee === reporter || !(typeof n.lqi === "number" && n.lqi > 0)) continue;
-        claim(nwkNumber(n.nwk), ieee);
-      }
-    }
-    const out = [];
-    for (const [nwk, set] of claims.entries()) {
-      if (set.size < 2) continue;
-      const ieees = [...set].sort((a, b) => a === coord ? -1 : b === coord ? 1 : a.localeCompare(b));
-      out.push({ nwk, ieees, coordinator: nwk === 0 });
-    }
-    return out.sort((a, b) => a.nwk - b.nwk);
-  }
-  function linkBetween(mesh, a, b) {
-    return mesh.links.get(linkKey(normIeee(a), normIeee(b))) || null;
-  }
-  function isRouterLike(mesh, ieee) {
-    const t = mesh.typeOf.get(normIeee(ieee));
-    return t === "Router" || t === "Coordinator";
-  }
-  function ieeeToNwk(mesh, ieee) {
-    for (const [n, i] of mesh.nwkToIeee.entries()) if (i === ieee) return n;
-    return null;
-  }
-  function routePath(mesh, sourceIeee, targetIeee) {
-    const source = normIeee(sourceIeee);
-    const target = normIeee(targetIeee);
-    const hops = [];
-    const hop = (from, to) => {
-      const l = linkBetween(mesh, from, to);
-      hops.push({ from, to, lqi: l ? l.lqi : null });
-    };
-    if (source === target) return { status: "ok", hops, note: null };
-    let current = source;
-    if (!mesh.snapshot[source]) {
-      const p = mesh.parentOf.get(source);
-      if (!p) {
-        if (linkBetween(mesh, source, target)) {
-          hop(source, target);
-          return { status: "ok", hops, note: null };
-        }
-        return { status: "none", hops, note: "Its parent router isn't known: no router listed it as a child. Scan again, or wake it first." };
-      }
-      hop(source, p.parent);
-      current = p.parent;
-    }
-    const targetParent = !mesh.snapshot[target] && mesh.parentOf.get(target) ? mesh.parentOf.get(target).parent : null;
-    const visited = /* @__PURE__ */ new Set([current]);
-    for (let i = 0; i < MAX_HOPS; i++) {
-      if (current === target) return { status: "ok", hops, note: null };
-      if (targetParent && current === targetParent) {
-        hop(current, target);
-        return { status: "ok", hops, note: null };
-      }
-      const entry = mesh.snapshot[current];
-      if (!entry || !entry.ok) {
-        return { status: "partial", hops, note: `${current} wasn't read, so the path stops there.` };
-      }
-      const goal = targetParent || target;
-      const goalNwk = ieeeToNwk(mesh, goal);
-      const route = goalNwk == null ? null : (entry.routes || []).find((r) => r.dst === goalNwk && r.status === "Active");
-      let next = null;
-      if (route) {
-        next = mesh.nwkToIeee.get(route.next) || null;
-        if (!next) return { status: "partial", hops, note: `The next hop (0x${route.next.toString(16).padStart(4, "0")}) isn't a known device.` };
-      } else if ((entry.neighbours || []).some((n) => normIeee(n.ieee) === goal)) {
-        next = goal;
-      }
-      if (!next) {
-        return { status: hops.length ? "partial" : "none", hops, note: "No active route to the target in this router's routing table (routes appear after recent traffic)." };
-      }
-      if (visited.has(next)) return { status: "partial", hops, note: "The routing tables loop back on themselves; they're probably out of date." };
-      visited.add(next);
-      hop(current, next);
-      current = next;
-    }
-    return { status: "partial", hops, note: `Stopped after ${MAX_HOPS} hops.` };
-  }
-  function pathVerdict(path, thr = LQI_RECOMMENDED) {
-    if (!path || path.status === "none") return { level: "none", weakest: null };
-    let weakest = null;
-    for (const h of path.hops) {
-      if (typeof h.lqi !== "number") continue;
-      if (!weakest || h.lqi < weakest.lqi) weakest = h;
-    }
-    const anyUnknown = path.hops.some((h) => typeof h.lqi !== "number");
-    if (weakest && rateLqi(weakest.lqi, thr) === "weak") return { level: "weak", weakest };
-    if (path.status !== "ok" || anyUnknown) return { level: "unknown", weakest };
-    return { level: "good", weakest };
-  }
-  function bestRouterLink(mesh, ieee) {
-    const id = normIeee(ieee);
-    let best = null;
-    for (const l of mesh.links.values()) {
-      if (l.a !== id && l.b !== id) continue;
-      const other = l.a === id ? l.b : l.a;
-      if (!isRouterLike(mesh, other) || typeof l.lqi !== "number") continue;
-      if (!best || l.lqi > best.lqi) best = { other, lqi: l.lqi };
-    }
-    return best;
-  }
-  function groupCheck(mesh, sourceIeee, memberIeees) {
-    const src = normIeee(sourceIeee);
-    const p = mesh.parentOf.get(src);
-    return {
-      parent: p ? { parent: p.parent, lqi: p.lqi } : null,
-      sourceIsRouter: !!mesh.snapshot[src],
-      members: memberIeees.map((m) => ({ ieee: normIeee(m), best: bestRouterLink(mesh, m) }))
-    };
-  }
-  function visibleRouterLinks(mesh, thr = LQI_RECOMMENDED, perRouter = 3) {
-    const keep = /* @__PURE__ */ new Set();
-    const byRouter = /* @__PURE__ */ new Map();
-    for (const l of mesh.links.values()) {
-      if (typeof l.lqi !== "number" || !isRouterLike(mesh, l.a) || !isRouterLike(mesh, l.b)) continue;
-      for (const end of [l.a, l.b]) {
-        if (!byRouter.has(end)) byRouter.set(end, []);
-        byRouter.get(end).push(l);
-      }
-    }
-    for (const list2 of byRouter.values()) {
-      list2.sort((x, y) => y.lqi - x.lqi);
-      list2.slice(0, perRouter).forEach((l) => keep.add(l));
-    }
-    return [...keep];
-  }
-  function weakestLinks(mesh, limit = 10) {
-    return [...mesh.links.values()].filter((l) => typeof l.lqi === "number").sort((x, y) => x.lqi - y.lqi).slice(0, limit);
-  }
-  function meshSuggestions(mesh, { thr = LQI_RECOMMENDED, areaOf = () => "", nameOf = (i) => i, routers = [] } = {}) {
-    const out = [];
-    for (const c of mesh.conflicts || []) {
-      const hex2 = `0x${c.nwk.toString(16).padStart(4, "0")}`;
-      const others = c.coordinator ? c.ieees.filter((i) => mesh.typeOf.get(i) !== "Coordinator") : c.ieees;
-      out.push({
-        kind: c.coordinator ? "coordinator_address" : "address_conflict",
-        level: "error",
-        ieees: c.ieees,
-        text: c.coordinator ? `${others.map(nameOf).join(", ")} ${others.length === 1 ? "is" : "are"} using the coordinator's network address (${hex2}). A device doing this can flood or confuse the whole network: lights responding late or not at all, timeouts. Unplug it (or remove its battery), check whether the network recovers, then reset and pair it again.` : `${c.ieees.map(nameOf).join(" and ")} are using the same network address (${hex2}). Messages for one may go to the other. Scan again to confirm; if it stays, reset and pair one of them again.`
-      });
-    }
-    const routerSet = new Set(routers.map(normIeee));
-    for (const [child, p] of mesh.parentOf.entries()) {
-      if (rateLqi(p.lqi, thr) === "weak") {
-        out.push({
-          kind: "weak_parent",
-          level: "warning",
-          ieees: [child, p.parent],
-          text: `${nameOf(child)} hears its parent ${nameOf(p.parent)} poorly (LQI ${p.lqi}). A router nearer to it would help.`
-        });
-      }
-    }
-    const dependsOn = /* @__PURE__ */ new Map();
-    const consider = new Set(routerSet);
-    for (const dev of consider) {
-      const ok = [];
-      for (const l of mesh.links.values()) {
-        if (l.a !== dev && l.b !== dev) continue;
-        const other = l.a === dev ? l.b : l.a;
-        if (!isRouterLike(mesh, other)) continue;
-        if (RANK[rateLqi(l.lqi, thr)] >= RANK.fair) ok.push(other);
-      }
-      if (ok.length === 1) {
-        if (!dependsOn.has(ok[0])) dependsOn.set(ok[0], []);
-        dependsOn.get(ok[0]).push(dev);
-      }
-    }
-    for (const [router, devs] of dependsOn.entries()) {
-      if (devs.length === 1 || mesh.typeOf.get(router) === "Coordinator") {
-        for (const dev of devs) {
-          const l = linkBetween(mesh, dev, router);
-          out.push({
-            kind: "single_link",
-            level: "warning",
-            ieees: [dev, router],
-            text: `${nameOf(dev)} has only one usable link (to ${nameOf(router)}, ${rateLqi(l && l.lqi, thr)} ${l && l.lqi}). A router nearer to it would give it a second route.`
-          });
-        }
-        continue;
-      }
-      out.push({
-        kind: "single_point",
-        level: "warning",
-        ieees: [router, ...devs],
-        text: `Single point of failure: ${devs.length} routers have no other good or fair link than ${nameOf(router)} (${devs.map(nameOf).join(", ")}). If it goes offline, they lose their way to the rest of the mesh.`
-      });
-    }
-    for (const r of routerSet) {
-      const best = bestRouterLink(mesh, r);
-      if (best && rateLqi(best.lqi, thr) === "weak") {
-        out.push({
-          kind: "isolated_router",
-          level: "warning",
-          ieees: [r],
-          text: `${nameOf(r)} has no good or fair link to another router (best LQI ${best.lqi}).`
-        });
-      }
-    }
-    for (const [router, n] of mesh.children.entries()) {
-      if (n >= 3) {
-        const kids = [...mesh.parentOf.entries()].filter(([, p]) => p.parent === router).map(([c]) => nameOf(c));
-        out.push({
-          kind: "many_children",
-          level: "info",
-          ieees: [router],
-          text: `${nameOf(router)} is the parent of ${n} battery devices (${kids.join(", ")}). If it's switched off at the wall, they lose contact until they find a new parent.`
-        });
-      }
-    }
-    const areas = /* @__PURE__ */ new Map();
-    for (const ieee of mesh.typeOf.keys()) {
-      const a = areaOf(ieee);
-      if (!a) continue;
-      if (!areas.has(a)) areas.set(a, { routers: 0, devices: 0 });
-      const e = areas.get(a);
-      e.devices++;
-      if (isRouterLike(mesh, ieee)) e.routers++;
-    }
-    for (const [area, e] of areas.entries()) {
-      if (e.devices >= 1 && e.routers === 0) {
-        out.push({ kind: "area_without_router", level: "info", ieees: [], text: `${area} has ${e.devices} Zigbee device${e.devices === 1 ? "" : "s"} but no router.` });
-      }
-    }
-    const order = { error: 0, warning: 1, info: 2 };
-    return out.sort((x, y) => order[x.level] - order[y.level]);
-  }
-
-  // src/table-filter.js
-  var DIRECTION_ALL = "all";
-  var DIRECTION_OUTBOUND = "outbound";
-  var DIRECTION_INBOUND = "inbound";
-  function bindingDirection(b, ieee) {
-    if (!ieee) return null;
-    if (b.sourceIeee === ieee) return DIRECTION_OUTBOUND;
-    if (!b.isGroup && b.targetIeee === ieee && b.sourceIeee !== ieee) return DIRECTION_INBOUND;
-    return null;
-  }
-  function matchesDeviceFilter(b, ieee, direction = DIRECTION_ALL) {
-    if (!ieee) return true;
-    const dir = bindingDirection(b, ieee);
-    if (!dir) return false;
-    return direction === DIRECTION_ALL || direction === dir;
-  }
-  function directionRank(dir) {
-    return dir === DIRECTION_OUTBOUND ? 0 : dir === DIRECTION_INBOUND ? 1 : 2;
-  }
-  function directionLabel(dir) {
-    return dir === DIRECTION_OUTBOUND ? "\u2192 Outbound" : dir === DIRECTION_INBOUND ? "\u2190 Inbound" : "";
-  }
-  function emptyTableState({
-    total,
-    rawTotal,
-    deviceFilterActive,
-    deviceMatches,
-    direction,
-    deviceName,
-    coordinatorHidden,
-    healthFilterLabel,
-    search
-  }) {
-    const scanned = rawTotal != null ? rawTotal : total;
-    if (!scanned) {
-      return { kind: "not-scanned", message: 'No bindings loaded yet. Click "Scan bindings" above.' };
-    }
-    if (!total) {
-      return {
-        kind: "coordinator-hidden",
-        message: `All ${scanned} scanned binding${scanned === 1 ? "" : "s"} target${scanned === 1 ? "s" : ""} the coordinator, and "Hide coordinator bindings" is on in the Map filters. Untick it to see ${scanned === 1 ? "it" : "them"}.`
-      };
-    }
-    if (deviceFilterActive && !deviceMatches) {
-      const what = direction === DIRECTION_OUTBOUND ? `No outbound bindings from ${deviceName}.` : direction === DIRECTION_INBOUND ? `No inbound bindings to ${deviceName}.` : `No bindings involve ${deviceName}.`;
-      if (coordinatorHidden) {
-        return {
-          kind: "device-filter",
-          message: `${what} Bindings that target the coordinator are hidden by "Hide coordinator bindings" in the Map filters. Untick it to see them.`
-        };
-      }
-      const hidden = `The filter is hiding ${total} other binding${total === 1 ? "" : "s"}. Clear the filter to see ${total === 1 ? "it" : "them"}.`;
-      return { kind: "device-filter", message: `${what} ${hidden}` };
-    }
-    const reasons = [];
-    if (healthFilterLabel) reasons.push(`the "${healthFilterLabel}" health filter`);
-    if (search) reasons.push(`the search "${search}"`);
-    return {
-      kind: "other-filters",
-      message: reasons.length ? `No bindings match ${reasons.join(" and ")}. ${total} binding${total === 1 ? " is" : "s are"} hidden.` : "No bindings match the current filters."
-    };
-  }
-  function deviceNameText(d) {
-    if (!d) return "";
-    return [d.user_given_name, d.name].filter(Boolean).join(" ").toLowerCase();
-  }
-  var MIN_AUTO_FILTER_SEARCH_LENGTH = 3;
-  function findSingleDeviceBySearch(devices, search) {
-    const s = (search || "").trim().toLowerCase();
-    if (s.length < MIN_AUTO_FILTER_SEARCH_LENGTH) return null;
-    const matches = (devices || []).filter((d) => deviceNameText(d).includes(s));
-    return matches.length === 1 ? matches[0] : null;
-  }
 
   // src/capexplorer.js
   function slugify(s) {
@@ -3399,11 +1507,11 @@ a.btn { display:inline-block; text-decoration:none; }
     const discoveries = [];
     const byDevice = groupByDevice(index);
     let mostConfirmed = null;
-    byDevice.forEach((entries, deviceKey) => {
+    byDevice.forEach((entries, deviceKey2) => {
       if (!entries[0].manufacturer || !entries[0].model) return;
       const total = entries.reduce((sum, e) => sum + (e.scan_count || 0), 0);
       if (total >= minScansForMostConfirmed && (!mostConfirmed || total > mostConfirmed.total)) {
-        mostConfirmed = { deviceKey, manufacturer: entries[0].manufacturer, model: entries[0].model, total };
+        mostConfirmed = { deviceKey: deviceKey2, manufacturer: entries[0].manufacturer, model: entries[0].model, total };
       }
     });
     if (mostConfirmed) {
@@ -3415,11 +1523,11 @@ a.btn { display:inline-block; text-decoration:none; }
       });
     }
     let mostFirmware = null;
-    byDevice.forEach((entries, deviceKey) => {
+    byDevice.forEach((entries, deviceKey2) => {
       if (!entries[0].manufacturer || !entries[0].model) return;
       const versions = firmwareVersions(entries);
       if (versions.length >= minFirmwareVariety && (!mostFirmware || versions.length > mostFirmware.count)) {
-        mostFirmware = { deviceKey, manufacturer: entries[0].manufacturer, model: entries[0].model, count: versions.length };
+        mostFirmware = { deviceKey: deviceKey2, manufacturer: entries[0].manufacturer, model: entries[0].model, count: versions.length };
       }
     });
     if (mostFirmware) {
@@ -3431,12 +1539,12 @@ a.btn { display:inline-block; text-decoration:none; }
       });
     }
     let fwDependentExample = null;
-    byDevice.forEach((entries, deviceKey) => {
+    byDevice.forEach((entries, deviceKey2) => {
       if (!entries[0].manufacturer || !entries[0].model) return;
       if (entries.some((e) => (e.scan_count || 0) < minScansForFwDependent)) return;
       const changed = firmwareDependentCapabilities(entries);
       if (changed.size && !fwDependentExample) {
-        fwDependentExample = { deviceKey, manufacturer: entries[0].manufacturer, model: entries[0].model, names: [...changed] };
+        fwDependentExample = { deviceKey: deviceKey2, manufacturer: entries[0].manufacturer, model: entries[0].model, names: [...changed] };
       }
     });
     if (fwDependentExample) {
@@ -3540,7 +1648,2832 @@ a.btn { display:inline-block; text-decoration:none; }
     return result;
   }
 
+  // src/device-answers.js
+  var QUESTIONS_URL = `https://raw.githubusercontent.com/${CAPABILITY_DB_REPO}/main/data/questions.json`;
+  var ANSWERS_URL = `https://raw.githubusercontent.com/${CAPABILITY_DB_REPO}/main/data/answers.json`;
+  var ISSUE_FORM_URL = `https://github.com/${CAPABILITY_DB_REPO}/issues/new?template=device-answers.yml`;
+  var ids = (clusters, type) => new Set((clusters || []).filter((c) => c && c.type === type).map((c) => Number(c.id)));
+  function detectDeviceType(clusters, powerSource = "") {
+    const inn = ids(clusters, "in");
+    const out = ids(clusters, "out");
+    const battery = /battery/i.test(String(powerSource || ""));
+    if (inn.has(258)) return "cover";
+    if (inn.has(768) || inn.has(8) && inn.has(6) && !out.has(6)) return "light";
+    const sends = [6, 8, 5, 258, 768].some((id) => out.has(id));
+    if (inn.has(6) && sends) return "wall_switch";
+    if (sends && !inn.has(6)) return battery || !inn.size || inn.size < 6 ? "remote" : "wall_switch";
+    if (inn.has(6)) return "plug";
+    if ([1280, 1030, 1026, 1029, 1024, 1027, 1037, 1066].some((id) => inn.has(id))) return "sensor";
+    return "other";
+  }
+  function useAnswers(q, deviceType) {
+    return (q && q.use && q.use.answers_by_type || {})[deviceType] || [];
+  }
+  function questionsFor(q, deviceType, use, { firmwareChanged = false } = {}) {
+    return (q && q.questions || []).filter(
+      (x) => (x.types || []).includes(deviceType) && (!x.uses || !use || use === "other" || x.uses.includes(use)) && (!x.after_firmware_change || firmwareChanged)
+    );
+  }
+  function formQuestions(q, deviceType, use, { firmwareChanged = false, battery = null, limit = 8 } = {}) {
+    let list2 = questionsFor(q, deviceType, use, { firmwareChanged });
+    if (battery === false) list2 = list2.filter((x) => x.topic !== "battery");
+    const specific = list2.filter((x) => x.uses);
+    const general = list2.filter((x) => !x.uses);
+    const ordered = [...specific, ...general];
+    return { main: ordered.slice(0, limit), more: ordered.slice(limit) };
+  }
+  function cleanText(value, max = 280) {
+    if (typeof value !== "string") return "";
+    let s = value.replace(/\b[0-9a-f]{2}(?::[0-9a-f]{2}){7}\b/gi, "[address]").replace(/\b0x[0-9a-f]{9,}\b/gi, "[address]").replace(/\b\d{1,3}(?:\.\d{1,3}){3}\b/g, "[address]").replace(/[\w.+-]+@[\w-]+(?:\.[\w-]+)+/g, "[e-mail]").replace(/\bhttps?:\/\/\S+/gi, "[link]").replace(/\bwww\.\S+/gi, "[link]").replace(/[<>]/g, "").replace(/\s+/g, " ").trim();
+    if (s.length > max) s = s.slice(0, max - 1).trimEnd() + "\u2026";
+    return s;
+  }
+  function firmwareKey(fw) {
+    if (!fw) return "unknown";
+    return String(fw.sw_build_id || fw.registry_sw_version || "unknown");
+  }
+  function buildRecord(q, device, firmware, draft, cardVersion, nowIso = (/* @__PURE__ */ new Date()).toISOString()) {
+    const max = q && q.free_text_max || 280;
+    const applicable = new Set(questionsFor(q, draft.deviceType, draft.use, { firmwareChanged: !!draft.firmwareChanged }).map((x) => x.id));
+    const answers = {};
+    const other = {};
+    for (const [qid, aid] of Object.entries(draft.answers || {})) {
+      if (!applicable.has(qid) || !aid) continue;
+      if (aid === "other") {
+        const t = cleanText((draft.other || {})[qid], max);
+        if (!t) continue;
+        other[qid] = t;
+      }
+      answers[qid] = aid;
+    }
+    if (draft.use === "other") {
+      const t = cleanText((draft.other || {}).use, max);
+      if (t) other.use = t;
+    }
+    const fw = {};
+    if (firmware && firmware.sw_build_id) fw.sw_build_id = String(firmware.sw_build_id);
+    if (firmware && firmware.registry_sw_version) fw.registry_sw_version = String(firmware.registry_sw_version);
+    const record = {
+      kind: "device_answers",
+      schema: 1,
+      questions_version: q && q.version || 1,
+      manufacturer: device.manufacturer || "",
+      model: device.model || "",
+      firmware: fw,
+      device_type: draft.deviceType,
+      use: draft.use,
+      answers
+    };
+    if (Object.keys(other).length) record.other = other;
+    if (Number.isInteger(draft.rating)) record.rating = draft.rating;
+    const tip = cleanText(draft.tip, max);
+    if (tip) record.tip = tip;
+    const context = {};
+    for (const [k, v] of Object.entries(draft.context || {})) if (v) context[k] = v;
+    if (Object.keys(context).length) record.context = context;
+    record.card_version = cardVersion;
+    record.provenance = { submitted_at: nowIso };
+    return record;
+  }
+  function draftProblem(q, firmware, draft) {
+    if (!firmware || !firmware.sw_build_id && !firmware.registry_sw_version) return "The firmware version isn't known yet.";
+    if (!draft.deviceType) return "Choose what kind of device it is.";
+    if (!draft.use) return "Choose what you use it for.";
+    if (draft.use === "other" && !cleanText((draft.other || {}).use)) return 'Say what you use it for (you chose "Other").';
+    const answered = Object.values(draft.answers || {}).filter(Boolean).length;
+    if (!answered && !Number.isInteger(draft.rating)) return "Answer at least one question, or rate it.";
+    return "";
+  }
+  function issueUrl(record) {
+    const title = `[Device Answers] ${record.manufacturer} ${record.model} (fw ${firmwareKey(record.firmware)})`;
+    const body = "Shared from ZHA Bindings Manager's device panel. Answers are kept per firmware; free text is reviewed before it's shown.\n\n```json\n" + JSON.stringify(record, null, 2) + "\n```";
+    return `https://github.com/${CAPABILITY_DB_REPO}/issues/new?title=${encodeURIComponent(title)}&body=${encodeURIComponent(
+      body
+    )}&labels=${encodeURIComponent("device-answers")}`;
+  }
+  function deviceKey(device) {
+    return `${slugify(device && device.manufacturer)}/${slugify(device && device.model)}`;
+  }
+  function answersForFirmware(answersDoc, device, firmware) {
+    const dev = answersDoc && answersDoc[deviceKey(device)];
+    if (!dev) return { here: null, hereKey: null, others: [], total: 0 };
+    const keys = Object.keys(dev.by_firmware || {});
+    const want = [firmware && firmware.sw_build_id, firmware && firmware.registry_sw_version].filter(Boolean).map(String);
+    const hereKey = keys.find((k) => want.includes(k)) || null;
+    return {
+      here: hereKey ? dev.by_firmware[hereKey] : null,
+      hereKey,
+      others: keys.filter((k) => k !== hereKey).map((k) => ({ firmware: k, total: dev.by_firmware[k].total || 0 })),
+      total: dev.total || 0
+    };
+  }
+  function summaryLines(q, fwEntry) {
+    if (!fwEntry) return [];
+    const labelOf = (list2, id) => ((list2 || []).find((a) => a.id === id) || {}).label || id;
+    const allUses = Object.values(q && q.use && q.use.answers_by_type || {}).flat();
+    return Object.entries(fwEntry.by_use || {}).sort((a, b) => b[1].count - a[1].count).map(([use, u]) => {
+      const ratingCount = Object.values(u.ratings || {}).reduce((a, b) => a + b, 0);
+      const questions = (q && q.questions || []).filter((x) => u.answers && u.answers[x.id]).map((x) => {
+        const counts = Object.entries(u.answers[x.id]).sort((a, b) => b[1] - a[1]);
+        const n = counts.reduce((a, [, c]) => a + c, 0);
+        return {
+          id: x.id,
+          text: x.text,
+          n,
+          answers: counts.map(([aid, c]) => ({ label: aid === "other" ? (x.other_label || "Other").replace(/\s*\(tell us\)/i, "") : labelOf(x.answers, aid), count: c }))
+        };
+      });
+      return {
+        use,
+        useLabel: use === "other" ? "Something else" : labelOf(allUses, use),
+        count: u.count,
+        rating: u.rating_average,
+        ratingCount,
+        ratings: u.ratings || {},
+        questions,
+        tips: (u.tips || []).slice(0, 5)
+      };
+    });
+  }
+  function answerCountsText(question) {
+    return question.answers.map((a, i) => i === 0 ? `${a.count} of ${question.n}: ${a.label}` : `${a.count}: ${a.label}`).join(" \xB7 ");
+  }
+  var TTL = 6 * 60 * 60 * 1e3;
+  var _memory = {};
+  async function fetchCached(url, cacheKey, { force = false, fallback = null } = {}) {
+    if (!force && _memory[cacheKey]) return _memory[cacheKey];
+    if (!force) {
+      try {
+        const raw = JSON.parse(localStorage.getItem(cacheKey) || "null");
+        if (raw && raw.doc && typeof raw.at === "number" && Date.now() - raw.at < TTL) return _memory[cacheKey] = raw.doc;
+      } catch (e) {
+      }
+    }
+    const res = await fetch(url, { cache: "no-store" });
+    if (res.status === 404 && fallback) return _memory[cacheKey] = fallback;
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const doc = await res.json();
+    _memory[cacheKey] = doc;
+    try {
+      localStorage.setItem(cacheKey, JSON.stringify({ at: Date.now(), doc }));
+    } catch (e) {
+    }
+    return doc;
+  }
+  async function fetchQuestions(opts = {}) {
+    const q = await fetchCached(QUESTIONS_URL, "zha-capability-explorer:questions", { ...opts, fallback: { none: true } });
+    return q && q.none ? null : q;
+  }
+  async function fetchAnswersDoc(opts = {}) {
+    return fetchCached(ANSWERS_URL, "zha-capability-explorer:answers", { ...opts, fallback: {} });
+  }
+
+  // src/replace.js
+  function replacementCandidates(devices, old, { coordinatorIeee = null, typeOf = () => null, nameOf = (d) => d.name || d.ieee } = {}) {
+    const oldIeee = normIeee(old.ieee || "");
+    const coord = coordinatorIeee ? normIeee(coordinatorIeee) : null;
+    const oldType = typeOf(old);
+    const score = (d) => d.manufacturer && d.model && d.manufacturer === old.manufacturer && d.model === old.model ? 0 : oldType && typeOf(d) === oldType ? 1 : 2;
+    return (devices || []).filter((d) => d && d.ieee && normIeee(d.ieee) !== oldIeee && normIeee(d.ieee) !== coord && d.device_type !== "Coordinator").map((d) => ({ device: d, rank: score(d) })).sort((a, b) => a.rank - b.rank || String(nameOf(a.device)).localeCompare(String(nameOf(b.device)))).map(({ device, rank }) => ({ device, why: rank === 0 ? "same model" : rank === 1 ? "same kind of device" : "" }));
+  }
+  var confirmedByCluster = (index, dev) => {
+    const out = /* @__PURE__ */ new Map();
+    const m = slugify(dev && dev.manufacturer);
+    const mo = slugify(dev && dev.model);
+    for (const e of index || []) {
+      if (e.manufacturer_slug !== m || e.model_slug !== mo) continue;
+      for (const [hex2, c] of Object.entries(e.clusters || {})) {
+        const key = hex2.toLowerCase();
+        const cur = out.get(key) || { present: /* @__PURE__ */ new Set(), checked: false };
+        if ((c.commands_received_scan_count || 0) > 0) cur.checked = true;
+        for (const r of c.commands_received || []) if (r.present === true) cur.present.add(r.name);
+        out.set(key, cur);
+      }
+    }
+    return out;
+  };
+  function commandGaps(index, oldDev, newDev, clusterIds) {
+    const oldC = confirmedByCluster(index, oldDev);
+    const newC = confirmedByCluster(index, newDev);
+    const gaps = [];
+    let unknown = !oldC.size || !newC.size;
+    for (const id of clusterIds || []) {
+      const hex2 = `0x${Number(id).toString(16).padStart(4, "0")}`;
+      const o = oldC.get(hex2);
+      const n = newC.get(hex2);
+      if (!o || !o.checked || !n || !n.checked) {
+        unknown = true;
+        continue;
+      }
+      const missing = [...o.present].filter((name) => !n.present.has(name)).sort();
+      if (missing.length) gaps.push({ clusterId: Number(id), missing });
+    }
+    return { gaps, unknown };
+  }
+  var VERDICT = {
+    all: { level: "success", icon: "\u2705", text: "Can do everything the old device did." },
+    most: { level: "warning", icon: "\u26A0", text: "Can do most of it. What it can't do is unticked below." },
+    none: { level: "error", icon: "\u274C", text: "Not suitable: it can't do what the old device did." },
+    unknown: { level: "info", icon: "\u2139", text: "The new device's clusters aren't known yet, so nothing could be checked." },
+    nothing: { level: "info", icon: "\u2139", text: "Nothing to copy: no bindings to or from the old device, and no groups, in the saved scans." }
+  };
+  var RESULT_LABEL = {
+    confirmed: "\u2705 confirmed",
+    rejected: "\u274C not accepted",
+    waiting: "\u23F3 waiting for a button press",
+    added: "\u2705 added",
+    failed: "\u274C failed"
+  };
+  function defaultSelection(plan) {
+    return new Set((plan && plan.items || []).filter((i) => i.ok !== false && i.new_ep != null).map((i) => i.id));
+  }
+  function runSummary(results) {
+    const v = Object.values(results || {});
+    const n = (s) => v.filter((x) => x === s).length;
+    const parts = [];
+    if (n("confirmed") + n("added")) parts.push(`${n("confirmed") + n("added")} copied and confirmed`);
+    if (n("waiting")) parts.push(`${n("waiting")} waiting for a button press on a battery device (they go on automatically when it wakes up)`);
+    if (n("rejected") + n("failed")) parts.push(`${n("rejected") + n("failed")} not accepted`);
+    return { level: n("rejected") + n("failed") ? "warning" : n("waiting") ? "info" : "success", text: parts.join(", ") || "Nothing was copied." };
+  }
+
+  // src/questions.json
+  var questions_default = {
+    schema: 1,
+    version: 1,
+    about: "Questions about how a Zigbee device behaves in real use: things a capability scan can't show. Shared by every tool that asks them (ZHA Bindings Manager, the issue form, the website). Answers are stored per firmware and per use in each device file under device_answers and summarised in data/answers.json. Ids never change meaning: reword a question freely, but add a new id for a different question.",
+    free_text_max: 280,
+    device_types: [
+      { id: "remote", label: "Remote, button or battery switch (sends commands, no load)" },
+      { id: "wall_switch", label: "Wall switch or rocker with a relay (can switch a load)" },
+      { id: "light", label: "Light, bulb or LED driver" },
+      { id: "plug", label: "Plug, socket or in-line relay" },
+      { id: "cover", label: "Blind, curtain or shutter motor" },
+      { id: "sensor", label: "Sensor (motion, contact, temperature, leak\u2026)" },
+      { id: "other", label: "Something else" }
+    ],
+    context: [
+      {
+        id: "system",
+        text: "Which Zigbee system do you use it with?",
+        answers: [
+          { id: "zha", label: "ZHA (Home Assistant)" },
+          { id: "z2m", label: "Zigbee2MQTT" },
+          { id: "deconz", label: "deCONZ / Phoscon" },
+          { id: "hub", label: "A vendor hub (Hue, IKEA, Aqara\u2026)" },
+          { id: "other", label: "Something else" }
+        ]
+      },
+      {
+        id: "coordinator",
+        text: "What chip is your coordinator?",
+        help: "Some behaviour depends on the coordinator, not the device.",
+        answers: [
+          { id: "silabs", label: "Silicon Labs (EFR32 / EmberZNet, e.g. Sonoff Dongle-E/M, SkyConnect, ZBT-1)" },
+          { id: "ti", label: "Texas Instruments (CC2652 / CC1352, e.g. Sonoff Dongle-P)" },
+          { id: "conbee", label: "ConBee / RaspBee" },
+          { id: "other", label: "Something else" },
+          { id: "not_sure", label: "Not sure" }
+        ]
+      },
+      {
+        id: "owned_for",
+        text: "How long have you had it?",
+        answers: [
+          { id: "lt_month", label: "Less than a month" },
+          { id: "lt_year", label: "1 to 12 months" },
+          { id: "gt_year", label: "Over a year" }
+        ]
+      }
+    ],
+    use: {
+      id: "use",
+      text: "What do you use this one for?",
+      help: "Answer for this one device. Everything else is read in the light of it: a rocker can be great as a wired switch and poor as a remote.",
+      allow_other: true,
+      answers_by_type: {
+        remote: [
+          { id: "control_lights", label: "Controlling lights directly (bound to them or to a group)" },
+          { id: "automations", label: "Buttons for automations only" },
+          { id: "scenes", label: "Scene controller" }
+        ],
+        wall_switch: [
+          { id: "wired_own_load", label: "Wired, switching its own light" },
+          { id: "decoupled_smart_bulbs", label: "Wired, button separated from the relay, controlling smart bulbs" },
+          { id: "remote_only", label: "Not switching a load: used as a remote" },
+          { id: "automations", label: "Buttons for automations only" }
+        ],
+        light: [
+          { id: "main_light", label: "Main room light" },
+          { id: "lamp", label: "Lamp" },
+          { id: "accent", label: "Accent, strip or spot" },
+          { id: "outdoor", label: "Outdoor" }
+        ],
+        plug: [
+          { id: "lamp", label: "A lamp" },
+          { id: "appliance", label: "An appliance" },
+          { id: "power_monitoring", label: "Mainly measuring power" },
+          { id: "router", label: "Mainly as a router (repeater)" }
+        ],
+        cover: [
+          { id: "blind", label: "Roller or venetian blind" },
+          { id: "curtain", label: "Curtain" },
+          { id: "shutter", label: "Shutter or garage door" }
+        ],
+        sensor: [
+          { id: "lighting", label: "Switching lights" },
+          { id: "security", label: "Security or alarm" },
+          { id: "climate", label: "Heating or climate" },
+          { id: "leak", label: "Leak or safety" }
+        ],
+        other: [
+          { id: "general", label: "General use" }
+        ]
+      }
+    },
+    questions: [
+      {
+        id: "stays_connected",
+        topic: "connection",
+        text: "Does it stay connected?",
+        types: ["remote", "wall_switch", "light", "plug", "cover", "sensor", "other"],
+        answers: [
+          { id: "always", label: "Always" },
+          { id: "drops_occasionally", label: "Drops off occasionally" },
+          { id: "drops_often", label: "Drops off often" }
+        ]
+      },
+      {
+        id: "routers",
+        topic: "connection",
+        text: "Which routers does it work through?",
+        help: "Some devices only stay connected through certain brands of router, or only directly to the coordinator.",
+        types: ["remote", "sensor", "other"],
+        answers: [
+          { id: "any", label: "Any router" },
+          { id: "some_brands", label: "Only some brands" },
+          { id: "coordinator_only", label: "Only directly to the coordinator" },
+          { id: "not_sure", label: "Not sure" }
+        ]
+      },
+      {
+        id: "rejoins",
+        topic: "connection",
+        text: "If it drops off, does it come back?",
+        types: ["remote", "wall_switch", "light", "plug", "cover", "sensor", "other"],
+        answers: [
+          { id: "by_itself", label: "Yes, by itself" },
+          { id: "after_press", label: "After a button press" },
+          { id: "needs_repair", label: "Only by pairing it again" },
+          { id: "never_dropped", label: "It has never dropped" }
+        ]
+      },
+      {
+        id: "pairing",
+        topic: "pairing",
+        text: "Did pairing work as the manual says?",
+        types: ["remote", "wall_switch", "light", "plug", "cover", "sensor", "other"],
+        allow_other: true,
+        other_label: "It needed a trick (tell us)",
+        answers: [
+          { id: "first_time", label: "First time" },
+          { id: "several_tries", label: "Took several tries" }
+        ]
+      },
+      {
+        id: "direct_control",
+        topic: "direct_control",
+        text: "Does it control lights directly when your Zigbee system or Home Assistant is off?",
+        help: "Bound straight to the lights, not through an automation.",
+        types: ["remote", "wall_switch"],
+        uses: ["control_lights", "scenes", "decoupled_smart_bulbs", "remote_only"],
+        answers: [
+          { id: "yes", label: "Yes, bound to the lights" },
+          { id: "group_only", label: "Only through a group" },
+          { id: "no", label: "No" },
+          { id: "didnt_try", label: "Didn't try" }
+        ]
+      },
+      {
+        id: "press_sends",
+        topic: "direct_control",
+        text: "What does a press send?",
+        help: "With Toggle, two remotes on the same light can get out of step; separate On and Off can't.",
+        types: ["remote", "wall_switch"],
+        uses: ["control_lights", "scenes", "decoupled_smart_bulbs", "remote_only"],
+        answers: [
+          { id: "toggle", label: "Toggle" },
+          { id: "on_and_off", label: "Separate On and Off" },
+          { id: "depends_on_mode", label: "Depends on a mode setting" },
+          { id: "not_sure", label: "Not sure" }
+        ]
+      },
+      {
+        id: "needed_setting",
+        topic: "direct_control",
+        text: "Did it need a setting changed before it controlled lights directly?",
+        types: ["remote", "wall_switch"],
+        uses: ["control_lights", "scenes", "decoupled_smart_bulbs", "remote_only"],
+        allow_other: true,
+        other_label: "Yes, something else (tell us)",
+        answers: [
+          { id: "no", label: "No" },
+          { id: "mode_setting", label: "Yes, a mode setting" },
+          { id: "button_sequence", label: "Yes, a button sequence" },
+          { id: "never_worked", label: "It never worked" },
+          { id: "not_sure", label: "Not sure" }
+        ]
+      },
+      {
+        id: "presses_arrive",
+        topic: "direct_control",
+        text: "Does every press arrive?",
+        types: ["remote", "wall_switch"],
+        uses: ["control_lights", "scenes", "decoupled_smart_bulbs", "remote_only", "automations"],
+        answers: [
+          { id: "always", label: "Always" },
+          { id: "sometimes_missed", label: "Sometimes missed" },
+          { id: "often_missed", label: "Often missed" }
+        ]
+      },
+      {
+        id: "hold_to_dim",
+        topic: "direct_control",
+        text: "Does holding a button dim the lights?",
+        types: ["remote", "wall_switch"],
+        uses: ["control_lights", "scenes", "decoupled_smart_bulbs", "remote_only"],
+        answers: [
+          { id: "works", label: "Yes" },
+          { id: "no", label: "No" },
+          { id: "no_dim_buttons", label: "It has no dim buttons" },
+          { id: "not_sure", label: "Not sure" }
+        ]
+      },
+      {
+        id: "keeps_bindings",
+        topic: "direct_control",
+        text: "Does it keep its bindings after a battery change, power cut or firmware update?",
+        types: ["remote", "wall_switch"],
+        uses: ["control_lights", "scenes", "decoupled_smart_bulbs", "remote_only"],
+        answers: [
+          { id: "yes", label: "Yes" },
+          { id: "lost_them", label: "It lost them" },
+          { id: "not_seen", label: "Haven't had one yet" }
+        ]
+      },
+      {
+        id: "decoupled",
+        topic: "relay",
+        text: "Can the button be separated from the relay (decoupled mode)?",
+        types: ["wall_switch"],
+        allow_other: true,
+        other_label: "Yes, another way (tell us)",
+        answers: [
+          { id: "system_setting", label: "Yes, a setting in my Zigbee system" },
+          { id: "button_sequence", label: "Yes, a button sequence on the device" },
+          { id: "no", label: "No" },
+          { id: "not_sure", label: "Not sure" }
+        ]
+      },
+      {
+        id: "wiring",
+        topic: "relay",
+        text: "How is it wired?",
+        types: ["wall_switch"],
+        answers: [
+          { id: "with_neutral", label: "With neutral" },
+          { id: "no_neutral_fine", label: "Without neutral, works fine" },
+          { id: "no_neutral_problems", label: "Without neutral, flickers or has problems" },
+          { id: "battery", label: "Battery, not wired" }
+        ]
+      },
+      {
+        id: "power_on",
+        topic: "power_cut",
+        text: "What does it do after a power cut?",
+        help: "Many devices list a power-on setting that they don't actually honour.",
+        types: ["light", "plug", "wall_switch"],
+        uses: ["main_light", "lamp", "accent", "outdoor", "appliance", "power_monitoring", "router", "wired_own_load", "decoupled_smart_bulbs"],
+        answers: [
+          { id: "last_state", label: "Goes back to how it was" },
+          { id: "always_on", label: "Always comes on" },
+          { id: "always_off", label: "Always stays off" },
+          { id: "ignores_setting", label: "Ignores its power-on setting" },
+          { id: "not_sure", label: "Not sure" }
+        ]
+      },
+      {
+        id: "remembers_colour",
+        topic: "power_cut",
+        text: "After a power cut, does it remember brightness and colour too?",
+        types: ["light"],
+        answers: [
+          { id: "yes", label: "Yes" },
+          { id: "on_only", label: "Only on or off" },
+          { id: "no", label: "No" },
+          { id: "not_sure", label: "Not sure" }
+        ]
+      },
+      {
+        id: "router_quality",
+        topic: "connection",
+        text: "Is it a good router for other devices?",
+        types: ["light", "plug", "wall_switch"],
+        answers: [
+          { id: "good", label: "Yes" },
+          { id: "children_drop", label: "Devices connected through it drop off" },
+          { id: "not_sure", label: "Not sure" }
+        ]
+      },
+      {
+        id: "position_accurate",
+        topic: "cover",
+        text: "Does the position it reports match where it really is?",
+        types: ["cover"],
+        answers: [
+          { id: "yes", label: "Yes" },
+          { id: "drifts", label: "Drifts over time" },
+          { id: "no", label: "No" }
+        ]
+      },
+      {
+        id: "reports_promptly",
+        topic: "sensor",
+        text: "Do its reports arrive promptly?",
+        types: ["sensor"],
+        answers: [
+          { id: "instant", label: "Straight away" },
+          { id: "delayed", label: "Noticeably delayed" },
+          { id: "misses_some", label: "Some go missing" }
+        ]
+      },
+      {
+        id: "battery_life",
+        topic: "battery",
+        text: "How long do its batteries last?",
+        types: ["remote", "sensor", "cover", "wall_switch"],
+        answers: [
+          { id: "lt_1m", label: "Less than a month" },
+          { id: "m1_6", label: "1 to 6 months" },
+          { id: "m6_12", label: "6 to 12 months" },
+          { id: "gt_1y", label: "Over a year" },
+          { id: "too_early", label: "Too early to say" },
+          { id: "not_battery", label: "It isn't battery powered" }
+        ]
+      },
+      {
+        id: "battery_report",
+        topic: "battery",
+        text: "Is the battery level it reports right?",
+        types: ["remote", "sensor", "cover", "wall_switch"],
+        answers: [
+          { id: "accurate", label: "Yes" },
+          { id: "drops_suddenly", label: "Drops suddenly near the end" },
+          { id: "stuck", label: "Stuck or never changes" },
+          { id: "not_reported", label: "It doesn't report one" },
+          { id: "not_battery", label: "It isn't battery powered" }
+        ]
+      },
+      {
+        id: "ota",
+        topic: "firmware",
+        text: "Has your Zigbee system offered it a firmware update?",
+        types: ["remote", "wall_switch", "light", "plug", "cover", "sensor", "other"],
+        answers: [
+          { id: "worked", label: "Yes, and it worked" },
+          { id: "failed", label: "Yes, but it failed" },
+          { id: "never_offered", label: "Never offered" },
+          { id: "not_sure", label: "Not sure" }
+        ]
+      },
+      {
+        id: "update_changed",
+        topic: "firmware",
+        text: "Did a firmware update change any of the above?",
+        help: "Asked when you answered before on a different firmware.",
+        types: ["remote", "wall_switch", "light", "plug", "cover", "sensor", "other"],
+        after_firmware_change: true,
+        allow_other: true,
+        other_label: "Yes, something specific (tell us)",
+        answers: [
+          { id: "better", label: "Better" },
+          { id: "worse", label: "Worse" },
+          { id: "no_change", label: "No change" }
+        ]
+      }
+    ],
+    rating: {
+      id: "rating",
+      text: "Ignoring price, how good is it at what you use it for?",
+      min: 1,
+      max: 5,
+      labels: { "1": "Poor", "2": "Not great", "3": "OK", "4": "Good", "5": "Excellent" },
+      min_ratings_for_average: 3
+    },
+    tip: {
+      id: "tip",
+      text: "Anything the next person should know?",
+      help: "Optional, up to 280 characters. No names, places or addresses. Shown after review."
+    }
+  };
+
+  // src/lost.js
+  var POLICIES = ["off", "notify", "auto"];
+  var POLICY_LABELS = {
+    off: "Off",
+    notify: "Tell me",
+    auto: "Put back automatically"
+  };
+  var POLICY_HINTS = {
+    off: "Not watched: nothing is checked or put back for this device.",
+    notify: "Checked every night and whenever its bindings are read. A lost binding shows here and in Settings \u2192 Repairs.",
+    auto: "Lost bindings are put back straight away, at most 3 times a day; after that it stops and tells you instead."
+  };
+  function lostSummary(res) {
+    const devices = [];
+    for (const [ieee, d] of Object.entries(res && res.devices || {})) {
+      if (!d || d.policy === "off" || !Array.isArray(d.lost) || !d.lost.length) continue;
+      devices.push({
+        ieee: normIeee(ieee),
+        name: d.name || ieee,
+        policy: d.policy || "notify",
+        lost: d.lost,
+        queued: !!d.queued,
+        autoPaused: !!d.auto_paused,
+        lastCheck: d.last_check || null
+      });
+    }
+    devices.sort((a, b) => String(a.name).localeCompare(String(b.name)));
+    return {
+      total: devices.reduce((n, d) => n + d.lost.length, 0),
+      queued: devices.filter((d) => d.queued).length,
+      paused: devices.filter((d) => d.autoPaused).length,
+      devices
+    };
+  }
+  function lostFor(res, ieee) {
+    const key = normIeee(ieee || "");
+    for (const [k, d] of Object.entries(res && res.devices || {})) {
+      if (normIeee(k) === key) {
+        return {
+          policy: d.policy || "notify",
+          lost: d.policy === "off" ? [] : d.lost || [],
+          queued: !!d.queued,
+          autoPaused: !!d.auto_paused,
+          lastCheck: d.last_check || null,
+          expected: d.expected || 0,
+          fallback: !!d.fallback
+        };
+      }
+    }
+    return { policy: "notify", lost: [], queued: false, autoPaused: false, lastCheck: null, expected: 0, fallback: false };
+  }
+  function putBackMessage(results, nameOf = (i) => i) {
+    const by = { put_back: [], still_missing: [], waiting: [], nothing: [] };
+    for (const [ieee, st] of Object.entries(results || {})) (by[st] || by.nothing).push(nameOf(ieee));
+    const parts = [];
+    if (by.put_back.length) parts.push(`Put back on ${by.put_back.join(", ")}.`);
+    if (by.waiting.length)
+      parts.push(
+        `${by.waiting.join(", ")} didn't answer (probably asleep). It'll be done the next time ${by.waiting.length === 1 ? "it wakes up" : "they wake up"}: press one of its buttons.`
+      );
+    if (by.still_missing.length)
+      parts.push(
+        `${by.still_missing.join(", ")} answered but still ${by.still_missing.length === 1 ? "doesn't" : "don't"} have ${by.still_missing.length === 1 ? "it" : "them"}: its binding table may be full.`
+      );
+    if (!parts.length) parts.push("Nothing to put back.");
+    const level = by.still_missing.length ? "warning" : by.waiting.length ? "info" : "success";
+    return { level, text: parts.join(" ") };
+  }
+  function sinceText(iso, nowMs = Date.now()) {
+    const t = Date.parse(iso || "");
+    if (!Number.isFinite(t)) return "";
+    const day = (ms) => {
+      const d = new Date(ms);
+      return new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
+    };
+    const days = Math.round((day(nowMs) - day(t)) / 864e5);
+    if (days <= 0) {
+      const d = new Date(t);
+      return `today ${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+    }
+    if (days === 1) return "yesterday";
+    return `${days} days ago`;
+  }
+  var NOTICED_BY = {
+    scan: "noticed by a scan",
+    nightly: "noticed by the nightly check",
+    press: "noticed after a button press",
+    check: "noticed by Check for lost bindings",
+    put_back: "still missing after Put back",
+    replace: "copied from a replaced device, waiting for it to wake up"
+  };
+
+  // src/template.js
+  var SHELL_HTML = `
+<div class="card">
+  <div class="toolbar">
+    <div class="tabs">
+      <button class="tab active" data-view="graph">Map</button>
+      <button class="tab" data-view="floorplan">Floor Plan</button>
+      <button class="tab" data-view="table">Bindings</button>
+      <button class="tab" data-view="devices">Devices</button>
+      <button class="tab" data-view="groups">Groups</button>
+      <button class="tab" data-view="capexplorer">Zigbee Capability Explorer</button>
+      <button class="tab" data-view="advanced">Advanced</button>
+      <button class="tab" data-view="mesh" id="tab-mesh" style="display:none" title="Beta: link quality and routes in your Zigbee mesh. Still being tested; it may change.">Network<sup class="tab-beta">beta</sup></button>
+    </div>
+    <input id="search" class="search" placeholder="Search devices\u2026">
+    <span id="storage-mode-badge" class="storage-mode-badge muted"></span>
+    <button class="btn" id="btn-refresh-devices" title="Reload device list">\u27F3 Devices</button>
+    <button class="btn btn-primary" id="btn-scan" title="Read current bindings from your Zigbee devices">Scan bindings</button>
+    <button class="btn btn-small" id="btn-rescan-settings" title="Scan settings">\u2699</button>
+    <a id="card-version" class="card-version muted" href="${CHANGELOG_URL}" target="_blank" rel="noopener"
+      title="ZHA Bindings Manager v${CARD_VERSION}. Click to open the changelog.">v${CARD_VERSION}</a>
+  </div>
+  <div id="rescan-settings-panel" class="filter-panel">
+    <div class="filter-group">
+      <label class="row" for="scan-batch-size">Devices scanned at once (full network scan)
+        <input type="number" id="scan-batch-size" min="1" max="30" style="width:4em; margin-left:6px;">
+      </label>
+      <p class="hint">Only applies to the full "Scan bindings" network scan \u2014 devices are read in concurrent
+        batches of this size rather than one at a time, confirmed via live testing to genuinely overlap rather
+        than just queue behind each other. A larger batch makes it less likely that several sleepy/offline
+        devices happen to land in different batches and each drag their own batch out by ~45 seconds \u2014 but
+        bigger isn't free: testing found that batches much above ~10-12 can cause otherwise-healthy devices to
+        occasionally fail to respond (Zigbee airtime/collision contention from that much traffic at once, not
+        a real device problem \u2014 retrying individually or rescanning usually succeeds). Increase cautiously and
+        only if you've confirmed it holds up reliably on your own network. Default is ${DEFAULT_SCAN_BATCH_SIZE}.</p>
+    </div>
+    <div class="filter-group">
+      <label class="row" for="rescan-retry-count">Retries for single-device rescan
+        <input type="number" id="rescan-retry-count" min="1" max="10" style="width:4em; margin-left:6px;">
+      </label>
+      <p class="hint">Only applies when you rescan one device (e.g. the Devices tab or "Scan this device") \u2014
+        the full "Scan bindings" network scan is unaffected. Each extra retry costs about 45 seconds if the
+        device genuinely doesn't respond, so more isn't free \u2014 it's a real trade-off between a better chance
+        of catching a briefly-unreachable device and a longer wait. Default is ${DEFAULT_RETRY_COUNT}.</p>
+    </div>
+    <div class="filter-group">
+      <div class="filter-group-title">Storage</div>
+      <div id="storage-mode-detail" class="hint"></div>
+      <button type="button" class="btn btn-small" id="btn-use-shared-storage" style="display:none">Use shared storage</button>
+      <button type="button" class="btn btn-small" id="btn-use-local-storage" style="display:none">Use this browser only</button>
+      <div id="storage-backend-hint" class="hint" style="display:none">
+        Your data is only saved in this browser. The optional ZHA Bindings Manager integration can save it
+        centrally in Home Assistant instead, so it's available from every browser and device.
+        <a href="https://github.com/hsolgaard/zha-bindings-manager-integration" target="_blank" rel="noopener">Learn more \u2192</a>
+        <button type="button" class="btn btn-small" id="btn-dismiss-storage-hint">Dismiss</button>
+      </div>
+    </div>
+    <div class="filter-group">
+      <div class="filter-group-title">About</div>
+      <div class="hint">ZHA Bindings Manager v${CARD_VERSION} \xB7
+        <a href="${CHANGELOG_URL}" target="_blank" rel="noopener">Changelog</a></div>
+      <div id="backend-version-line" class="hint"></div>
+    </div>
+  </div>
+  <div id="status" class="status" style="display:none"></div>
+
+  <div id="view-graph" class="view active">
+    <div class="graph-toolbar">
+      <label class="row"><input type="checkbox" id="f-coordinator"> Coordinator</label>
+      <label class="row"><input type="checkbox" id="f-routers"> Routers</label>
+      <label class="row"><input type="checkbox" id="f-endDevices"> End devices</label>
+      <label class="row"><input type="checkbox" id="f-groups"> Groups</label>
+      <label class="row"><input type="checkbox" id="f-unbound"> Unbound devices</label>
+      <label class="row" title="Also filters the Bindings tab, not just this Map view"><input type="checkbox" id="f-hideCoordinatorBindings" checked> Hide coordinator bindings (Map &amp; Bindings tab)</label>
+      <label class="row" title="Some real bindings are a device reporting its own state (e.g. a light reporting to a group it belongs to) rather than controlling anything. These are hidden here by default so the map reads as &quot;who controls what&quot; \u2014 they're still real and still shown in full on the Bindings tab."><input type="checkbox" id="f-showReportingBindings"> Show reporting-only bindings (Map only)</label>
+      <span class="spacer"></span>
+      <span id="scan-info" class="scan-info muted"></span>
+      <button class="btn btn-small" id="btn-filters">Filters \u25BE</button>
+      <button class="btn btn-small" id="btn-zoom-out">\uFF0D</button>
+      <button class="btn btn-small" id="btn-zoom-fit">Fit</button>
+      <button class="btn btn-small" id="btn-zoom-in">\uFF0B</button>
+      <button class="btn btn-small" id="btn-fullscreen" title="Toggle fullscreen">\u26F6</button>
+    </div>
+    <div id="filter-panel" class="filter-panel">
+      <div class="filter-group">
+        <div class="filter-group-title">Type</div>
+        <div id="chips-types" class="chips"></div>
+      </div>
+      <div class="filter-group">
+        <div class="filter-group-title">Manufacturer</div>
+        <div id="chips-manufacturers" class="chips"></div>
+      </div>
+      <div class="filter-group">
+        <div class="filter-group-title">Area</div>
+        <div id="chips-areas" class="chips"></div>
+      </div>
+      <button class="btn btn-small" id="btn-clear-filters">Clear type / manufacturer / area filters</button>
+    </div>
+    <div id="map-route-banner" class="map-route-banner" style="display:none"></div>
+    <div class="graph-wrap">
+      <svg id="graph-svg" viewBox="0 0 1200 840" preserveAspectRatio="xMidYMid meet"></svg>
+      <div id="graph-empty" class="graph-empty"></div>
+    </div>
+    <p class="hint">Drag a device onto another device (or onto a group) to create a binding. Click a line to inspect / remove it<span id="map-route-hint" style="display:none">, or to show the route its commands take through your routers (Network, beta)</span>.</p>
+    <p id="graph-role-legend" class="hint" style="display:none">\u{1F579} badge = this device also has its own Light/Switch/Cover/Fan role, in addition to what's shown by the edges here (e.g. a wired/local load alongside a Zigbee-bound one) \u2014 click the device, then Show endpoints\u2026, to see the per-endpoint breakdown.</p>
+  </div>
+
+  <div id="view-table" class="view">
+    <div id="health-summary" class="health-summary" style="display:none"></div>
+    <div id="lost-banner" class="stale-banner lost-banner" style="display:none"></div>
+    <div id="stale-banner" class="stale-banner" style="display:none"></div>
+    <div id="pending-banner" class="stale-banner pending-banner" style="display:none"></div>
+    <div id="table-filter-info" class="table-filter-info" style="display:none"></div>
+    <div class="table-toolbar">
+      <span class="health-filters" id="health-filters">
+        <button class="chip active" data-health-filter="all">All</button>
+        <button class="chip" data-health-filter="problems">Problems Only</button>
+        <button class="chip" data-health-filter="error">Errors</button>
+        <button class="chip" data-health-filter="warning">Warnings</button>
+        <button class="chip" data-health-filter="info">Info</button>
+      </span>
+      <span class="spacer"></span>
+      <button class="btn btn-small" id="btn-export-csv">Export CSV</button>
+      <button class="btn btn-small" id="btn-export-json">Export JSON</button>
+      <button class="btn btn-small" id="btn-export-print">Print / Save as PDF</button>
+    </div>
+    <div class="table-scroll">
+    <table class="bindings-table">
+      <thead><tr>
+        <th id="th-direction" data-sort="directionRank" style="display:none">Direction</th>
+        <th data-sort="sourceLabel">Source</th>
+        <th data-sort="typeLabel">Type</th>
+        <th data-sort="areaLabel">Area</th>
+        <th data-sort="manModel">Manufacturer / Model</th>
+        <th data-sort="clusterLabel">Cluster</th>
+        <th data-sort="targetLabel">Target</th>
+        <th data-sort="healthRank">Health</th>
+        <th></th>
+      </tr></thead>
+      <tbody id="table-body"></tbody>
+    </table>
+    </div>
+  </div>
+
+  <div id="view-groups" class="view"></div>
+  <div id="view-devices" class="view">
+    <div class="table-scroll">
+    <table class="bindings-table">
+      <thead><tr>
+        <th data-sort="name">Name</th>
+        <th data-sort="type">Type</th>
+        <th data-sort="manufacturer">Manufacturer</th>
+        <th data-sort="model">Model</th>
+        <th data-sort="area">Area</th>
+        <th data-sort="power">Power</th>
+        <th data-sort="count">Bindings</th>
+        <th data-sort="scanRank">Last scan</th>
+      </tr></thead>
+      <tbody id="devices-table-body"></tbody>
+    </table>
+    </div>
+  </div>
+
+  <div id="view-floorplan" class="view">
+    <div class="graph-toolbar">
+      <label class="row" id="fp-floor-wrap" style="display:none">Floor <select id="fp-floor"></select></label>
+      <label class="row fp-image-row">Image URL
+        <input type="text" id="fp-image-url" placeholder="/local/floorplan.png">
+      </label>
+      <button class="btn btn-small" id="fp-set-image">Set image</button>
+      <span class="spacer"></span>
+      <button class="btn btn-small" id="btn-fp-zoom-out">\uFF0D</button>
+      <button class="btn btn-small" id="btn-fp-zoom-fit">Fit</button>
+      <button class="btn btn-small" id="btn-fp-zoom-in">\uFF0B</button>
+      <label class="row fp-marker-row" for="fp-marker-scale" title="Scales device markers independently of image resolution \u2014 useful when a lower-resolution floor plan leaves markers looking oversized.">Marker size
+        <input type="number" id="fp-marker-scale" min="40" max="200" step="10" style="width:4.5em; margin-left:6px;">%
+      </label>
+    </div>
+    <div id="fp-floor-help" class="fp-floor-help hint"></div>
+    <div class="floorplan-layout">
+      <div class="fp-sidebar">
+        <div class="filter-group-title">Unplaced devices</div>
+        <div id="fp-unplaced-list" class="fp-unplaced-list"></div>
+      </div>
+      <div class="graph-wrap">
+        <svg id="fp-svg" viewBox="0 0 1200 840" preserveAspectRatio="xMidYMid meet"></svg>
+        <div id="fp-empty" class="graph-empty"></div>
+      </div>
+    </div>
+    <p class="hint">Drop an image into your <code>www/</code> folder (e.g. <code>config/www/floorplan.png</code>) and reference it above as <code>/local/floorplan.png</code>. Drag a device from the list onto its spot on the plan to place it; drag a placed device to move it; click a placed device (without dragging) to send it back to the list.</p>
+    <p id="fp-role-legend" class="hint" style="display:none">\u{1F579} badge = this device also has its own Light/Switch/Cover/Fan role, in addition to what's shown by the edges here (e.g. a wired/local load alongside a Zigbee-bound one) \u2014 click the device, then Show endpoints\u2026, to see the per-endpoint breakdown.</p>
+  </div>
+
+  <div id="view-capexplorer" class="view"></div>
+
+  <div id="view-advanced" class="view"></div>
+
+  <div id="view-mesh" class="view"></div>
+
+  <div id="drawer" class="drawer" aria-hidden="true">
+    <div class="drawer-header">
+      <span id="drawer-title"></span>
+      <button id="drawer-close" class="btn btn-small" title="Close">\u2715</button>
+    </div>
+    <div id="drawer-body" class="drawer-body"></div>
+  </div>
+
+  <div id="dialog" class="dialog">
+    <div id="dialog-backdrop" class="dialog-backdrop"></div>
+    <div class="dialog-panel">
+      <div class="dialog-header">
+        <span id="dialog-title"></span>
+        <button id="dialog-close" class="btn btn-small">\u2715</button>
+      </div>
+      <div id="dialog-body" class="dialog-body"></div>
+    </div>
+  </div>
+</div>`;
+
+  // src/storage/storage-provider.js
+  var StorageProvider = class {
+    /**
+     * Generic per-card-instance key/value storage for simple preferences —
+     * filters, node positions, endpoint annotations, floor plan state,
+     * settings (retry count, scan batch size, etc). `key` is an opaque
+     * string the caller chooses; the provider doesn't need to know what it
+     * means, only how to namespace it per card instance.
+     *
+     * @param {string} cardId - this._config.id (or "default")
+     * @param {string} key
+     * @returns {Promise<any>} the stored value, or null if absent/unreadable
+     */
+    async getItem(cardId, key) {
+      throw new Error("StorageProvider.getItem not implemented");
+    }
+    /** @returns {Promise<boolean>} true on success, false on a soft failure
+     *  (quota exceeded, storage disabled) — never throws, matching the
+     *  fail-soft behavior the scattered localStorage try/catch blocks had
+     *  before this boundary existed. */
+    async setItem(cardId, key, value) {
+      throw new Error("StorageProvider.setItem not implemented");
+    }
+    /**
+     * The one piece of state with real persistence semantics beyond plain
+     * key/value — scan results. See the delivery plan's "latest /
+     * last_complete observation split":
+     *
+     *   last_complete — the best known-good data per device, built up over
+     *     time. Never regresses: a device that fails one scan attempt keeps
+     *     whatever binding data its last successful scan produced.
+     *   latest — the outcome of the most recent scan attempt as a whole,
+     *     including which devices failed to respond or only partially
+     *     responded. Fixes the bug where that information lived in memory
+     *     only and silently vanished on a page reload, making a device that
+     *     just failed to respond look identical to one that's fine.
+     *
+     * @returns {Promise<{
+     *   last_complete: {savedAt: string, bindings: object} | null,
+     *   latest: {attemptedAt: string, failures: string[], partial: object} | null
+     * }>}
+     */
+    async getScanState(cardId) {
+      throw new Error("StorageProvider.getScanState not implemented");
+    }
+    async setScanState(cardId, state) {
+      throw new Error("StorageProvider.setScanState not implemented");
+    }
+    /** Learned per-device response-time/outcome history (see
+     *  _recordScanOutcome/_historyFor in card.js) — kept separate from scan
+     *  state since it's additive/rolling rather than latest-vs-complete.
+     *  @returns {Promise<object>} ieee(lower) -> {successMs, outcomes, ...} */
+    async getHistory(cardId) {
+      throw new Error("StorageProvider.getHistory not implemented");
+    }
+    async setHistory(cardId, history) {
+      throw new Error("StorageProvider.setHistory not implemented");
+    }
+  };
+
+  // src/storage/local-storage-provider.js
+  var LocalStorageProvider = class extends StorageProvider {
+    _keyFor(cardId, key) {
+      return `zha-binding-map-card:${cardId || "default"}:${key}`;
+    }
+    async getItem(cardId, key) {
+      try {
+        const raw = localStorage.getItem(this._keyFor(cardId, key));
+        return raw == null ? null : JSON.parse(raw);
+      } catch (e) {
+        return null;
+      }
+    }
+    async setItem(cardId, key, value) {
+      try {
+        localStorage.setItem(this._keyFor(cardId, key), JSON.stringify(value));
+        return true;
+      } catch (e) {
+        return false;
+      }
+    }
+    async getScanState(cardId) {
+      const raw = await this.getItem(cardId, "scan-state");
+      if (raw && (raw.last_complete || raw.latest)) return raw;
+      const legacy = await this.getItem(cardId, "bindings");
+      if (legacy && legacy.bindings) {
+        return { last_complete: legacy, latest: null };
+      }
+      return { last_complete: null, latest: null };
+    }
+    async setScanState(cardId, state) {
+      return this.setItem(cardId, "scan-state", state);
+    }
+    async getHistory(cardId) {
+      const raw = await this.getItem(cardId, "history");
+      return raw && typeof raw === "object" ? raw : {};
+    }
+    async setHistory(cardId, history) {
+      return this.setItem(cardId, "history", history);
+    }
+  };
+
+  // src/storage/ha-storage-provider.js
+  var WS_GET_STATE = "zha_bindings_manager/get_state";
+  var WS_SAVE_STATE = "zha_bindings_manager/save_state";
+  var WS_GET_CAPABILITIES = "zha_bindings_manager/get_capabilities";
+  var SAVE_DEBOUNCE_MS = 1500;
+  var HaStorageProvider = class _HaStorageProvider extends StorageProvider {
+    constructor(hass, cardId) {
+      super();
+      this._hass = hass;
+      this._cardId = cardId || "default";
+      this._state = null;
+      this._updatedAt = null;
+      this._loadPromise = null;
+      this._saveTimer = null;
+      this._savePromise = null;
+      this._resolveSave = null;
+    }
+    /** Feature detection — a static-ish helper rather than an instance
+     *  method, since card.js needs an answer *before* deciding whether to
+     *  construct a HaStorageProvider at all. Returns false (not a thrown
+     *  error) for "not installed", same as for any other failure — the
+     *  caller only needs yes/no, not why. */
+    static async isAvailable(hass) {
+      return (await _HaStorageProvider.probe(hass)).available;
+    }
+    /** What the ZHA Bindings Manager integration reports about itself.
+     *  - installed: the integration answered at all.
+     *  - available: shared storage can be used (installed, and not switched
+     *    off in the integration's options; integrations older than 1.0.0
+     *    don't report features, so storage counts as on).
+     *  - version: the integration's version (reported since 0.1.0).
+     *  - bundledCardVersion: the card version the integration ships (1.0.0+).
+     *  Unknown values are null. */
+    static async probe(hass) {
+      const none = { installed: false, available: false, version: null, bundledCardVersion: null, experimental: false, watch: false, replace: false, lqi: null };
+      try {
+        const res = await hass.connection.sendMessagePromise({ type: WS_GET_CAPABILITIES });
+        if (!res || !res.available) return none;
+        const str = (v) => typeof v === "string" && v ? v : null;
+        const storageOff = !!(res.features && res.features.shared_storage === false);
+        return {
+          installed: true,
+          available: !storageOff,
+          version: str(res.version),
+          bundledCardVersion: str(res.bundled_card_version),
+          // 1.5.0 (local build): experimental features + link-quality thresholds.
+          experimental: !!(res.features && res.features.experimental_features === true),
+          // 1.8.0: the integration watches for lost bindings.
+          watch: !!(res.features && res.features.binding_watch === true),
+          // 1.9.0: Replace a device.
+          replace: !!(res.features && res.features.replace === true),
+          lqi: res.lqi_thresholds && Number.isInteger(res.lqi_thresholds.good) && Number.isInteger(res.lqi_thresholds.weak) ? { good: res.lqi_thresholds.good, weak: res.lqi_thresholds.weak } : null
+        };
+      } catch (e) {
+        return none;
+      }
+    }
+    async _ensureLoaded() {
+      if (this._state) return this._state;
+      if (!this._loadPromise) {
+        this._loadPromise = this._hass.connection.sendMessagePromise({ type: WS_GET_STATE, card_id: this._cardId }).then((res) => {
+          this._updatedAt = res ? res.updated_at : null;
+          this._state = res && res.state || { items: {}, scanState: null, history: {} };
+          return this._state;
+        }).catch((e) => {
+          console.warn("ZHA Binding Map: could not load shared state, starting empty:", e.message || e);
+          this._state = { items: {}, scanState: null, history: {} };
+          return this._state;
+        });
+      }
+      return this._loadPromise;
+    }
+    _scheduleSave() {
+      if (this._saveTimer) clearTimeout(this._saveTimer);
+      if (!this._savePromise) {
+        this._savePromise = new Promise((resolve) => {
+          this._resolveSave = resolve;
+        });
+      }
+      this._saveTimer = setTimeout(() => this._flushSave(), SAVE_DEBOUNCE_MS);
+      return this._savePromise;
+    }
+    async _flushSave() {
+      this._saveTimer = null;
+      try {
+        const res = await this._hass.connection.sendMessagePromise({
+          type: WS_SAVE_STATE,
+          card_id: this._cardId,
+          state: this._state,
+          base_updated_at: this._updatedAt
+        });
+        this._updatedAt = res.updated_at;
+      } catch (e) {
+        if (e && e.code === "stale_write") {
+          try {
+            const fresh = await this._hass.connection.sendMessagePromise({
+              type: WS_GET_STATE,
+              card_id: this._cardId
+            });
+            this._updatedAt = fresh ? fresh.updated_at : null;
+            const res2 = await this._hass.connection.sendMessagePromise({
+              type: WS_SAVE_STATE,
+              card_id: this._cardId,
+              state: this._state,
+              base_updated_at: this._updatedAt
+            });
+            this._updatedAt = res2.updated_at;
+          } catch (e2) {
+            console.warn("ZHA Binding Map: shared save failed after a conflict retry:", e2.message || e2);
+          }
+        } else {
+          console.warn("ZHA Binding Map: shared save failed:", e.message || e);
+        }
+      } finally {
+        if (this._resolveSave) this._resolveSave();
+        this._savePromise = null;
+        this._resolveSave = null;
+      }
+    }
+    /** Flushes a pending debounced save immediately instead of waiting it
+     *  out — not called anywhere yet in this milestone, kept available for
+     *  call sites that later want to confirm a save actually landed (e.g.
+     *  right before showing a "saved" confirmation) rather than trusting
+     *  the debounce timer alone. */
+    async flush() {
+      if (this._saveTimer) {
+        clearTimeout(this._saveTimer);
+        await this._flushSave();
+      } else if (this._savePromise) {
+        await this._savePromise;
+      }
+    }
+    async getItem(cardId, key) {
+      const state = await this._ensureLoaded();
+      return state.items && key in state.items ? state.items[key] : null;
+    }
+    async setItem(cardId, key, value) {
+      const state = await this._ensureLoaded();
+      if (!state.items) state.items = {};
+      state.items[key] = value;
+      this._scheduleSave();
+      return true;
+    }
+    async getScanState(cardId) {
+      const state = await this._ensureLoaded();
+      return state.scanState || { last_complete: null, latest: null };
+    }
+    async setScanState(cardId, scanState) {
+      const state = await this._ensureLoaded();
+      state.scanState = scanState;
+      this._scheduleSave();
+      return true;
+    }
+    async getHistory(cardId) {
+      const state = await this._ensureLoaded();
+      return state.history || {};
+    }
+    async setHistory(cardId, history) {
+      const state = await this._ensureLoaded();
+      state.history = history;
+      this._scheduleSave();
+      return true;
+    }
+  };
+
+  // src/stale-bindings.js
+  function knownIeees(devices) {
+    return new Set((devices || []).map((d) => normIeee(d.ieee)));
+  }
+  function removedSources(bindingsMap, devices) {
+    const known = knownIeees(devices);
+    const out = [];
+    for (const [ieee, list2] of bindingsMap || []) {
+      if (!known.has(normIeee(ieee))) out.push({ ieee, count: (list2 || []).length });
+    }
+    return out;
+  }
+  function deadTargetBindings(bindingsMap, devices) {
+    const known = knownIeees(devices);
+    const out = [];
+    for (const [ieee, list2] of bindingsMap || []) {
+      if (!known.has(normIeee(ieee))) continue;
+      for (const b of list2 || []) {
+        if (!b.isGroup && b.targetIeee && !known.has(normIeee(b.targetIeee))) out.push(b);
+      }
+    }
+    return out;
+  }
+  function pruneRemovedSources(bindingsMap, devices) {
+    if (!devices || !devices.length || !bindingsMap) return [];
+    const removed = removedSources(bindingsMap, devices).map((r) => r.ieee);
+    removed.forEach((ieee) => bindingsMap.delete(ieee));
+    return removed;
+  }
+  function forgetSource(bindingsMap, ieee) {
+    let dropped = 0;
+    for (const key of [...bindingsMap.keys()]) {
+      if (normIeee(key) === normIeee(ieee)) {
+        dropped += (bindingsMap.get(key) || []).length;
+        bindingsMap.delete(key);
+      }
+    }
+    return dropped;
+  }
+  function vanishedDevices(prev, next) {
+    if (!next || !next.length) return [];
+    const now = knownIeees(next);
+    return (prev || []).map((d) => normIeee(d.ieee)).filter((ieee) => !now.has(ieee));
+  }
+  function rememberDevices(known, devices, label) {
+    let changed = false;
+    for (const d of devices || []) {
+      const ieee = normIeee(d.ieee);
+      if (!ieee) continue;
+      const info = {
+        name: label(d) || "",
+        manufacturer: d.manufacturer || "",
+        model: d.model || "",
+        area_id: d.area_id || null
+      };
+      const old = known.get(ieee);
+      if (!old || old.name !== info.name || old.manufacturer !== info.manufacturer || old.model !== info.model || old.area_id !== info.area_id) {
+        known.set(ieee, info);
+        changed = true;
+      }
+    }
+    return changed;
+  }
+  function knownDevicesToSave(known, devices, bindingsMap) {
+    const keep = knownIeees(devices);
+    for (const [ieee, list2] of bindingsMap || []) {
+      keep.add(normIeee(ieee));
+      for (const b of list2 || []) if (b.targetIeee) keep.add(normIeee(b.targetIeee));
+    }
+    const out = {};
+    [...(known || /* @__PURE__ */ new Map()).keys()].filter((ieee) => keep.has(ieee)).sort().forEach((ieee) => out[ieee] = known.get(ieee));
+    return out;
+  }
+
+  // src/about.js
+  function aboutIntegrationText({ checked, installed, storageOn, version, bundledCardVersion, cardVersion }) {
+    if (!checked) return "";
+    if (!installed) {
+      return "Card-only install. The ZHA Bindings Manager integration adds shared storage, a sidebar page and notices when a bound device is removed.";
+    }
+    const parts = [`ZHA Bindings Manager integration ${version ? "v" + version : "(version not reported)"} is installed.`];
+    if (bundledCardVersion && bundledCardVersion !== cardVersion) {
+      parts.push(
+        `This page is running card v${cardVersion}, but the integration includes card v${bundledCardVersion}: another copy of the card loaded first. See Settings \u2192 Repairs.`
+      );
+    }
+    if (!storageOn) parts.push("Shared storage is switched off in the integration's options.");
+    return parts.join(" ");
+  }
+
+  // src/scan-summary.js
+  function isBatteryPowered(device) {
+    return !!(device && device.power_source && /battery/i.test(device.power_source));
+  }
+  function toolkitAvailable(hass, service = "binds_get") {
+    return !!(hass && hass.services && hass.services.zha_toolkit && hass.services.zha_toolkit[service]);
+  }
+  function shortError(err) {
+    const text = String(err && (err.message || err) || "").replace(/\s+/g, " ").trim();
+    return text.length > 180 ? `${text.slice(0, 177)}\u2026` : text;
+  }
+  function nameList(names, max = 3) {
+    if (names.length <= max) return names.join(", ");
+    return `${names.slice(0, max).join(", ")} and ${names.length - max} more`;
+  }
+  function summarizeScan({ okCount, partialCount, failures, skippedNames = [], prunedCount = 0 }) {
+    const failed = failures || [];
+    const battery = failed.filter((f) => isBatteryPowered(f.device));
+    const mains = failed.filter((f) => !isBatteryPowered(f.device));
+    const extras = [];
+    if (skippedNames.length) extras.push(`skipped ${skippedNames.join(", ")} (no longer in ZHA)`);
+    if (prunedCount) extras.push(`cleared saved data for ${prunedCount} device(s) no longer in ZHA`);
+    const tail = extras.length ? ` Also ${extras.join("; ")}.` : "";
+    if (okCount === 0 && partialCount === 0 && failed.length >= 2 && mains.length > 0) {
+      const firstError = shortError((mains[0] || failed[0]).error);
+      return {
+        level: "error",
+        message: `Scan failed: no device responded (${failed.length} of ${failed.length}), including mains-powered devices that never sleep, so this isn't sleepy devices. It usually means zha-toolkit isn't working. ` + (firstError ? `First error: "${firstError}". ` : "") + `Check Settings \u2192 System \u2192 Logs for zha_toolkit errors.` + tail
+      };
+    }
+    const parts = [`${okCount} device(s) read`];
+    if (partialCount) parts.push(`${partialCount} partial (a later page timed out \u2014 rescan for the rest)`);
+    if (mains.length) {
+      parts.push(
+        `${mains.length} mains-powered device(s) did not respond (check they're online in ZHA): ${nameList(
+          mains.map((f) => f.name)
+        )}`
+      );
+    }
+    if (battery.length) {
+      parts.push(
+        `${battery.length} battery device(s) did not respond (normal, they sleep: wake one and use its Rescan)`
+      );
+    }
+    const level = mains.length ? "error" : battery.length || partialCount ? "info" : "success";
+    return { level, message: `Scan complete: ${parts.join(", ")}.${tail}` };
+  }
+
+  // src/health-rules.js
+  var BASIC_CLUSTER = 0;
+  function isManufacturerSpecific(clusterId) {
+    const id = Number(clusterId);
+    return id >= 64512 && id <= 65535;
+  }
+  function manufacturerSpecificRule(clusterId) {
+    const hex2 = `0x${Number(clusterId).toString(16).padStart(4, "0")}`;
+    return {
+      level: "info",
+      code: "manufacturer_specific",
+      message: `Manufacturer-specific cluster (${hex2}), not checked.`,
+      why: "Clusters from 0xFC00 up aren't part of the Zigbee standard: each manufacturer uses them for its own features, and devices usually set these bindings up themselves. The card can't tell what they do, so it doesn't check them.",
+      recommendation: "Leave it in place unless you know the device doesn't need it."
+    };
+  }
+  function unusualDeviceBindingRule({ clusterId, classification }) {
+    if (Number(clusterId) === BASIC_CLUSTER) {
+      return {
+        level: "warning",
+        code: "unusual_basic",
+        message: "Unusual binding: Basic cluster bound to another device.",
+        why: "The Basic cluster only holds device information such as the manufacturer and model. Binding it to another device doesn't let either one control the other. Bindings like this are usually left by a manufacturer's pairing routine or created by mistake, often in the wrong direction (for example from a light to its remote).",
+        recommendation: "Unless a device's manual says it needs this, it's safe to remove. To control a light from a switch, bind On/Off (and Level Control for dimming) from the switch to the light."
+      };
+    }
+    if (classification === "reporting") {
+      return {
+        level: "info",
+        code: "reporting_to_device",
+        message: "Reporting binding to another device, not a control binding.",
+        why: "The source sends its own status for this cluster to the target, rather than sending it commands. That is sometimes intended (for example a temperature sensor reporting to a thermostat), but it doesn't let the source control the target.",
+        recommendation: "If you meant the source to control the target, check the direction: the binding should start on the device that sends the commands, such as a switch or remote."
+      };
+    }
+    return null;
+  }
+
+  // src/deep-link.js
+  function deepLinkIeee(search) {
+    let raw;
+    try {
+      raw = new URLSearchParams(search || "").get("device");
+    } catch (e) {
+      return null;
+    }
+    if (!raw) return null;
+    const hex2 = raw.toLowerCase().replace(/[^0-9a-f]/g, "");
+    if (hex2.length !== 16) return null;
+    return hex2.match(/../g).join(":");
+  }
+  function withoutDeviceParam(search) {
+    const params = new URLSearchParams(search || "");
+    params.delete("device");
+    const s = params.toString();
+    return s ? `?${s}` : "";
+  }
+
+  // src/group-support.js
+  function groupClusterSupport({ members, clusterId, clustersFor }) {
+    const out = { total: 0, supported: [], unsupported: [], unknown: [] };
+    for (const m of members || []) {
+      if (m.isCoordinator) continue;
+      out.total++;
+      const clusters = clustersFor(m.ieee);
+      if (!clusters) {
+        out.unknown.push(m.name);
+        continue;
+      }
+      const has = clusters.some(
+        (c) => c.type === "in" && Number(c.endpoint_id) === Number(m.endpoint) && Number(c.id) === Number(clusterId)
+      );
+      (has ? out.supported : out.unsupported).push(m.name);
+    }
+    return out;
+  }
+  var plural = (n, one, many) => `${n} ${n === 1 ? one : many}`;
+  var list = (names) => names.join(", ");
+  function groupSupportSummary(res, clusterLabel2, groupName) {
+    if (!res.total) {
+      return {
+        level: "empty",
+        text: `${groupName} has no members yet, so nothing will act on ${clusterLabel2} commands sent to it.`
+      };
+    }
+    const known = res.supported.length + res.unsupported.length;
+    const unknownNote = res.unknown.length ? ` Not checked yet: ${list(res.unknown)}.` : "";
+    if (!known) {
+      return { level: "unknown", text: `Checking which devices in ${groupName} support ${clusterLabel2}\u2026` };
+    }
+    if (!res.unsupported.length) {
+      return {
+        level: "ok",
+        text: `${res.supported.length === res.total ? res.total === 1 ? "The device" : `All ${res.total} devices` : plural(res.supported.length, "device", "devices")} in ${groupName} support${res.supported.length === 1 ? "s" : ""} ${clusterLabel2}.${unknownNote}`
+      };
+    }
+    if (!res.supported.length) {
+      return {
+        level: "warning",
+        text: `No device in ${groupName} supports ${clusterLabel2} (${list(res.unsupported)}). The binding can still be made, but nothing in the group will act on these commands.${unknownNote}`
+      };
+    }
+    return {
+      level: "info",
+      text: `${res.supported.length} of ${res.total} devices in ${groupName} support ${clusterLabel2} (${list(
+        res.supported
+      )}). Not supported: ${list(res.unsupported)}, which will ignore these commands.${unknownNote}`
+    };
+  }
+  function groupSupportHealth(res, clusterLabel2, groupName) {
+    if (!res.total) {
+      return {
+        level: "warning",
+        code: "group_empty",
+        message: `${groupName} has no members.`,
+        why: "Commands sent to an empty group reach nothing. This often happens when the lights in a group were removed or re-paired.",
+        recommendation: "Add devices to the group in ZHA, or remove this binding."
+      };
+    }
+    if (!res.unsupported.length) return null;
+    if (!res.supported.length) {
+      return {
+        level: "warning",
+        code: "group_cluster_unsupported",
+        message: `No device in ${groupName} supports ${clusterLabel2}.`,
+        why: `The source sends ${clusterLabel2} commands to the group, but none of its members (${list(
+          res.unsupported
+        )}) can act on them. The binding is valid but does nothing, and it uses one of the source's binding-table slots.`,
+        recommendation: `Remove this binding, or add a device that supports ${clusterLabel2} to the group.`
+      };
+    }
+    return {
+      level: "info",
+      code: "group_cluster_partial",
+      message: `${res.supported.length} of ${res.total} devices in ${groupName} support ${clusterLabel2}.`,
+      why: `Not supported: ${list(res.unsupported)}. Those devices ignore these commands, while the others act on them.`,
+      recommendation: null
+    };
+  }
+
+  // src/group-flow.js
+  var FLOW_CLUSTERS = [6, 8, 768, 258];
+  function testInstruction(clusterIds) {
+    const ids2 = new Set([...clusterIds || []].map(Number));
+    const parts = [];
+    if (ids2.has(6)) parts.push("press on/off");
+    if (ids2.has(8)) parts.push(ids2.has(6) ? "then hold to dim" : "hold to dim");
+    if (ids2.has(258)) parts.push(parts.length ? "and press open/close" : "press open, then close");
+    if (!parts.length) parts.push("press its buttons");
+    const text = parts.join(", ").replace(/, and /, " and ");
+    return text.charAt(0).toUpperCase() + text.slice(1);
+  }
+  var DIRECT_BINDING_MAX_LIGHTS = 4;
+  var RESULTS = ["works", "partial", "stored_ignored", "rejected"];
+  var GROUPS_CLUSTER = 4;
+  function endpointHasGroups(clusters, endpoint) {
+    return (clusters || []).some(
+      (c) => c.type === "in" && Number(c.id) === GROUPS_CLUSTER && Number(c.endpoint_id) === Number(endpoint)
+    );
+  }
+  function controllerEndpoints(clusters) {
+    const byEp = /* @__PURE__ */ new Map();
+    for (const c of clusters || []) {
+      if (c.type !== "out" || !FLOW_CLUSTERS.includes(Number(c.id))) continue;
+      const ep = Number(c.endpoint_id);
+      if (!byEp.has(ep)) byEp.set(ep, /* @__PURE__ */ new Set());
+      byEp.get(ep).add(Number(c.id));
+    }
+    return [...byEp.entries()].sort((a, b) => a[0] - b[0]).map(([endpoint, set]) => ({ endpoint, clusters: [...set].sort((a, b) => a - b) }));
+  }
+  function candidateTargets({ devices, clustersFor, sourceIeee, clusterIds }) {
+    const out = [];
+    for (const d of devices || []) {
+      if (d.isCoordinator || String(d.ieee).toLowerCase() === String(sourceIeee).toLowerCase()) continue;
+      const clusters = clustersFor(d.ieee);
+      if (!clusters) continue;
+      const byEp = /* @__PURE__ */ new Map();
+      for (const c of clusters) {
+        if (c.type !== "in" || !clusterIds.includes(Number(c.id))) continue;
+        const ep = Number(c.endpoint_id);
+        if (!byEp.has(ep)) byEp.set(ep, /* @__PURE__ */ new Set());
+        byEp.get(ep).add(Number(c.id));
+      }
+      const multi = byEp.size > 1;
+      for (const [endpoint, set] of byEp) {
+        out.push({
+          ieee: d.ieee,
+          endpoint,
+          name: multi ? `${d.name} (ep ${endpoint})` : d.name,
+          clusters: [...set].sort((a, b) => a - b),
+          groupable: endpointHasGroups(clusters, endpoint)
+        });
+      }
+    }
+    return out.sort((a, b) => a.name.localeCompare(b.name, void 0, { sensitivity: "base" }));
+  }
+  function modeOptions(targets, { clusterCount = 1 } = {}) {
+    const list2 = targets || [];
+    const blocked = list2.filter((t) => t.groupable === false).map((t) => t.name);
+    const n = list2.length;
+    const slots = n * Math.max(1, clusterCount);
+    return {
+      direct: {
+        ok: true,
+        warning: n > DIRECT_BINDING_MAX_LIGHTS ? `Directly, ${n} devices need about ${slots} binding-table slots on the remote. Many remotes run out sooner; the card checks each binding, so any that don't fit will show as failed.` : ""
+      },
+      group: {
+        ok: blocked.length === 0,
+        blocked,
+        reason: blocked.length ? `${blocked.join(", ")} can't join groups (no Groups cluster), so ${blocked.length === 1 ? "it needs" : "they need"} to be controlled directly.` : ""
+      }
+    };
+  }
+  function suggestMode(targets, { groupKnown = null, directKnown = null } = {}) {
+    const list2 = targets || [];
+    if (!modeOptions(list2).group.ok) return "direct";
+    const groupBad = !!groupKnown && groupKnown.state === "problems";
+    const directBad = !!directKnown && directKnown.state === "problems";
+    if (groupBad && !directBad) return "direct";
+    if (directBad && !groupBad) return "group";
+    if (list2.length > DIRECT_BINDING_MAX_LIGHTS) return "group";
+    return list2.length <= 1 ? "direct" : "group";
+  }
+  var targetKey = (t) => `${String(t.ieee).toLowerCase()}:${Number(t.endpoint)}`;
+  function findMatchingGroup(groups, targets, coordinatorIeee) {
+    const want = new Set(targets.map(targetKey));
+    const coord = String(coordinatorIeee || "").toLowerCase();
+    return (groups || []).find((g) => {
+      const have = (g.members || []).filter((m) => m.device && String(m.device.ieee).toLowerCase() !== coord).map((m) => targetKey({ ieee: m.device.ieee, endpoint: m.endpoint_id }));
+      return have.length === want.size && have.every((k) => want.has(k));
+    }) || null;
+  }
+  function missingMembers(group, targets) {
+    const have = new Set(
+      (group && group.members || []).filter((m) => m.device).map((m) => targetKey({ ieee: m.device.ieee, endpoint: m.endpoint_id }))
+    );
+    return targets.filter((t) => !have.has(targetKey(t)));
+  }
+  function planClusters(sourceClusters, targets, clustersFor) {
+    return (sourceClusters || []).map((clusterId) => {
+      const support = groupClusterSupport({
+        members: targets.map((t) => ({ ieee: t.ieee, endpoint: t.endpoint, name: t.name })),
+        clusterId,
+        clustersFor
+      });
+      return { clusterId, support, include: support.supported.length > 0 };
+    });
+  }
+  function flowResult(bindOutcomes, testAnswer) {
+    const outs = bindOutcomes || [];
+    if (outs.length && outs.every((o) => o === "failed")) return "rejected";
+    if (outs.some((o) => o === "unconfirmed")) return "unconfirmed";
+    if (!testAnswer) return "pending_test";
+    if (testAnswer === "all") return outs.some((o) => o === "failed") ? "partial" : "works";
+    if (testAnswer === "some") return "partial";
+    return "stored_ignored";
+  }
+  var hex = (id) => `0x${Number(id).toString(16).padStart(4, "0")}`;
+  function buildBehaviourReport({ manufacturer, model, firmware, mode, endpoint, clusters, targetCount, result, cardVersion, now }) {
+    return {
+      kind: "behaviour_report",
+      schema: 1,
+      behaviour: mode === "direct" ? "direct_binding" : "group_binding",
+      manufacturer: manufacturer || null,
+      model: model || null,
+      firmware: {
+        sw_build_id: firmware && firmware.sw_build_id || null,
+        registry_sw_version: firmware && firmware.registry_sw_version || null
+      },
+      endpoint,
+      clusters: (clusters || []).map(hex),
+      target_count: targetCount,
+      result,
+      card_version: cardVersion,
+      provenance: { submitted_at: (now || /* @__PURE__ */ new Date()).toISOString() }
+    };
+  }
+  function reportsForClusters(byClusters, clusterIds) {
+    const want = new Set([...clusterIds].map(hex));
+    let out = null;
+    for (const [key, group] of Object.entries(byClusters || {})) {
+      if (!key.split(",").some((c) => want.has(c.trim().toLowerCase()))) continue;
+      out = out || { counts: {}, by_firmware: {} };
+      for (const [r, n] of Object.entries(group.counts || {})) out.counts[r] = (out.counts[r] || 0) + n;
+      for (const [fw, counts] of Object.entries(group.by_firmware || {})) {
+        const t = out.by_firmware[fw] = out.by_firmware[fw] || {};
+        for (const [r, n] of Object.entries(counts)) t[r] = (t[r] || 0) + n;
+      }
+    }
+    return out;
+  }
+  var RESULT_TEXT = {
+    works: "works",
+    partial: "works for some lights",
+    stored_ignored: "stored but ignored",
+    rejected: "rejected"
+  };
+  function firmwareKey2(fw) {
+    return fw && (fw.sw_build_id || fw.registry_sw_version) || "unknown";
+  }
+  function knownBehaviour(doc, slugKey, behaviour, firmware, clusterIds = null) {
+    let entry = doc && doc[slugKey] && doc[slugKey][behaviour];
+    if (entry && entry.by_clusters && clusterIds && [...clusterIds].length) {
+      entry = reportsForClusters(entry.by_clusters, clusterIds);
+    }
+    if (!entry || !entry.counts) {
+      return {
+        state: "unknown",
+        total: 0,
+        text: "Nobody has reported how this remote handles this yet. The card will test it, and you can share the result."
+      };
+    }
+    const fwKey = firmwareKey2(firmware);
+    const fwCounts = entry.by_firmware && entry.by_firmware[fwKey];
+    const counts = fwCounts || entry.counts;
+    const total = RESULTS.reduce((n, r) => n + (counts[r] || 0), 0);
+    const good = (counts.works || 0) + (counts.partial || 0);
+    const bad = (counts.stored_ignored || 0) + (counts.rejected || 0);
+    const state = !total ? "unknown" : bad === 0 ? "works" : good === 0 ? "problems" : "mixed";
+    const parts = RESULTS.filter((r) => counts[r]).map((r) => `${counts[r]} ${RESULT_TEXT[r]}`);
+    const scope = fwCounts ? fwKey === "unknown" ? "" : ` on firmware ${fwKey}` : ` (on other firmware than yours${fwKey === "unknown" ? "" : `, ${fwKey}`})`;
+    const lead = state === "works" ? "Reported to work" : state === "problems" ? "Other users found this doesn't work" : "Reports are mixed";
+    return {
+      state,
+      total,
+      counts,
+      firmwareMatched: !!fwCounts,
+      text: `${lead}${scope}: ${parts.join(", ")} (${total} report${total === 1 ? "" : "s"}).`
+    };
+  }
+  function suggestGroupName(areaName, remoteName) {
+    const base = areaName && areaName !== "No area" ? areaName : remoteName || "Remote";
+    return `${base} lights`;
+  }
+
+  // src/command-check.js
+  var COMMAND_CHECK_LIMIT_MS = 12e4;
+  function formatElapsed(ms) {
+    const total = Math.max(0, Math.floor((ms || 0) / 1e3));
+    const m = Math.floor(total / 60);
+    const s = total % 60;
+    return `${m}:${String(s).padStart(2, "0")}`;
+  }
+  function shouldApplyResult(entry, token, ok) {
+    if (!entry) return false;
+    if (ok) return entry.status !== "done" || entry.token === token;
+    return entry.token === token && entry.status !== "done";
+  }
+
+  // src/action-verify.js
+  function bindOutcome({ present, sourceRead }) {
+    if (present) return "confirmed";
+    return sourceRead ? "failed" : "unconfirmed";
+  }
+  function unbindOutcome({ before, present, sourceRead }) {
+    if (sourceRead) {
+      if (present) return "failed";
+      return before === false ? "absent" : "confirmed";
+    }
+    return before === false && !present ? "absent" : "unconfirmed";
+  }
+  var OUTCOME_LEVEL = {
+    confirmed: "success",
+    absent: "success",
+    unconfirmed: "warning",
+    failed: "error"
+  };
+  function pendingKey(p) {
+    const t = p.target && p.target.isGroup ? `g:${p.target.groupId}` : `d:${String(p.target && p.target.ieee || "").toLowerCase()}:${p.target ? p.target.endpoint : ""}`;
+    return `${p.kind}|${String(p.sourceIeee).toLowerCase()}|${p.sourceEndpoint}|${p.clusterId}|${t}`;
+  }
+  function reconcilePending(entries, { isPresent, wasRead }) {
+    const pending = [];
+    const resolved = [];
+    for (const entry of entries || []) {
+      if (!wasRead(entry.sourceIeee)) {
+        pending.push(entry);
+        continue;
+      }
+      const present = !!isPresent(entry);
+      const outcome = entry.kind === "unbind" ? unbindOutcome({ before: true, present, sourceRead: true }) : bindOutcome({ present, sourceRead: true });
+      resolved.push({ entry, outcome });
+    }
+    return { pending, resolved };
+  }
+
+  // src/styles.js
+  var STYLE = `
+:host { display:block; max-width:100%; }
+.card {
+  background: var(--ha-card-background, var(--card-background-color, #fff));
+  border-radius: var(--ha-card-border-radius, 12px);
+  box-shadow: var(--ha-card-box-shadow, none);
+  border: 1px solid var(--ha-card-border-color, var(--divider-color, #e0e0e0));
+  padding: 12px 16px 16px;
+  color: var(--primary-text-color);
+  font-family: var(--paper-font-body1_-_font-family, inherit);
+  box-sizing: border-box; max-width:100%; overflow-x:hidden;
+}
+.toolbar { display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin-bottom:8px; }
+.tabs { display:flex; gap:4px; flex-wrap:wrap; }
+/* Any element that would otherwise force the card wider than the screen
+   (a wide table, a long unbreakable label) scrolls within itself instead. */
+.table-scroll { max-width:100%; overflow-x:auto; -webkit-overflow-scrolling:touch; }
+.tab {
+  background: none; border: none; padding: 6px 12px; border-radius: 8px;
+  color: var(--secondary-text-color); cursor: pointer; font-weight:500;
+}
+.tab.active { background: var(--primary-color); color: var(--text-primary-color, #fff); }
+.search {
+  flex: 1 1 120px; min-width: 120px; padding: 6px 10px; border-radius: 8px;
+  border: 1px solid var(--divider-color, #ccc); background: var(--card-background-color);
+  color: var(--primary-text-color);
+}
+.btn {
+  border: 1px solid var(--divider-color, #ccc); background: var(--card-background-color);
+  color: var(--primary-text-color); border-radius: 8px; padding: 6px 12px; cursor: pointer; font-size: 0.9em;
+}
+a.btn { display:inline-block; text-decoration:none; }
+.btn:hover { filter: brightness(0.97); }
+.btn:disabled { opacity: 0.6; cursor: default; }
+.btn-primary { background: var(--primary-color); color: var(--text-primary-color, #fff); border-color: transparent; }
+.btn-danger { background: var(--error-color, #db4437); color: #fff; border-color: transparent; }
+.btn-small { padding: 3px 8px; font-size: 0.8em; }
+.status { margin: 4px 0 10px; padding: 8px 12px; border-radius: 8px; font-size: 0.9em; display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.status-info { background: rgba(3,169,244,0.12); color: var(--primary-text-color); }
+.status-success { background: rgba(76,175,80,0.15); color: var(--primary-text-color); }
+.status-error { background: rgba(244,67,54,0.15); color: var(--primary-text-color); }
+.status-text { flex: 1; }
+.status-close {
+  flex: none; border: none; background: transparent; cursor: pointer; font-size: 1.1em;
+  line-height: 1; padding: 0 2px; color: inherit; opacity: 0.6;
+}
+.status-close:hover { opacity: 1; }
+.scan-cell { display:flex; flex-direction:column; align-items:flex-start; gap:4px; min-width:150px; }
+.scan-cell-status { font-size:0.85em; }
+.scan-cell-failed .scan-cell-status, .scan-cell-never .scan-cell-status { color: var(--error-color, #db4437); }
+.scan-cell-partial .scan-cell-status { color: var(--warning-color, #ff9800); }
+.scan-cell-ok .scan-cell-status { color: var(--success-color, #4caf50); }
+.scan-wake-hint { font-size:0.78em; color: var(--secondary-text-color); font-style:italic; }
+.scan-cell-btn { align-self:flex-start; }
+.view { display:none; }
+.view.active { display:block; }
+.graph-toolbar { display:flex; align-items:center; gap:14px; flex-wrap:wrap; margin-bottom:6px; font-size:0.85em; }
+.graph-toolbar .row { display:flex; align-items:center; gap:4px; cursor:pointer; user-select:none; }
+.spacer { flex:1; }
+.scan-info { font-size: 0.85em; white-space: nowrap; }
+.storage-mode-badge { font-size: 0.8em; white-space: nowrap; }
+.card-version { font-size: 0.8em; white-space: nowrap; text-decoration: none; }
+.card-version:hover { text-decoration: underline; }
+.filter-panel { display:none; border:1px solid var(--divider-color, #e0e0e0); border-radius:10px;
+  padding:10px 12px 12px; margin-bottom:10px; background: var(--secondary-background-color, #fafafa); }
+.filter-panel.open { display:block; }
+.filter-group { margin-bottom:8px; }
+.filter-group-title { font-size:0.72em; text-transform:uppercase; letter-spacing:.04em;
+  color: var(--secondary-text-color); margin-bottom:5px; }
+.chips { display:flex; flex-wrap:wrap; gap:6px; }
+.chip { border:1px solid var(--divider-color, #ccc); background: var(--card-background-color);
+  color: var(--primary-text-color); border-radius: 999px; padding: 3px 10px; font-size: 0.78em; cursor: pointer; }
+.chip:hover { filter: brightness(0.97); }
+.chip.active { background: var(--primary-color); color: var(--text-primary-color, #fff); border-color: transparent; }
+/* Base (in-dashboard card) graph height scales with viewport so it isn't
+   cramped on a laptop-sized window, but stays reasonable on small screens. */
+.graph-wrap { position:relative; width:100%; height: clamp(420px, 62vh, 820px); border-radius: 10px; overflow:hidden;
+  background: var(--secondary-background-color, #fafafa); border: 1px solid var(--divider-color, #e0e0e0); }
+#graph-svg { width:100%; height:100%; touch-action:none; cursor: grab; }
+/* Fullscreen mode: card takes over the whole browser viewport, graph fills
+   all remaining vertical space after the toolbars. */
+.card.fullscreen {
+  position: fixed; inset: 0; z-index: 1000; border-radius: 0;
+  display: flex; flex-direction: column; overflow: auto;
+}
+.card.fullscreen #view-graph.active { display:flex; flex-direction:column; flex:1; min-height:0; }
+.card.fullscreen .graph-wrap { flex:1; height:auto; min-height: 260px; }
+
+/* Floor plan tab */
+.fp-image-row { flex: 1 1 320px; display:flex; align-items:center; gap:6px; }
+.fp-image-row input { flex:1; padding:5px 8px; border-radius:6px; border:1px solid var(--divider-color, #ccc);
+  background: var(--card-background-color); color: var(--primary-text-color); }
+.floorplan-layout { display:flex; gap:10px; align-items:stretch; }
+.fp-sidebar { flex: 0 0 180px; width:180px; border:1px solid var(--divider-color, #e0e0e0); border-radius:10px;
+  padding:8px; overflow-y:auto; max-height: clamp(420px, 62vh, 820px);
+  background: var(--secondary-background-color, #fafafa); }
+.fp-unplaced-list { display:flex; flex-direction:column; gap:6px; }
+.fp-chip { border:1px solid var(--divider-color, #ccc); background: var(--card-background-color);
+  color: var(--primary-text-color); border-radius:8px; padding:5px 8px; font-size:0.8em; cursor:grab; user-select:none; }
+.fp-chip:active { cursor:grabbing; }
+.floorplan-layout .graph-wrap { flex:1; min-width:0; }
+.fp-ghost { position:fixed; z-index:2000; background: var(--primary-color); color: var(--text-primary-color, #fff);
+  padding:4px 10px; border-radius:8px; font-size:0.8em; pointer-events:none; box-shadow:0 4px 12px rgba(0,0,0,0.3); }
+.card.fullscreen #view-floorplan.active { display:flex; flex-direction:column; flex:1; min-height:0; }
+.card.fullscreen #view-floorplan.active .floorplan-layout { flex:1; min-height:0; }
+.card.fullscreen #view-floorplan.active .graph-wrap { height:auto; }
+.card.fullscreen #view-floorplan.active .fp-sidebar { max-height:none; }
+.graph-empty { position:absolute; inset:0; display:none; align-items:center; justify-content:center; color: var(--secondary-text-color); }
+.hint { font-size: 0.8em; color: var(--secondary-text-color); margin: 8px 2px 0; }
+.node { cursor: grab; }
+.node-shape { stroke: var(--card-background-color, #fff); stroke-width: 2; }
+.node-device { fill: #607d8b; }
+.node-coordinator { fill: #ffb300; }
+.node-group { fill: none; stroke: #8e24aa; stroke-width: 2.5; }
+.node.drop-target .node-shape { filter: drop-shadow(0 0 6px var(--primary-color)); stroke: var(--primary-color); }
+.node-icon { font-size: 18px; pointer-events:none; }
+.node-role-badge-bg { fill: var(--card-background-color, #fff); stroke: #8e24aa; stroke-width: 1.5; }
+.node-role-badge-icon { pointer-events:none; }
+.node-label { font-size: 11px; text-anchor: middle; fill: var(--primary-text-color); pointer-events:none; }
+/* Floor Plan labels sit on an arbitrary uploaded image, not the card's own
+   background, so trusting the theme's text color (as the Map view safely
+   does) can go invisible \u2014 e.g. dark theme = light text, sitting on a white
+   blueprint. A halo outline in the card's background color keeps the label
+   readable against light or dark image content either way. */
+.fp-node .node-label {
+  paint-order: stroke;
+  stroke: var(--card-background-color, #fff);
+  stroke-width: 3px;
+  stroke-linejoin: round;
+}
+.edge { stroke-width: 2.5; cursor:pointer; opacity: 0.85; }
+.edge:hover { stroke-width: 4; opacity: 1; }
+/* Reporting-type bindings (see _isControlBinding) \u2014 only ever drawn when
+   "Show reporting-only bindings" is on, so they need to read as secondary
+   background info rather than compete with real control arrows. */
+.edge-reporting { stroke-width: 1.2; stroke-dasharray: 4,3; opacity: 0.45; }
+.edge-reporting:hover { stroke-width: 2; opacity: 0.8; }
+/* Distinct from both control (solid) and reporting (faint dashed) \u2014 this
+   binding hasn't been classified yet (device not cluster-scanned, or the
+   cluster isn't declared on this endpoint at all), and stays visible by
+   default same as control, just visually flagged as unresolved. */
+.edge-unknown { stroke-width: 1.6; stroke-dasharray: 2,2; opacity: 0.7; }
+.edge-unknown:hover { stroke-width: 2.2; opacity: 1; }
+.stale-banner { margin-bottom:10px; padding:8px 12px; border-radius:8px; background: rgba(255,152,0,0.14); font-size:0.9em;
+  display:flex; flex-direction:column; gap:6px; }
+.pending-banner { background: rgba(255,193,7,0.16); }
+.flow-steps { display:flex; flex-wrap:wrap; gap:6px 14px; list-style:none; padding:0; margin:0 0 12px; font-size:0.85em; color: var(--secondary-text-color); }
+.flow-steps li.active { color: var(--primary-text-color); font-weight:600; }
+.flow label { display:block; margin:8px 0; }
+.flow-targets { max-height: 320px; overflow:auto; border:1px solid var(--divider-color, rgba(127,127,127,0.3)); border-radius:8px; padding:4px 8px; }
+.flow .flow-target { display:flex; align-items:center; gap:8px; margin:4px 0; }
+.flow .flow-target .muted { margin-left:auto; font-size:0.85em; }
+.flow-known, .flow-result, .flow-share, .flow-callout { padding:8px 12px; border-radius:8px; margin:8px 0; }
+.flow-tag { display:inline-block; font-size:0.8em; padding:0 6px; margin-left:6px; border-radius:8px; background: rgba(255,152,0,0.16); color: var(--warning-color, #c77700); }
+.flow-suggested { display:inline-block; font-size:0.8em; padding:0 6px; margin-left:6px; border-radius:8px; background: rgba(33,150,243,0.14); color: var(--primary-color, #1976d2); }
+.flow-known-unknown { background: rgba(127,127,127,0.12); }
+.flow-known-works, .flow-result-success { background: rgba(76,175,80,0.14); }
+.flow-known-mixed, .flow-result-info { background: rgba(3,169,244,0.12); }
+.flow-known-problems, .flow-result-warning { background: rgba(255,152,0,0.18); }
+.flow-share, .flow-callout { background: rgba(3,169,244,0.10); }
+.flow-pitfalls { margin:8px 0; }
+.flow-pitfalls summary { cursor:pointer; font-weight:600; }
+.flow-pitfalls ul, .flow-clusters, .flow-log { margin:6px 0; padding-left:20px; }
+.flow-mode { border:none; padding:0; margin:8px 0; }
+.flow-mode legend { font-weight:600; padding:0; }
+.flow-support { display:block; font-size:0.85em; margin:0 0 6px 24px; }
+.flow-support-warning { color: var(--warning-color, #c77700); }
+.flow-log { list-style:none; padding-left:0; }
+.flow-log li { margin:3px 0; }
+.adv-group-support { margin:4px 0 8px; padding:6px 10px; border-radius:6px; font-style:normal; }
+.adv-group-support-ok { background: rgba(76,175,80,0.12); }
+.adv-group-support-info { background: rgba(3,169,244,0.12); }
+.adv-group-support-warning, .adv-group-support-empty { background: rgba(255,152,0,0.18); }
+.adv-group-support-unknown { opacity: 0.8; }
+.pending-list { margin:0; padding-left:20px; }
+.status-warning { background: rgba(255,152,0,0.16); color: var(--primary-text-color); }
+.status .status-action { margin-left:8px; flex:0 0 auto; }
+.stale-row { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+.stale-row > span { flex: 1 1 260px; }
+.lost-banner { background: rgba(219,68,55,0.10); }
+.lost-list { margin-top:8px; display:flex; flex-direction:column; gap:8px; }
+.lost-device { padding:6px 8px; border-radius:6px; background: var(--card-background-color, rgba(255,255,255,0.6)); }
+.lost-device-head { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+.lost-device-head .muted { flex: 1 1 160px; }
+.lost-device ul { margin:4px 0 0 0; padding-left:18px; }
+.lost-device li { margin:2px 0; }
+a.health-chip-lost { text-decoration:none; cursor:pointer; }
+.drawer-lost { margin:0 0 6px 0; padding-left:18px; }
+.drawer-lost-policy { display:flex; align-items:center; gap:6px; flex-wrap:wrap; margin-top:8px; font-size:0.9em; }
+.drawer-lost-expect { margin-top:4px; font-size:0.88em; }
+.drawer-lost-expect ul { margin:4px 0; padding-left:18px; }
+.answers-locked { opacity: 0.85; }
+.answers-preview { margin:6px 0; padding-left:18px; font-size:0.9em; }
+.answers-preview li { margin:3px 0; }
+.answers-form { display:flex; flex-direction:column; gap:8px; }
+.answers-q { display:flex; flex-direction:column; gap:3px; font-size:0.92em; }
+.answers-q select, .answers-q input, .answers-q textarea { max-width:100%; font:inherit; }
+.answers-other { margin-top:2px; }
+.answers-use { margin:4px 0; font-size:0.92em; }
+.answers-use summary { cursor:pointer; }
+.answers-list, .answers-tips { margin:4px 0; padding-left:18px; }
+.answers-list li { margin:2px 0; }
+.answers-tips li { font-style:italic; }
+.answers-rating { color:#b26a00; }
+.btn.disabled { opacity:0.5; pointer-events:auto; cursor:not-allowed; }
+.table-filter-info { display:flex; flex-wrap:wrap; align-items:center; gap:10px; margin-bottom:8px; padding:6px 10px;
+  border-radius:8px; background: rgba(76,154,255,0.12); font-size:0.85em; }
+.dir-cell { white-space:nowrap; font-weight:600; }
+.dir-cell.dir-outbound { color: var(--primary-color); }
+.dir-cell.dir-inbound { color: var(--secondary-text-color); }
+.table-toolbar { display:flex; align-items:center; gap:8px; margin-bottom:8px; font-size:0.85em; flex-wrap:wrap; }
+.health-filters { display:flex; gap:6px; flex-wrap:wrap; }
+.removed-note { color: var(--error-color, #db4437); font-weight:600; font-size:0.9em; }
+.removed-note code { font-weight:400; }
+.bindings-table { width:100%; border-collapse: collapse; font-size: 0.9em; }
+.bindings-table th, .bindings-table td { text-align:left; padding: 8px 10px; border-bottom: 1px solid var(--divider-color, #eee); }
+.bindings-table th[data-sort] { cursor: pointer; user-select: none; white-space: nowrap; }
+.bindings-table th[data-sort]:hover { color: var(--primary-color); }
+.bindings-table th.sort-asc::after { content: " \\25B2"; font-size: 0.75em; }
+.bindings-table th.sort-desc::after { content: " \\25BC"; font-size: 0.75em; }
+.health-summary { display:flex; align-items:center; gap:10px; margin-bottom:10px; padding:8px 12px;
+  border-radius:8px; background: var(--secondary-background-color, #fafafa); border:1px solid var(--divider-color, #eee);
+  font-size:0.85em; flex-wrap:wrap; }
+.health-summary-title { font-weight:600; }
+.health-chip { display:inline-flex; align-items:center; gap:4px; padding:3px 9px; border-radius:12px; font-size:0.9em; }
+.health-badge { border:none; border-radius:12px; padding:4px 10px; font-size:0.85em; cursor:pointer; white-space:nowrap; }
+.health-ok, .health-badge.health-ok, .health-chip.health-ok { background: rgba(76,206,172,0.15); color: #2e9e83; }
+.health-info, .health-badge.health-info, .health-chip.health-info { background: rgba(76,154,255,0.15); color: #2f6fce; }
+.health-warning, .health-badge.health-warning, .health-chip.health-warning { background: rgba(255,179,0,0.18); color: #b26a00; }
+.health-error, .health-badge.health-error, .health-chip.health-error { background: rgba(219,68,55,0.15); color: var(--error-color, #db4437); }
+.src-link { color: var(--primary-color); cursor: pointer; text-decoration: none; }
+.src-link:hover { text-decoration: underline; }
+.muted { color: var(--secondary-text-color); }
+.dot { display:inline-block; width:9px; height:9px; border-radius:50%; margin-right:4px; vertical-align:middle; }
+.advanced-form-wrap { display:flex; gap:16px; flex-wrap:wrap; align-items:flex-start; }
+.advanced-form { display:flex; flex-direction:column; gap:10px; flex: 1 1 340px; max-width: 480px; }
+.advanced-form label { display:flex; flex-direction:column; gap:4px; font-size:0.85em; color: var(--secondary-text-color); }
+.advanced-form select, .advanced-form input { padding:6px 8px; border-radius:6px; border:1px solid var(--divider-color, #ccc);
+  background: var(--card-background-color); color: var(--primary-text-color); }
+.advanced-side { display:flex; flex-direction:column; gap:12px; flex: 1 1 280px; min-width:0; }
+.advanced-panel { border:1px solid var(--divider-color, #e0e0e0); border-radius:10px; padding:8px 10px;
+  background: var(--secondary-background-color, #fafafa); }
+.advanced-binding-list { display:flex; flex-direction:column; gap:6px; font-size:0.85em; max-height:280px; overflow-y:auto; margin-top:6px; }
+.advanced-binding-row { display:flex; align-items:center; gap:6px; padding:5px 8px; border-radius:6px;
+  background: var(--card-background-color); }
+.advanced-empty { color: var(--secondary-text-color); font-size:0.85em; padding:4px 0 0; margin:0; }
+.dialog { position: fixed; inset:0; display:none; z-index: 20; align-items:center; justify-content:center; }
+.dialog.open { display:flex; }
+.dialog-backdrop { position:absolute; inset:0; background: rgba(0,0,0,0.4); }
+.dialog-panel { position:relative; background: var(--card-background-color, #fff); color: var(--primary-text-color);
+  border-radius: 12px; padding: 16px 18px; width: min(560px, 92vw); max-height: 82vh; overflow:auto; box-shadow: 0 8px 30px rgba(0,0,0,0.3); }
+.dialog-panel.wide { width: min(760px, 94vw); }
+.dialog-header { display:flex; align-items:center; justify-content:space-between; font-weight:600; margin-bottom:10px; }
+.row { display:flex; align-items:center; gap:6px; font-size:0.92em; }
+.dialog-actions { display:flex; gap:8px; margin-top:14px; }
+.detail-table td { padding: 4px 8px; font-size: 0.9em; }
+
+/* Device drawer (1.4.0): side panel opened by clicking a device anywhere. */
+.drawer { position: fixed; top:0; right:0; bottom:0; width: min(400px, 100vw); z-index: 15;
+  background: var(--card-background-color, #fff); color: var(--primary-text-color);
+  box-shadow: -6px 0 24px rgba(0,0,0,0.25); transform: translateX(105%); transition: transform 0.18s ease-out;
+  display:flex; flex-direction:column; }
+.drawer.open { transform: none; }
+.drawer-header { display:flex; align-items:center; justify-content:space-between; gap:8px; font-weight:600;
+  padding: 14px 16px 10px; border-bottom: 1px solid var(--divider-color, rgba(0,0,0,0.12)); }
+.drawer-body { overflow-y:auto; padding: 12px 16px 24px; font-size: 0.92em; }
+.drawer-head { display:flex; gap:12px; align-items:flex-start; }
+.drawer-photo { width: 84px; height: 84px; object-fit: contain; flex: 0 0 auto; border-radius: 8px;
+  background: var(--secondary-background-color, #f5f5f5); }
+.drawer-tags { display:flex; flex-wrap:wrap; gap:4px; margin-bottom:4px; }
+.drawer-tags .chip { cursor: default; }
+.drawer-body { overflow-x:hidden; }
+.drawer-head > div { flex: 1 1 auto; min-width: 0; }
+.drawer-facts { width:100%; table-layout: fixed; }
+.drawer-facts td { overflow-wrap: anywhere; vertical-align: top; }
+.drawer-facts td:first-child { color: var(--secondary-text-color); width: 42%; }
+.drawer-check { display:flex; align-items:flex-start; gap:8px; margin-top:8px; font-size:0.95em; }
+.drawer-check input { flex: 0 0 auto; margin-top:3px; }
+.drawer-facts .scan-cell { display:block; }
+.map-route-banner { margin: 6px 0; padding: 8px 10px; border-left: 4px solid var(--primary-color); background: var(--secondary-background-color, #f5f5f5); border-radius: 6px; font-size: 13px; display:flex; gap:8px; align-items:flex-start; flex-wrap: wrap; }
+.map-route-banner .map-route-text { flex: 1 1 260px; }
+.map-route-hop { stroke-width: 5; stroke-dasharray: 10 6; opacity: .9; pointer-events: stroke; }
+.map-route-lqi { font-size: 12px; font-weight: 700; paint-order: stroke; stroke: var(--card-background-color, #fff); stroke-width: 3px; }
+.node.map-route-node .node-shape { stroke: var(--primary-color); stroke-width: 4; }
+.groups-head { display:flex; gap:12px; align-items:flex-start; flex-wrap:wrap; margin: 8px 0 12px; }
+.groups-head p { flex: 1 1 320px; margin: 0; }
+.group-card { border: 1px solid var(--divider-color, #e0e0e0); border-radius: 10px; padding: 10px 12px; margin-bottom: 10px; }
+.group-card.group-focus { border-color: var(--primary-color); box-shadow: 0 0 0 2px var(--primary-color); }
+.group-card-head { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+.group-card-head .spacer { flex: 1; }
+.group-cols { display:grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 12px; margin-top: 8px; }
+.groups-list { list-style:none; padding:0; margin: 4px 0; }
+.groups-list li { display:flex; align-items:center; gap:6px; flex-wrap:wrap; padding: 3px 0; }
+.groups-list li .btn { margin-left:auto; }
+.groups-reasons { margin: 4px 0 8px; padding-left: 18px; }
+.groups-reasons li { margin: 2px 0; }
+.groups-pick { display:flex; flex-direction:column; gap:4px; max-height: 260px; overflow:auto; margin: 6px 0; }
+.drawer-db-missing { color: var(--warning-color, #b26a00); font-weight: 500; }
+.drawer-section { margin-top: 16px; }
+.drawer-section-title { font-weight: 600; margin-bottom: 6px; }
+.drawer-rel { list-style:none; padding:0; margin:0; display:flex; flex-direction:column; gap:6px; }
+.drawer-rel li { display:flex; flex-wrap:wrap; gap:4px 8px; align-items:baseline; }
+.drawer-clusters { font-size: 0.85em; }
+.drawer-empty { margin: 0; }
+.drawer-problems ul { margin: 0 0 6px; padding-left: 18px; }
+.drawer-problems .health-error { color: var(--error-color, #db4437); }
+.drawer-problems .health-warning { color: var(--warning-color, #f4b400); }
+.drawer-actions { display:flex; flex-direction:column; align-items:stretch; gap:8px; }
+.drawer-actions .btn { text-align:center; text-decoration:none; }
+.drawer-share { border: 1px solid var(--divider-color, rgba(0,0,0,0.12)); border-radius: 8px; padding: 8px 12px; }
+.drawer-share ol { padding-left: 18px; margin: 6px 0; }
+.drawer-share li { margin-bottom: 4px; }
+.ep-check-all { display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin-bottom:8px; }
+.flow-group-choice label { display:flex; align-items:center; gap:6px; flex-wrap:wrap; }
+.flow-group-choice input[type="text"], .flow-group-choice select { flex: 1 1 180px; min-width: 0; }
+.adv-guided-hint { display:flex; align-items:center; gap:6px; flex-wrap:wrap; }
+
+/* Experimental (1.5.0 local build): Network tab and route check. */
+.exp-badge { display:inline-block; font-size:0.7em; font-weight:600; letter-spacing:0.02em; padding:1px 6px; border-radius:8px;
+  margin-left:4px; vertical-align:middle; color: var(--warning-color, #ffa000); border:1px solid var(--warning-color, #ffa000); }
+.tab-beta { font-size:0.62em; font-weight:500; margin-left:2px; opacity:0.75; letter-spacing:0.02em; color: inherit; }
+.mesh-intro p { margin: 0 0 8px; }
+.mesh-toolbar { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+.mesh-progress { display:flex; align-items:center; gap:8px; margin:6px 0; font-size:0.9em; }
+.mesh-progress:empty { display:none; }
+.mesh-layout { display:flex; gap:16px; align-items:flex-start; margin-top:8px; }
+.mesh-picture { flex: 1 1 auto; min-width:0; }
+.mesh-side { flex: 0 0 300px; font-size:0.9em; }
+.mesh-svg { width:100%; height:auto; max-height:70vh; border:1px solid var(--divider-color, rgba(0,0,0,0.12)); border-radius:8px;
+  background: var(--card-background-color, #fff); }
+.mesh-node { cursor:pointer; }
+.mesh-picture { position:relative; }
+.mesh-zoom { position:absolute; top:8px; right:8px; display:flex; gap:4px; z-index:1; }
+.mesh-svg { touch-action:none; cursor:grab; }
+.mesh-link { cursor:pointer; }
+.mesh-svg .mesh-zs { transform: scale(var(--mz, 1)); transform-origin: 0 0; transform-box: view-box; }
+.mesh-svg [style*="--sw"] { stroke-width: calc(var(--sw) * var(--mz, 1) * 1px); }
+.mesh-picture { position: relative; }
+.mesh-picture > .mesh-selected { position: absolute; left: 8px; top: 8px; z-index: 2; max-width: min(340px, calc(100% - 16px)); background: var(--card-background-color, #fff); box-shadow: 0 2px 8px rgba(0,0,0,0.25); }
+.edge-pending { stroke-dasharray: 6 5; opacity: 0.85; cursor: pointer; }
+.edge-lost { stroke-dasharray: 7 5; stroke-width: 2.5; opacity: 0.9; cursor: pointer; }
+.mesh-show-hint { margin:4px 0 0; }
+.mesh-battery circle { fill: var(--card-background-color, #fff); stroke-width:2; }
+.mesh-battery.orphan circle { stroke: var(--disabled-text-color, #999) !important; stroke-dasharray: 2 2; }
+.mesh-battery-label { fill: var(--secondary-text-color); }
+.mesh-failed { list-style:none; padding:0; margin:0 0 12px; display:flex; flex-direction:column; gap:4px; }
+.mesh-failed li { display:flex; justify-content:space-between; align-items:center; gap:8px; }
+.mesh-routes { padding-left:18px; margin:0 0 12px; }
+.mesh-routes li { margin-bottom:4px; }
+.mesh-link-hit { stroke: transparent; pointer-events: stroke; }
+.mesh-link:hover line:first-child { stroke-opacity:1; }
+.mesh-selected { border:1px solid var(--divider-color, rgba(0,0,0,0.12)); border-radius:8px; padding:8px 10px; margin-bottom:12px; }
+.mesh-selected ul { margin:6px 0; padding-left:18px; }
+.mesh-selected p { margin:4px 0 6px; font-size:0.9em; }
+.mesh-unplaced { margin-top:6px; font-size:0.9em; }
+.mesh-legend span { display:inline-flex; align-items:center; gap:4px; margin-right:10px; }
+.mesh-legend-note { font-size:0.85em; margin-top:4px; }
+.mesh-floor-badge { fill: var(--primary-color); font-weight:700; paint-order: stroke; stroke: var(--card-background-color, #fff); stroke-width:3px; }
+.mesh-node circle.via-ceiling { fill:none; stroke: var(--warning-color, #ffa000); stroke-dasharray: 3 3; stroke-width:1.5; }
+.mesh-floors-help, .fp-floor-help details { font-size:0.9em; margin:4px 0 8px; }
+.mesh-floors-help summary, .fp-floor-help summary { cursor:pointer; color: var(--primary-color); }
+.mesh-floors-help ol, .fp-floor-help ol { margin:6px 0; padding-left:20px; }
+.fp-floor-help { margin: 0 0 6px; }
+.mesh-unplaced summary { cursor:pointer; }
+.mesh-node circle, .mesh-node rect { fill: var(--card-background-color, #fff); stroke: var(--primary-text-color); stroke-width:1.5; }
+.mesh-node circle.unread { stroke-dasharray: 3 3; stroke: var(--secondary-text-color); }
+.mesh-node rect { fill: var(--primary-color); }
+.mesh-label { fill: var(--primary-text-color); paint-order: stroke; stroke: var(--card-background-color, #fff); stroke-width:3px; }
+.mesh-kids { fill: var(--secondary-text-color); font-weight:600; }
+.mesh-legend { display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-top:6px; font-size:0.85em; }
+.mesh-tips { padding-left:18px; margin:0 0 12px; }
+.activity-section { margin: 4px 0 12px; }
+.activity-summary-line { display:flex; flex-wrap:wrap; align-items:center; gap:6px 8px; cursor:pointer; padding:6px 0; }
+.activity-details > summary { list-style:none; }
+.activity-details > summary::-webkit-details-marker { display:none; }
+.activity-details > summary::before { content:"\u25B8"; display:inline-block; width:1em; transition: transform .15s; }
+.activity-details[open] > summary::before { transform: rotate(90deg); }
+.activity-alert { color: var(--error-color, #c62828); font-weight:600; }
+.activity-table { width:100%; max-width:900px; border-collapse:collapse; table-layout:fixed; }
+.activity-table th, .activity-table td { padding:4px 8px; text-align:left; vertical-align:top; overflow:hidden; text-overflow:ellipsis; }
+.activity-table th { font-weight:600; white-space:nowrap; }
+.activity-table .num { text-align:right; font-variant-numeric: tabular-nums; }
+.activity-table .activity-col-name { width:32%; }
+.activity-table .activity-col-num { width:11%; }
+.activity-table tr.activity-chatty td { color: var(--error-color, #c62828); }
+.activity-counters { margin-top:8px; }
+.activity-counters .num { text-align:right; font-variant-numeric: tabular-nums; }
+@media (max-width: 600px) {
+  .activity-table .activity-col-name { width:46%; }
+  .activity-table .activity-col-num { width:18%; }
+  .activity-table th { white-space:normal; font-size:0.9em; }
+  .activity-table th, .activity-table td { padding:4px 4px; }
+  .activity-table th:nth-child(5), .activity-table td:nth-child(5) { display:none; }
+}
+.mesh-tips li { margin-bottom:6px; }
+.mesh-tip-error { color: var(--error-color, #db4437); font-weight: 500; }
+.mesh-tip-warning { color: var(--primary-text-color); }
+.mesh-tip-info { color: var(--secondary-text-color); }
+.mesh-links tr { cursor:pointer; }
+.mesh-links tr.active td { background: var(--secondary-background-color, rgba(0,0,0,0.05)); }
+.lqi-chip { display:inline-block; font-size:0.8em; padding:0 6px; border-radius:8px; white-space:nowrap; border:1px solid currentColor; }
+.lqi-good { color: var(--success-color, #43a047); }
+.lqi-fair { color: var(--warning-color, #ffa000); }
+.lqi-weak { color: var(--error-color, #db4437); }
+.lqi-unknown { color: var(--secondary-text-color); }
+.route-list { list-style:none; padding:0; margin:6px 0; display:flex; flex-direction:column; gap:10px; }
+.route-chain { margin:4px 0; line-height:1.9; }
+.route-arrow { color: var(--secondary-text-color); }
+.route-members { margin:4px 0; padding-left:18px; }
+.route-verdict { font-size:0.9em; margin-top:2px; }
+.route-good { color: var(--success-color, #43a047); }
+.route-weak { color: var(--error-color, #db4437); }
+.route-none, .route-unknown { color: var(--secondary-text-color); }
+@media (max-width: 800px) { .mesh-layout { flex-direction: column; } .mesh-side { flex-basis:auto; width:100%; } }
+
+/* Exploded device view \u2014 per-endpoint cards inside the (widened) dialog. */
+.ep-photo-toggle { font-size:0.82em; color: var(--secondary-text-color); margin-bottom:10px; }
+.ep-device-header { display:flex; align-items:flex-start; gap:14px; }
+.ep-device-visual { flex: 0 0 auto; width:64px; }
+.ep-device-photo { width:64px; max-height:110px; object-fit:contain; border-radius:6px;
+  background: var(--card-background-color); }
+.ep-device-shape { width:64px; }
+.ep-shape-svg { display:block; }
+.ep-shape-plate { fill: var(--secondary-background-color, #eee); stroke: var(--divider-color, #ccc); }
+.ep-shape-gang { fill: var(--primary-color, #039be5); opacity:0.75; }
+.ep-device-header .detail-table { flex:1; }
+.ep-grid { display:grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap:10px; margin-top:12px; }
+.ep-card { border:1px solid var(--divider-color, #e0e0e0); border-radius:10px; padding:10px 12px;
+  background: var(--secondary-background-color, #fafafa); }
+.ep-card-head { display:flex; align-items:center; justify-content:space-between; gap:8px; margin-bottom:8px; }
+.ep-card-title { font-weight:600; font-size:0.95em; }
+.ep-badges { display:flex; flex-wrap:wrap; gap:4px; margin-bottom:6px; }
+.ep-badge { display:inline-block; font-size:0.78em; padding:3px 8px; border-radius:10px; line-height:1.5; }
+.ep-badge-clusters { display:block; font-size:0.88em; opacity:0.75; }
+.ep-badge-self { background:#ede7f6; color:#4a2f8f; }
+.ep-badge-out { background:#e1f5ee; color:#0a5c46; }
+.ep-badge-in { background:#faece7; color:#8f3d1c; }
+.ep-badge-member { background:#f3e5f5; color:#6a1b78; }
+.ep-badge-unknown { background:#fff3e0; color:#8a5a00; }
+.ep-badge-reporting { background: var(--divider-color, #e0e0e0); color: var(--secondary-text-color); }
+.ep-badge-muted { background: var(--divider-color, #e0e0e0); color: var(--secondary-text-color); }
+.ep-report { font-size:0.82em; color: var(--secondary-text-color); margin: 4px 0 8px; }
+.ep-picker-label { display:block; font-size:0.8em; color: var(--secondary-text-color); margin-bottom:3px; }
+.ep-cmd-section { margin:10px 0; padding:8px 0; border-top:1px solid var(--divider-color, #e0e0e0); border-bottom:1px solid var(--divider-color, #e0e0e0); }
+.ep-cmd-status { margin:4px 0; }
+.ep-cmd-actions { display:flex; gap:6px; flex-wrap:wrap; margin-bottom:8px; }
+.ep-cmd-discovery-note { margin: 0 0 8px; padding:6px 8px; border-radius:8px;
+  background: var(--secondary-background-color, #fafafa); border:1px solid var(--divider-color, #eee); }
+.ep-cmd-results { display:flex; flex-direction:column; gap:6px; margin-bottom:8px; }
+.ep-cmd-cluster { border:1px solid var(--divider-color, #e0e0e0); border-radius:8px; padding:6px 8px; }
+.ep-cmd-cluster-head {
+  display:flex; align-items:center; gap:6px; width:100%; text-align:left;
+  border:none; background:none; padding:0; margin:0; font: inherit; font-size:0.85em; font-weight:600;
+  color:inherit; cursor:pointer;
+}
+.ep-cmd-cluster-head:hover { color: var(--primary-color); }
+.ep-cmd-chevron { flex:none; opacity:0.6; font-size:0.9em; }
+.ep-cmd-cluster-title { flex:1; }
+.ep-cmd-summary { flex:none; font-weight:400; font-size:0.82em; opacity:0.7; white-space:nowrap; }
+.ep-cmd-cluster-body { margin-top:6px; display:flex; flex-direction:column; gap:4px; }
+.ep-cmd-cluster-id { font-weight:400; opacity:0.65; margin-left:4px; }
+.ep-cmd-row { display:flex; align-items:center; gap:6px; padding:3px 6px; border-radius:6px; font-size:0.82em; }
+.ep-cmd-row.ep-cmd-yes { }
+.ep-cmd-row.ep-cmd-no { background:#faece7; }
+.ep-cmd-yes .ep-cmd-icon { color:#0a5c46; }
+.ep-cmd-no .ep-cmd-icon { color:#8f3d1c; }
+.ep-cmd-no .ep-cmd-name, .ep-cmd-no .ep-cmd-hex { color:#8f3d1c; }
+.ep-cmd-name { flex:1; }
+.ep-cmd-hex { opacity:0.65; font-size:0.9em; }
+.ep-cmd-share-draft { border:1px dashed var(--divider-color, #ccc); border-radius:8px; padding:8px; margin-top:4px; }
+.ep-cmd-share-json {
+  width:100%; box-sizing:border-box; font-family: var(--code-font-family, monospace); font-size:0.72em;
+  background: var(--card-background-color); color: var(--primary-text-color);
+  border:1px solid var(--divider-color, #ccc); border-radius:6px; padding:6px; resize:vertical;
+}
+.ep-cmd-share-actions { display:flex; gap:6px; flex-wrap:wrap; margin-top:6px; }
+.ep-control-select { width:100%; }
+
+/* Capability Explorer tab */
+.capexp-strip { display:flex; align-items:center; gap:8px; background: rgba(76,154,255,0.1);
+  border:1px solid rgba(76,154,255,0.3); border-radius:10px; padding:8px 12px; margin-bottom:10px; font-size:0.85em; }
+.capexp-mission { font-size:1em; font-weight:600; margin: 0 0 4px; }
+.capexp-discoveries { background: var(--secondary-background-color, #fafafa); border:1px solid var(--divider-color, #eee);
+  border-radius:10px; padding:8px 12px; margin: 8px 0; }
+.capexp-discoveries-label { font-size:0.78em; font-weight:600; color: var(--secondary-text-color); margin-bottom:4px; }
+.capexp-discoveries-lead { margin:0 0 6px; font-size:0.88em; }
+.capexp-discoveries-list { margin:0; padding-left:18px; display:flex; flex-direction:column; gap:3px; font-size:0.88em; }
+.capexp-modes { display:flex; gap:8px; flex-wrap:wrap; margin-bottom:2px; }
+.capexp-mode-btn { display:flex; flex-direction:column; align-items:flex-start; gap:2px; text-align:left;
+  border:1px solid var(--divider-color, #ccc); background: var(--card-background-color); color: var(--primary-text-color);
+  border-radius:10px; padding:7px 12px; cursor:pointer; }
+.capexp-mode-btn:hover { filter: brightness(0.97); }
+.capexp-mode-btn.active { background: var(--primary-color); border-color: transparent; }
+.capexp-mode-btn .capexp-mode-title { font-size:0.88em; font-weight:600; }
+.capexp-mode-btn.active .capexp-mode-title { color: var(--text-primary-color, #fff); }
+.capexp-mode-btn .capexp-mode-sub { font-size:0.76em; color: var(--secondary-text-color); }
+.capexp-mode-btn.active .capexp-mode-sub { color: var(--text-primary-color, #fff); opacity:0.85; }
+.capexp-status-row { display:flex; align-items:center; justify-content:space-between; gap:10px; margin-bottom:8px; }
+.capexp-status-row .hint { margin:0; }
+.capexp-error { color: var(--error-color, #db4437); }
+.capexp-section-title { font-weight:600; margin: 14px 0 6px; }
+.capexp-section-title:first-child { margin-top:6px; }
+.capexp-device-list { display:flex; flex-direction:column; gap:8px; }
+.capexp-device-card { border:1px solid var(--divider-color, #e0e0e0); border-radius:10px; padding:10px 12px;
+  background: var(--secondary-background-color, #fafafa); }
+.capexp-device-top { display:flex; gap:12px; align-items:flex-start; }
+.capexp-device-main { flex:1 1 auto; min-width:0; }
+.capexp-device-photo, .capexp-device-photo-fallback { width:56px; height:56px; border-radius:8px; flex:0 0 auto;
+  background: var(--card-background-color, #fff); border:1px solid var(--divider-color, #e0e0e0); object-fit:contain; }
+.capexp-device-photo-fallback { position:relative; background: var(--secondary-background-color, #fafafa); }
+.capexp-device-photo-fallback::after { content:""; position:absolute; inset:15px;
+  background-color: var(--secondary-text-color, #727272); opacity:0.45;
+  mask-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'><rect x='3' y='3' width='18' height='18' rx='3' fill='none' stroke='black' stroke-width='2'/><circle cx='12' cy='12' r='3' fill='black'/></svg>");
+  -webkit-mask-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'><rect x='3' y='3' width='18' height='18' rx='3' fill='none' stroke='black' stroke-width='2'/><circle cx='12' cy='12' r='3' fill='black'/></svg>");
+  mask-size:contain; -webkit-mask-size:contain; mask-repeat:no-repeat; -webkit-mask-repeat:no-repeat;
+  mask-position:center; -webkit-mask-position:center; }
+.capexp-device-header { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+.capexp-device-name { font-weight:600; }
+.capexp-website-link { margin-left:auto; font-size:0.78em; font-weight:500; color: var(--primary-color);
+  text-decoration:none; white-space:nowrap; }
+.capexp-website-link:hover { text-decoration:underline; }
+.capexp-external-refs { font-size:0.78em; margin-top:6px; }
+.capexp-external-refs a { color: var(--primary-color); text-decoration:none; }
+.capexp-external-refs a:hover { text-decoration:underline; }
+.capexp-chevron { margin-left:auto; opacity:0.6; }
+.capexp-techtoggle { display:flex; align-items:center; gap:4px; cursor:pointer; user-select:none;
+  margin-top:10px; padding-top:8px; border-top:1px solid var(--divider-color, #e0e0e0);
+  font-size:0.78em; font-weight:600; color: var(--secondary-text-color); }
+.capexp-techtoggle:hover { color: var(--primary-text-color); }
+.capexp-chevron-inline { opacity:0.7; }
+.capexp-tech-panel { margin-top:6px; }
+.capexp-trust-panel { display:flex; align-items:center; gap:8px; margin-top:6px; }
+.capexp-trust-stars { font-size:1.05em; letter-spacing:1px; color:#e0a400; white-space:nowrap; }
+.capexp-trust-conflict { font-size:0.82em; letter-spacing:normal; color: var(--error-color, #db4437); font-weight:600; }
+.capexp-trust-text { display:flex; flex-direction:column; }
+.capexp-trust-label { font-size:0.78em; font-weight:600; color: var(--secondary-text-color); }
+.capexp-evidence-tag { display:inline-block; align-self:flex-start; font-size:0.68em; font-weight:500;
+  padding:1px 7px; border-radius:8px; margin:2px 0; background: var(--divider-color, #e0e0e0);
+  color: var(--secondary-text-color); }
+.capexp-trust-detail { font-size:0.8em; }
+.capexp-cap-label { font-size:0.78em; color: var(--secondary-text-color); margin-top:8px; margin-bottom:2px; }
+.capexp-cap-groups { display:flex; flex-direction:column; gap:6px; margin-top:2px; }
+.capexp-cap-group-label { font-size:0.85em; font-weight:600; }
+.capexp-cap-tags { display:flex; flex-wrap:wrap; gap:5px; margin-top:3px; }
+.capexp-cap-reportsonly { margin-top:2px; }
+.capexp-cap-group-unidentified .capexp-cap-group-label { font-weight:500; font-style:italic; }
+.capexp-device-overview { margin:6px 0 4px; font-size:0.88em; line-height:1.5; }
+.capexp-badge { display:inline-block; font-size:0.72em; padding:2px 8px; border-radius:10px; cursor:help; }
+.capexp-badge-input { background: rgba(158,158,158,0.18); color: var(--secondary-text-color); }
+.capexp-badge-output { background: rgba(76,175,80,0.16); color: #2e7d32; }
+.capexp-badge-both { background: rgba(142,36,170,0.13); color: #6a1b78; }
+.capexp-badge-unknown { background: rgba(158,158,158,0.18); color: var(--secondary-text-color); font-style: italic; }
+.capexp-tag { display:inline-block; font-size:0.78em; padding:3px 9px; border-radius:10px;
+  background: rgba(76,154,255,0.15); color: #2f6fce; }
+.capexp-tag-conflict { background: rgba(219,68,55,0.15); color: var(--error-color, #db4437); }
+.capexp-tag-fwdep { background: rgba(142,36,170,0.13); color: #6a1b78; }
+.capexp-report-line { font-size:0.85em; margin-top:8px; }
+.capexp-discovery-note { font-size:0.8em; margin-top:6px; padding:4px 8px; border-radius:6px;
+  background: rgba(76,154,255,0.10); color: #2f6fce; display:inline-block; }
+.capexp-goodfor { margin-top:8px; }
+.capexp-goodfor-tags { display:flex; flex-wrap:wrap; gap:5px; margin-top:3px; }
+.capexp-goodfor-tag { background: rgba(76,206,172,0.15); color: #1f7a63; }
+.capexp-fwgap-alert { margin-top:8px; padding:7px 10px; border-radius:8px; font-size:0.82em;
+  background: rgba(255,179,0,0.12); border:1px solid rgba(255,179,0,0.35); color: var(--primary-text-color); }
+.capexp-confidence-badge { display:inline-block; font-size:0.72em; padding:3px 9px; border-radius:10px;
+  white-space:nowrap; background: var(--divider-color, #e0e0e0); color: var(--secondary-text-color); }
+.capexp-confidence-strong-evidence { background: rgba(76,206,172,0.18); color: #2e9e83; }
+.capexp-confidence-well-confirmed { background: rgba(76,154,255,0.15); color: #2f6fce; }
+.capexp-confidence-repeated-observation { background: rgba(76,154,255,0.15); color: #2f6fce; }
+.capexp-confidence-single-observation { background: rgba(255,179,0,0.18); color: #b26a00; }
+.capexp-confidence-conflicting-evidence { background: rgba(219,68,55,0.15); color: var(--error-color, #db4437); }
+.capexp-device-detail { margin-top:10px; padding-top:8px; border-top:1px solid var(--divider-color, #e0e0e0);
+  display:flex; flex-direction:column; gap:10px; opacity:0.85; }
+.capexp-techlabel { font-size:0.7em; font-weight:600; text-transform:uppercase; letter-spacing:0.04em;
+  color: var(--secondary-text-color); margin-bottom:2px; }
+.capexp-entry-title { font-size:0.8em; font-weight:400; color: var(--secondary-text-color); margin-bottom:4px; }
+.capexp-nomatch-list { display:flex; flex-direction:column; gap:6px; }
+.capexp-nomatch-row { display:flex; align-items:center; justify-content:space-between; gap:10px;
+  padding:6px 10px; border-radius:8px; background: var(--secondary-background-color, #fafafa);
+  border:1px solid var(--divider-color, #eee); font-size:0.9em; }
+.capexp-search-example-group { margin-bottom:8px; }
+.capexp-search-example-category { font-size:0.72em; font-weight:600; text-transform:uppercase; letter-spacing:0.04em;
+  color: var(--secondary-text-color); margin-bottom:4px; }
+.capexp-search-examples { display:flex; flex-wrap:wrap; gap:6px; margin-bottom:2px; }
+.capexp-advanced-filters { margin:10px 0; }
+.capexp-advanced-filters summary { cursor:pointer; font-size:0.85em; font-weight:600; color: var(--secondary-text-color); }
+.capexp-search-form { display:flex; flex-wrap:wrap; gap:8px; margin-top:8px; margin-bottom:8px; }
+.capexp-search-form input, .capexp-search-form select { flex: 1 1 150px; min-width:120px; padding:6px 8px; border-radius:6px;
+  border:1px solid var(--divider-color, #ccc); background: var(--card-background-color); color: var(--primary-text-color); }
+.capexp-empty-search { padding:12px; border-radius:10px; background: var(--secondary-background-color, #fafafa);
+  border:1px solid var(--divider-color, #eee); }
+.capexp-empty-search p { margin: 0 0 6px; }
+.capexp-compare-form { display:flex; flex-wrap:wrap; gap:12px; margin-bottom:12px; }
+.capexp-compare-form label { display:flex; flex-direction:column; gap:4px; font-size:0.85em;
+  color: var(--secondary-text-color); flex: 1 1 160px; }
+.capexp-compare-form select { padding:6px 8px; border-radius:6px; border:1px solid var(--divider-color, #ccc);
+  background: var(--card-background-color); color: var(--primary-text-color); }
+.capexp-compare-my-device { margin:10px 0; padding:10px 12px; border-radius:10px;
+  background: var(--secondary-background-color, #fafafa); border:1px solid var(--divider-color, #eee);
+  display:flex; flex-direction:column; gap:6px; font-size:0.9em; }
+.capexp-compare-my-device.muted { color: var(--secondary-text-color); }
+.capexp-compare-my-device.capexp-compare-ok { border-color: var(--success-color, #2e7d32); }
+.capexp-compare-fw-row { display:flex; justify-content:space-between; gap:10px; }
+.capexp-compare-label { font-weight:600; font-size:0.85em; margin-top:2px; }
+.capexp-compare-list { list-style:none; margin:0; padding:0; display:flex; flex-direction:column; gap:4px; }
+.capexp-compare-list li { padding:2px 0; }
+.capexp-diff-wrap { display:flex; flex-direction:column; gap:6px; }
+.capexp-diff-row { padding:8px 10px; border-radius:8px; background: var(--secondary-background-color, #fafafa);
+  border:1px solid var(--divider-color, #eee); font-size:0.9em; }
+
+/* Narrow (phone) screens: stack the floor-plan sidebar above the map
+   instead of beside it, and trim padding so nothing forces extra width. */
+@media (max-width: 600px) {
+  .card { padding: 10px 10px 12px; }
+  .floorplan-layout { flex-direction: column; }
+  .fp-sidebar { width:100%; flex: 0 0 auto; max-height: 160px; }
+  .card.fullscreen #view-floorplan.active .fp-sidebar { max-height: 160px; }
+  .dialog-panel { width: min(560px, 96vw); padding: 12px 14px; }
+  .dialog-panel.wide { width: min(560px, 96vw); }
+  .ep-grid { grid-template-columns: 1fr; }
+  .capexp-search-form { flex-direction: column; }
+  .capexp-compare-form { flex-direction: column; }
+  .capexp-modes { flex-direction: column; }
+  .capexp-mode-btn { width: 100%; }
+}
+`;
+
+  // src/unbind-errors.js
+  function toolkitErrorText(err) {
+    const msg = err && (err.message || String(err)) || "";
+    return msg.replace(/^binds_remove_all failed:\s*/i, "").trim();
+  }
+  function explainUnbindFailure({ errors = [], targetRemoved = false } = {}) {
+    const real = [...new Set(errors.filter(Boolean))];
+    if (targetRemoved && (!real.length || real.some((e) => /keyerror|unknown error/i.test(e)))) {
+      return "zha-toolkit can't remove a binding to a device that's no longer in ZHA: it looks the removed device up, fails, and never sends the unbind (a known zha-toolkit bug, reported to its developer). Until it's fixed, these bindings stay. They only use a slot in the switch's binding table. If you need the slot now, pair the removed device again (it keeps its address), then unbind it normally.";
+    }
+    if (real.length) return `zha-toolkit said: ${real.slice(0, 2).join("; ")}${real.length > 2 ? " (and more)" : ""}.`;
+    return "";
+  }
+
+  // src/groups.js
+  function groupRows({ groups, bindings, classify, coordinatorIeee }) {
+    const coord = coordinatorIeee ? normIeee(coordinatorIeee) : null;
+    return (groups || []).map((g) => {
+      const groupId = Number(g.group_id);
+      const members = (g.members || []).filter((m) => m && m.device && m.device.ieee && normIeee(m.device.ieee) !== coord).map((m) => ({ ieee: normIeee(m.device.ieee), endpoint: Number(m.endpoint_id) }));
+      const byController = /* @__PURE__ */ new Map();
+      let others = 0;
+      for (const b of bindings || []) {
+        if (!b || !b.isGroup || Number(b.groupId) !== groupId) continue;
+        const cls = classify(b);
+        if (cls === "reporting" || cls === "manufacturer") {
+          others++;
+          continue;
+        }
+        const key = `${normIeee(b.sourceIeee)}:${Number(b.sourceEndpoint)}`;
+        if (!byController.has(key)) byController.set(key, { sourceIeee: normIeee(b.sourceIeee), endpoint: Number(b.sourceEndpoint), clusters: /* @__PURE__ */ new Set() });
+        byController.get(key).clusters.add(Number(b.clusterId));
+      }
+      const controllers = [...byController.values()].map((c) => ({ ...c, clusters: [...c.clusters].sort((a, b) => a - b) }));
+      return { groupId, name: g.name || `Group ${groupId}`, members, controllers, others };
+    }).sort((a, b) => a.name.localeCompare(b.name, void 0, { sensitivity: "base" }));
+  }
+  function deviceOnlyGroups({ groups, bindings, classify, coordinatorIeee }) {
+    const known = new Set((groups || []).map((g) => Number(g.group_id)));
+    const ids2 = /* @__PURE__ */ new Set();
+    for (const b of bindings || []) {
+      if (b && b.isGroup && Number.isFinite(Number(b.groupId)) && !known.has(Number(b.groupId))) ids2.add(Number(b.groupId));
+    }
+    const fake = [...ids2].map((id) => ({ group_id: id, name: `Group ${groupIdHex(id)}`, members: [] }));
+    return groupRows({ groups: fake, bindings, classify, coordinatorIeee }).map(({ groupId, controllers, others }) => ({ groupId, controllers, others })).sort((a, b) => a.groupId - b.groupId);
+  }
+  function groupUnbindPlan(groupId, bindings, { clustersFor = () => void 0 } = {}) {
+    const seen = /* @__PURE__ */ new Set();
+    const out = [];
+    const all = bindings || [];
+    for (const b of all) {
+      if (!b || !b.isGroup || Number(b.groupId) !== Number(groupId)) continue;
+      const op = { sourceIeee: normIeee(b.sourceIeee), endpoint: Number(b.sourceEndpoint), clusterId: Number(b.clusterId) };
+      const key = `${op.sourceIeee}:${op.endpoint}:${op.clusterId}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      const clusters = clustersFor(op.sourceIeee);
+      const sends = (clusters || []).some((c) => c.type === "out" && Number(c.id) === op.clusterId && Number(c.endpoint_id) === op.endpoint);
+      if (sends || !clusters) {
+        op.method = "group";
+      } else {
+        const others = all.some(
+          (x) => x && normIeee(x.sourceIeee) === op.sourceIeee && Number(x.sourceEndpoint) === op.endpoint && Number(x.clusterId) === op.clusterId && !(x.isGroup && Number(x.groupId) === Number(groupId))
+        );
+        op.method = others ? "skip" : "remove";
+      }
+      out.push(op);
+    }
+    return out;
+  }
+  function noAnswerError(text) {
+    return !text || /unknown[_ ]error|no details|timeout|timed out|delivery|not ?responding|didn't answer|no answer|deliveryerror|mac_no_ack|nwk_route/i.test(text);
+  }
+  function groupDeleteReasons(devices) {
+    return devices.map((d) => {
+      if (d.skipped) {
+        return `${d.name}: it reports its own state to the group on a cluster it also uses for other bindings, and zha-toolkit can only remove them all together, so this one was left.`;
+      }
+      const errs = [...new Set((d.errors || []).filter(Boolean))];
+      if (!d.answered || errs.length && errs.every(noAnswerError)) {
+        return d.battery ? `${d.name} didn't answer: it's on battery, so wake it (press a button) and try again.` : `${d.name} didn't answer: it may be offline or switched off at the wall.`;
+      }
+      if (errs.length) return `${d.name}: zha-toolkit said ${errs.slice(0, 2).join("; ")}.`;
+      return `${d.name}: zha-toolkit reported success, but the binding is still there.`;
+    });
+  }
+  var groupIdHex = (id) => `0x${Number(id).toString(16).padStart(4, "0")}`;
+
+  // src/mesh.js
+  var LQI_RECOMMENDED = Object.freeze({ good: 150, weak: 80 });
+  var MAX_HOPS = 10;
+  function nwkNumber(value) {
+    if (typeof value === "number" && Number.isInteger(value) && value >= 0 && value <= 65535) return value;
+    if (typeof value === "string" && /^0x[0-9a-f]{1,4}$/i.test(value.trim())) return parseInt(value.trim(), 16);
+    return null;
+  }
+  function rateLqi(lqi, thr = LQI_RECOMMENDED) {
+    if (typeof lqi !== "number") return "unknown";
+    if (lqi >= thr.good) return "good";
+    if (lqi >= thr.weak) return "fair";
+    return "weak";
+  }
+  var RANK = { weak: 0, unknown: 1, fair: 2, good: 3 };
+  function linkKey(a, b) {
+    return a < b ? `${a}|${b}` : `${b}|${a}`;
+  }
+  function buildMesh(snapshot, devices = []) {
+    const snap = snapshot && typeof snapshot === "object" ? snapshot : {};
+    const nwkToIeee = /* @__PURE__ */ new Map();
+    const typeOf = /* @__PURE__ */ new Map();
+    for (const d of devices) {
+      const ieee = normIeee(d.ieee);
+      const n = nwkNumber(d.nwk);
+      if (n != null) nwkToIeee.set(n, ieee);
+      if (d.device_type) typeOf.set(ieee, d.device_type === "EndDevice" ? "EndDevice" : d.device_type);
+    }
+    const links = /* @__PURE__ */ new Map();
+    const parentOf = /* @__PURE__ */ new Map();
+    const children = /* @__PURE__ */ new Map();
+    let staleEntries = 0;
+    for (const [rawReporter, entry] of Object.entries(snap)) {
+      const reporter = normIeee(rawReporter);
+      for (const n of entry && entry.neighbours || []) {
+        const other = normIeee(n.ieee);
+        if (!other || other === reporter) continue;
+        if (n.nwk != null && !nwkToIeee.has(n.nwk)) nwkToIeee.set(n.nwk, other);
+        if (n.type && !typeOf.has(other)) typeOf.set(other, n.type);
+        const key = linkKey(reporter, other);
+        if (!links.has(key)) {
+          const [a, b] = reporter < other ? [reporter, other] : [other, reporter];
+          links.set(key, { a, b, heard: {} });
+        }
+        const usable = typeof n.lqi === "number" && n.lqi > 0;
+        links.get(key).heard[reporter] = usable ? n.lqi : null;
+        if (!usable) staleEntries++;
+        if (n.rel === "Child" && n.type === "EndDevice") {
+          parentOf.set(other, { parent: reporter, lqi: typeof n.lqi === "number" && n.lqi > 0 ? n.lqi : null });
+          children.set(reporter, (children.get(reporter) || 0) + 1);
+        }
+      }
+    }
+    for (const l of links.values()) {
+      const vals = Object.values(l.heard).filter((v) => typeof v === "number");
+      l.lqi = vals.length ? Math.min(...vals) : null;
+    }
+    const conflicts = addressConflicts(snap, devices);
+    return { snapshot: snap, nwkToIeee, typeOf, links, parentOf, children, staleEntries, conflicts };
+  }
+  function addressConflicts(snapshot, devices = []) {
+    const claims = /* @__PURE__ */ new Map();
+    const claim = (nwk, ieee) => {
+      if (nwk == null || !ieee) return;
+      if (!claims.has(nwk)) claims.set(nwk, /* @__PURE__ */ new Set());
+      claims.get(nwk).add(ieee);
+    };
+    let coord = null;
+    for (const d of devices) {
+      const ieee = normIeee(d.ieee);
+      if (d.device_type === "Coordinator") coord = ieee;
+      claim(nwkNumber(d.nwk), ieee);
+    }
+    for (const [rawReporter, entry] of Object.entries(snapshot || {})) {
+      const reporter = normIeee(rawReporter);
+      for (const n of entry && entry.neighbours || []) {
+        const ieee = normIeee(n.ieee);
+        if (!ieee || ieee === reporter || !(typeof n.lqi === "number" && n.lqi > 0)) continue;
+        claim(nwkNumber(n.nwk), ieee);
+      }
+    }
+    const out = [];
+    for (const [nwk, set] of claims.entries()) {
+      if (set.size < 2) continue;
+      const ieees = [...set].sort((a, b) => a === coord ? -1 : b === coord ? 1 : a.localeCompare(b));
+      out.push({ nwk, ieees, coordinator: nwk === 0 });
+    }
+    return out.sort((a, b) => a.nwk - b.nwk);
+  }
+  function linkBetween(mesh, a, b) {
+    return mesh.links.get(linkKey(normIeee(a), normIeee(b))) || null;
+  }
+  function isRouterLike(mesh, ieee) {
+    const t = mesh.typeOf.get(normIeee(ieee));
+    return t === "Router" || t === "Coordinator";
+  }
+  function ieeeToNwk(mesh, ieee) {
+    for (const [n, i] of mesh.nwkToIeee.entries()) if (i === ieee) return n;
+    return null;
+  }
+  function routePath(mesh, sourceIeee, targetIeee) {
+    const source = normIeee(sourceIeee);
+    const target = normIeee(targetIeee);
+    const hops = [];
+    const hop = (from, to) => {
+      const l = linkBetween(mesh, from, to);
+      hops.push({ from, to, lqi: l ? l.lqi : null });
+    };
+    if (source === target) return { status: "ok", hops, note: null };
+    let current = source;
+    if (!mesh.snapshot[source]) {
+      const p = mesh.parentOf.get(source);
+      if (!p) {
+        if (linkBetween(mesh, source, target)) {
+          hop(source, target);
+          return { status: "ok", hops, note: null };
+        }
+        return { status: "none", hops, note: "Its parent router isn't known: no router listed it as a child. Scan again, or wake it first." };
+      }
+      hop(source, p.parent);
+      current = p.parent;
+    }
+    const targetParent = !mesh.snapshot[target] && mesh.parentOf.get(target) ? mesh.parentOf.get(target).parent : null;
+    const visited = /* @__PURE__ */ new Set([current]);
+    for (let i = 0; i < MAX_HOPS; i++) {
+      if (current === target) return { status: "ok", hops, note: null };
+      if (targetParent && current === targetParent) {
+        hop(current, target);
+        return { status: "ok", hops, note: null };
+      }
+      const entry = mesh.snapshot[current];
+      if (!entry || !entry.ok) {
+        return { status: "partial", hops, note: `${current} wasn't read, so the path stops there.` };
+      }
+      const goal = targetParent || target;
+      const goalNwk = ieeeToNwk(mesh, goal);
+      const route = goalNwk == null ? null : (entry.routes || []).find((r) => r.dst === goalNwk && r.status === "Active");
+      let next = null;
+      if (route) {
+        next = mesh.nwkToIeee.get(route.next) || null;
+        if (!next) return { status: "partial", hops, note: `The next hop (0x${route.next.toString(16).padStart(4, "0")}) isn't a known device.` };
+      } else if ((entry.neighbours || []).some((n) => normIeee(n.ieee) === goal)) {
+        next = goal;
+      }
+      if (!next) {
+        return { status: hops.length ? "partial" : "none", hops, note: "No active route to the target in this router's routing table (routes appear after recent traffic)." };
+      }
+      if (visited.has(next)) return { status: "partial", hops, note: "The routing tables loop back on themselves; they're probably out of date." };
+      visited.add(next);
+      hop(current, next);
+      current = next;
+    }
+    return { status: "partial", hops, note: `Stopped after ${MAX_HOPS} hops.` };
+  }
+  function pathVerdict(path, thr = LQI_RECOMMENDED) {
+    if (!path || path.status === "none") return { level: "none", weakest: null };
+    let weakest = null;
+    for (const h of path.hops) {
+      if (typeof h.lqi !== "number") continue;
+      if (!weakest || h.lqi < weakest.lqi) weakest = h;
+    }
+    const anyUnknown = path.hops.some((h) => typeof h.lqi !== "number");
+    if (weakest && rateLqi(weakest.lqi, thr) === "weak") return { level: "weak", weakest };
+    if (path.status !== "ok" || anyUnknown) return { level: "unknown", weakest };
+    return { level: "good", weakest };
+  }
+  function bestRouterLink(mesh, ieee) {
+    const id = normIeee(ieee);
+    let best = null;
+    for (const l of mesh.links.values()) {
+      if (l.a !== id && l.b !== id) continue;
+      const other = l.a === id ? l.b : l.a;
+      if (!isRouterLike(mesh, other) || typeof l.lqi !== "number") continue;
+      if (!best || l.lqi > best.lqi) best = { other, lqi: l.lqi };
+    }
+    return best;
+  }
+  function groupCheck(mesh, sourceIeee, memberIeees) {
+    const src = normIeee(sourceIeee);
+    const p = mesh.parentOf.get(src);
+    return {
+      parent: p ? { parent: p.parent, lqi: p.lqi } : null,
+      sourceIsRouter: !!mesh.snapshot[src],
+      members: memberIeees.map((m) => ({ ieee: normIeee(m), best: bestRouterLink(mesh, m) }))
+    };
+  }
+  function visibleRouterLinks(mesh, thr = LQI_RECOMMENDED, perRouter = 3) {
+    const keep = /* @__PURE__ */ new Set();
+    const byRouter = /* @__PURE__ */ new Map();
+    for (const l of mesh.links.values()) {
+      if (typeof l.lqi !== "number" || !isRouterLike(mesh, l.a) || !isRouterLike(mesh, l.b)) continue;
+      for (const end of [l.a, l.b]) {
+        if (!byRouter.has(end)) byRouter.set(end, []);
+        byRouter.get(end).push(l);
+      }
+    }
+    for (const list2 of byRouter.values()) {
+      list2.sort((x, y) => y.lqi - x.lqi);
+      list2.slice(0, perRouter).forEach((l) => keep.add(l));
+    }
+    return [...keep];
+  }
+  function weakestLinks(mesh, limit = 10) {
+    return [...mesh.links.values()].filter((l) => typeof l.lqi === "number").sort((x, y) => x.lqi - y.lqi).slice(0, limit);
+  }
+  function meshSuggestions(mesh, { thr = LQI_RECOMMENDED, areaOf = () => "", nameOf = (i) => i, routers = [] } = {}) {
+    const out = [];
+    for (const c of mesh.conflicts || []) {
+      const hex2 = `0x${c.nwk.toString(16).padStart(4, "0")}`;
+      const others = c.coordinator ? c.ieees.filter((i) => mesh.typeOf.get(i) !== "Coordinator") : c.ieees;
+      out.push({
+        kind: c.coordinator ? "coordinator_address" : "address_conflict",
+        level: "error",
+        ieees: c.ieees,
+        text: c.coordinator ? `${others.map(nameOf).join(", ")} ${others.length === 1 ? "is" : "are"} using the coordinator's network address (${hex2}). A device doing this can flood or confuse the whole network: lights responding late or not at all, timeouts. Unplug it (or remove its battery), check whether the network recovers, then reset and pair it again.` : `${c.ieees.map(nameOf).join(" and ")} are using the same network address (${hex2}). Messages for one may go to the other. Scan again to confirm; if it stays, reset and pair one of them again.`
+      });
+    }
+    const routerSet = new Set(routers.map(normIeee));
+    for (const [child, p] of mesh.parentOf.entries()) {
+      if (rateLqi(p.lqi, thr) === "weak") {
+        out.push({
+          kind: "weak_parent",
+          level: "warning",
+          ieees: [child, p.parent],
+          text: `${nameOf(child)} hears its parent ${nameOf(p.parent)} poorly (LQI ${p.lqi}). A router nearer to it would help.`
+        });
+      }
+    }
+    const dependsOn = /* @__PURE__ */ new Map();
+    const consider = new Set(routerSet);
+    for (const dev of consider) {
+      const ok = [];
+      for (const l of mesh.links.values()) {
+        if (l.a !== dev && l.b !== dev) continue;
+        const other = l.a === dev ? l.b : l.a;
+        if (!isRouterLike(mesh, other)) continue;
+        if (RANK[rateLqi(l.lqi, thr)] >= RANK.fair) ok.push(other);
+      }
+      if (ok.length === 1) {
+        if (!dependsOn.has(ok[0])) dependsOn.set(ok[0], []);
+        dependsOn.get(ok[0]).push(dev);
+      }
+    }
+    for (const [router, devs] of dependsOn.entries()) {
+      if (devs.length === 1 || mesh.typeOf.get(router) === "Coordinator") {
+        for (const dev of devs) {
+          const l = linkBetween(mesh, dev, router);
+          out.push({
+            kind: "single_link",
+            level: "warning",
+            ieees: [dev, router],
+            text: `${nameOf(dev)} has only one usable link (to ${nameOf(router)}, ${rateLqi(l && l.lqi, thr)} ${l && l.lqi}). A router nearer to it would give it a second route.`
+          });
+        }
+        continue;
+      }
+      out.push({
+        kind: "single_point",
+        level: "warning",
+        ieees: [router, ...devs],
+        text: `Single point of failure: ${devs.length} routers have no other good or fair link than ${nameOf(router)} (${devs.map(nameOf).join(", ")}). If it goes offline, they lose their way to the rest of the mesh.`
+      });
+    }
+    for (const r of routerSet) {
+      const best = bestRouterLink(mesh, r);
+      if (best && rateLqi(best.lqi, thr) === "weak") {
+        out.push({
+          kind: "isolated_router",
+          level: "warning",
+          ieees: [r],
+          text: `${nameOf(r)} has no good or fair link to another router (best LQI ${best.lqi}).`
+        });
+      }
+    }
+    for (const [router, n] of mesh.children.entries()) {
+      if (n >= 3) {
+        const kids = [...mesh.parentOf.entries()].filter(([, p]) => p.parent === router).map(([c]) => nameOf(c));
+        out.push({
+          kind: "many_children",
+          level: "info",
+          ieees: [router],
+          text: `${nameOf(router)} is the parent of ${n} battery devices (${kids.join(", ")}). If it's switched off at the wall, they lose contact until they find a new parent.`
+        });
+      }
+    }
+    const areas = /* @__PURE__ */ new Map();
+    for (const ieee of mesh.typeOf.keys()) {
+      const a = areaOf(ieee);
+      if (!a) continue;
+      if (!areas.has(a)) areas.set(a, { routers: 0, devices: 0 });
+      const e = areas.get(a);
+      e.devices++;
+      if (isRouterLike(mesh, ieee)) e.routers++;
+    }
+    for (const [area, e] of areas.entries()) {
+      if (e.devices >= 1 && e.routers === 0) {
+        out.push({ kind: "area_without_router", level: "info", ieees: [], text: `${area} has ${e.devices} Zigbee device${e.devices === 1 ? "" : "s"} but no router.` });
+      }
+    }
+    const order = { error: 0, warning: 1, info: 2 };
+    return out.sort((x, y) => order[x.level] - order[y.level]);
+  }
+
+  // src/table-filter.js
+  var DIRECTION_ALL = "all";
+  var DIRECTION_OUTBOUND = "outbound";
+  var DIRECTION_INBOUND = "inbound";
+  function bindingDirection(b, ieee) {
+    if (!ieee) return null;
+    if (b.sourceIeee === ieee) return DIRECTION_OUTBOUND;
+    if (!b.isGroup && b.targetIeee === ieee && b.sourceIeee !== ieee) return DIRECTION_INBOUND;
+    return null;
+  }
+  function matchesDeviceFilter(b, ieee, direction = DIRECTION_ALL) {
+    if (!ieee) return true;
+    const dir = bindingDirection(b, ieee);
+    if (!dir) return false;
+    return direction === DIRECTION_ALL || direction === dir;
+  }
+  function directionRank(dir) {
+    return dir === DIRECTION_OUTBOUND ? 0 : dir === DIRECTION_INBOUND ? 1 : 2;
+  }
+  function directionLabel(dir) {
+    return dir === DIRECTION_OUTBOUND ? "\u2192 Outbound" : dir === DIRECTION_INBOUND ? "\u2190 Inbound" : "";
+  }
+  function emptyTableState({
+    total,
+    rawTotal,
+    deviceFilterActive,
+    deviceMatches,
+    direction,
+    deviceName,
+    coordinatorHidden,
+    healthFilterLabel,
+    search
+  }) {
+    const scanned = rawTotal != null ? rawTotal : total;
+    if (!scanned) {
+      return { kind: "not-scanned", message: 'No bindings loaded yet. Click "Scan bindings" above.' };
+    }
+    if (!total) {
+      return {
+        kind: "coordinator-hidden",
+        message: `All ${scanned} scanned binding${scanned === 1 ? "" : "s"} target${scanned === 1 ? "s" : ""} the coordinator, and "Hide coordinator bindings" is on in the Map filters. Untick it to see ${scanned === 1 ? "it" : "them"}.`
+      };
+    }
+    if (deviceFilterActive && !deviceMatches) {
+      const what = direction === DIRECTION_OUTBOUND ? `No outbound bindings from ${deviceName}.` : direction === DIRECTION_INBOUND ? `No inbound bindings to ${deviceName}.` : `No bindings involve ${deviceName}.`;
+      if (coordinatorHidden) {
+        return {
+          kind: "device-filter",
+          message: `${what} Bindings that target the coordinator are hidden by "Hide coordinator bindings" in the Map filters. Untick it to see them.`
+        };
+      }
+      const hidden = `The filter is hiding ${total} other binding${total === 1 ? "" : "s"}. Clear the filter to see ${total === 1 ? "it" : "them"}.`;
+      return { kind: "device-filter", message: `${what} ${hidden}` };
+    }
+    const reasons = [];
+    if (healthFilterLabel) reasons.push(`the "${healthFilterLabel}" health filter`);
+    if (search) reasons.push(`the search "${search}"`);
+    return {
+      kind: "other-filters",
+      message: reasons.length ? `No bindings match ${reasons.join(" and ")}. ${total} binding${total === 1 ? " is" : "s are"} hidden.` : "No bindings match the current filters."
+    };
+  }
+  function deviceNameText(d) {
+    if (!d) return "";
+    return [d.user_given_name, d.name].filter(Boolean).join(" ").toLowerCase();
+  }
+  var MIN_AUTO_FILTER_SEARCH_LENGTH = 3;
+  function findSingleDeviceBySearch(devices, search) {
+    const s = (search || "").trim().toLowerCase();
+    if (s.length < MIN_AUTO_FILTER_SEARCH_LENGTH) return null;
+    const matches = (devices || []).filter((d) => deviceNameText(d).includes(s));
+    return matches.length === 1 ? matches[0] : null;
+  }
+
   // src/card.js
+  var LOST_EDGE_COLOR = "#db4437";
   var SYNCED_ITEM_KEYS = [
     "filters",
     "positions",
@@ -3687,6 +4620,7 @@ a.btn { display:inline-block; text-decoration:none; }
       const first = !this._hass;
       this._hass = hass;
       this._api = new ZhaApi(hass);
+      this._api.watchEnabled = !!this._watchEnabled;
       if (first) {
         this._render();
         this._loadAll();
@@ -3919,6 +4853,9 @@ a.btn { display:inline-block; text-decoration:none; }
       this._backendVersion = probe.version;
       this._bundledCardVersion = probe.bundledCardVersion;
       this._experimental = probe.experimental;
+      this._watchEnabled = !!probe.watch;
+      this._replaceEnabled = !!probe.replace;
+      if (this._api) this._api.watchEnabled = this._watchEnabled;
       this._lqiThr = probe.lqi || { ...LQI_RECOMMENDED };
       this._toggleExperimentalUi();
       if (!this._backendAvailable) {
@@ -4326,6 +5263,737 @@ a.btn { display:inline-block; text-decoration:none; }
       await this._reloadDevices({ initial: true });
       this._openDeepLinkedDevice();
       this._pickUpIntegrationScans();
+      this._lostLoad();
+    }
+    // -------------------------------------------------------------------
+    // Lost bindings (1.8.0, integration only)
+    // -------------------------------------------------------------------
+    /** Reads what the integration's watch knows: bindings that were there
+     *  before and aren't any more. */
+    async _lostLoad() {
+      if (!this._watchEnabled || !this._api) {
+        this._lost = null;
+        this._renderLostBanner();
+        return;
+      }
+      try {
+        this._lost = await this._api.watchGet();
+      } catch (e) {
+        this._lost = null;
+      }
+      this._renderLostBanner();
+      this._renderHealthSummary(this._computeHealthMap());
+      if (this._edgesLayer) this._renderGraphEdges();
+      if (this._drawerIeee) this._renderDrawer();
+    }
+    /** After a scan: the integration compares the newly saved scan with what
+     *  it expected, which takes a moment. */
+    _lostSoon() {
+      if (!this._watchEnabled) return;
+      clearTimeout(this._lostTimer);
+      this._lostTimer = setTimeout(() => this._lostLoad(), 1500);
+    }
+    async _lostAction(label, fn) {
+      if (this._lostBusy) return;
+      this._lostBusy = label;
+      this._renderLostBanner();
+      if (this._drawerIeee) this._renderDrawer();
+      try {
+        return await fn();
+      } catch (err) {
+        this._setStatus("error", `${label} failed: ${extractErrorMessage(err)}`, 0);
+        return null;
+      } finally {
+        this._lostBusy = null;
+        await this._lostLoad();
+      }
+    }
+    async _lostPutBack(ieee) {
+      const res = await this._lostAction(ieee ? "Put back" : "Put all back", () => this._api.watchPutBack(ieee));
+      if (!res) return;
+      const nameOf = (i) => {
+        const d = this._devices.find((x) => normIeee(x.ieee) === normIeee(i));
+        return d ? this._deviceLabel(d) : i;
+      };
+      const m = putBackMessage(res.results, nameOf);
+      this._setStatus(m.level, m.text, 0);
+      const done = Object.entries(res.results || {}).filter(([, st]) => st === "put_back").map(([i]) => i);
+      if (done.length) this._scanBindings(done, { tries: 1 });
+    }
+    async _lostForget(ieee, key) {
+      await this._lostAction("Removed on purpose", () => this._api.watchForget(ieee, key ? [key] : null));
+    }
+    async _lostCheckAll() {
+      const res = await this._lostAction("Check for lost bindings", () => this._api.watchCheckAll());
+      if (!res) return;
+      const vals = Object.values(res && res.results || res || {});
+      const asleep = vals.filter((v) => v === "no_answer").length;
+      const lost = lostSummary(this._lost).total;
+      this._setStatus(
+        lost ? "warning" : "success",
+        `Checked ${vals.length} device${vals.length === 1 ? "" : "s"}: ${lost ? `${lost} lost binding${lost === 1 ? "" : "s"}` : "nothing lost"}.${asleep ? ` ${asleep} didn't answer (asleep or off); they're checked again when they next wake up.` : ""}`,
+        0
+      );
+    }
+    _renderLostBanner() {
+      const el = this._q("#lost-banner");
+      if (!el) return;
+      const sum = lostSummary(this._lost);
+      if (!this._watchEnabled || !sum.total) {
+        el.style.display = "none";
+        el.innerHTML = "";
+        return;
+      }
+      const busy = this._lostBusy;
+      const nDev = sum.devices.length;
+      const list2 = this._lostOpen ? `<div class="lost-list">${sum.devices.map(
+        (d) => `<div class="lost-device">
+              <div class="lost-device-head">
+                <a href="#" class="src-link lost-dev-link" data-ieee="${escapeHtml(d.ieee)}"><strong>${escapeHtml(this._ieeeLabel(d.ieee, { plain: true }) || d.name)}</strong></a>
+                <span class="muted">${escapeHtml(POLICY_LABELS[d.policy] || d.policy)}${d.autoPaused ? " \xB7 stopped putting back automatically (3 times today)" : ""}${d.queued ? " \xB7 waiting for it to wake up" : ""}</span>
+                <button class="btn btn-small lost-put-back" data-ieee="${escapeHtml(d.ieee)}" ${busy ? "disabled" : ""}>Put back</button>
+              </div>
+              <ul>${d.lost.map(
+          (b) => `<li><span>${escapeHtml(b.text || b.key)}</span> <span class="muted">${escapeHtml(
+            [NOTICED_BY[b.noticed_by] || "", sinceText(b.since)].filter(Boolean).join(", ")
+          )}</span> \xB7 <a href="#" class="src-link lost-forget" data-ieee="${escapeHtml(d.ieee)}" data-key="${escapeHtml(
+            b.key
+          )}" title="You removed it yourself (outside this card, e.g. by resetting the device). Stop expecting it.">Removed on purpose</a></li>`
+        ).join("")}</ul>
+            </div>`
+      ).join("")}</div>` : "";
+      el.innerHTML = `
+      <div class="stale-row">
+        <span><strong>${sum.total} lost binding${sum.total === 1 ? "" : "s"}</strong> on ${nDev} device${nDev === 1 ? "" : "s"}:
+          ${nDev === 1 ? "it" : "they"} had ${sum.total === 1 ? "this binding" : "these bindings"} before and don't any more, so a button may no longer
+          control what it used to.${sum.queued ? ` ${sum.queued} ${sum.queued === 1 ? "is" : "are"} asleep: ${sum.queued === 1 ? "it'll" : "they'll"} be put back the next time you press one of ${sum.queued === 1 ? "its" : "their"} buttons.` : ""}</span>
+        <button class="btn btn-small" id="btn-lost-show">${this._lostOpen ? "Hide" : "Show"}</button>
+        <button class="btn btn-small" id="btn-lost-check" ${busy ? "disabled" : ""} title="Read every watched device's binding table now">${busy === "Check for lost bindings" ? "Checking\u2026" : "Check again"}</button>
+        <button class="btn btn-small btn-primary" id="btn-lost-put-back-all" ${busy ? "disabled" : ""}>${busy === "Put all back" ? "Putting back\u2026" : "Put all back"}</button>
+      </div>${list2}`;
+      el.style.display = "";
+      const on = (sel, fn) => {
+        const b = this._q(sel);
+        if (b) b.addEventListener("click", fn);
+      };
+      on("#btn-lost-show", () => {
+        this._lostOpen = !this._lostOpen;
+        this._renderLostBanner();
+      });
+      on("#btn-lost-check", () => this._lostCheckAll());
+      on("#btn-lost-put-back-all", () => this._lostPutBack(null));
+      this._qa("#lost-banner .lost-put-back").forEach((b) => b.addEventListener("click", () => this._lostPutBack(b.dataset.ieee)));
+      this._qa("#lost-banner .lost-forget").forEach(
+        (a) => a.addEventListener("click", (e) => {
+          e.preventDefault();
+          this._lostForget(a.dataset.ieee, a.dataset.key);
+        })
+      );
+      this._qa("#lost-banner .lost-dev-link").forEach(
+        (a) => a.addEventListener("click", (e) => {
+          e.preventDefault();
+          const d = this._devices.find((x) => normIeee(x.ieee) === a.dataset.ieee);
+          if (d) this._openDeviceDrawer(d);
+        })
+      );
+    }
+    // -------------------------------------------------------------------
+    // Replace a device (1.9.0)
+    // -------------------------------------------------------------------
+    _openReplace({ ieee = null, deadTargets = null } = {}) {
+      this._closeDrawer();
+      this._replace = { step: ieee ? "pick" : "old", oldIeee: ieee ? normIeee(ieee) : null, deadTargets: deadTargets || [], selected: /* @__PURE__ */ new Set(), endpointMap: {} };
+      this._q("#dialog-title").textContent = "Replace a device";
+      const panel = this._q(".dialog-panel");
+      if (panel) panel.classList.add("wide");
+      this._q("#dialog").classList.add("open");
+      this._renderReplace();
+    }
+    _replaceOldDevice() {
+      const r = this._replace;
+      const d = this._devices.find((x) => normIeee(x.ieee) === r.oldIeee);
+      return d || { ieee: r.oldIeee, name: this._ieeeLabel(r.oldIeee, { plain: true }), gone: true };
+    }
+    _replaceTypeOf(d) {
+      return detectDeviceType(this._clusterCache.get(d.ieee), d.power_source);
+    }
+    _renderReplace() {
+      const r = this._replace;
+      if (!r) return;
+      const body = this._q("#dialog-body");
+      const steps = [
+        ["pick", "1. Choose the new device"],
+        ["check", "2. Check"],
+        ["run", "3. Copy"],
+        ["done", "4. Clean up"]
+      ];
+      const stepsHtml = `<ol class="flow-steps">${steps.map(([k, v]) => `<li class="${k === r.step ? "active" : ""}">${v}</li>`).join("")}</ol>`;
+      const needs = !this._replaceEnabled ? `<div class="flow-callout flow-result-warning">Replacing a device needs the ZHA Bindings Manager integration (1.9.0 or later) with
+          "Watch for lost bindings" on: it reads the saved scans, copies the bindings and checks each one.</div>` : "";
+      let html = "";
+      if (r.step === "old") {
+        html = `<p>Which device did you replace? These no longer exist in ZHA, but other devices still have bindings to them.</p>
+        <div class="flow-targets">${r.deadTargets.map((i) => `<label class="flow-target"><input type="radio" name="replace-old" value="${escapeHtml(i)}"> ${escapeHtml(this._ieeeLabel(i, { plain: true }))} <span class="muted">${escapeHtml(i)}</span></label>`).join("")}</div>
+        <div class="dialog-actions"><button class="btn btn-primary" id="replace-next" disabled>Next</button><button class="btn" id="replace-cancel">Cancel</button></div>`;
+      } else if (r.step === "pick") {
+        const old = this._replaceOldDevice();
+        const cands = replacementCandidates(this._devices.filter((x) => !this._isRemovedDevice(x.ieee)), old, {
+          coordinatorIeee: this._coordinatorIeee(),
+          typeOf: (x) => this._replaceTypeOf(x),
+          nameOf: (x) => this._deviceLabel(x)
+        });
+        html = `<p>Replacing <strong>${escapeHtml(old.gone ? old.name : this._deviceLabel(old))}</strong>${old.gone ? ` <span class="muted">(no longer in ZHA: its bindings come from saved scans)</span>` : ""}. Pair the new device first, then choose it here.</p>
+        <input type="search" id="replace-filter" placeholder="Filter devices" value="${escapeHtml(r.filter || "")}">
+        <div class="flow-targets">${cands.filter((c) => !r.filter || this._deviceLabel(c.device).toLowerCase().includes(r.filter.toLowerCase())).map(
+          (c) => `<label class="flow-target"><input type="radio" name="replace-new" value="${escapeHtml(c.device.ieee)}" ${normIeee(c.device.ieee) === r.newIeee ? "checked" : ""}> ${escapeHtml(this._deviceLabel(c.device))}${c.why ? ` <span class="flow-suggested">${escapeHtml(c.why)}</span>` : ""}
+              <span class="muted">${escapeHtml([c.device.manufacturer, c.device.model].filter(Boolean).join(" "))} \xB7 ${escapeHtml(c.device.power_source || "")}</span></label>`
+        ).join("")}</div>
+        <p class="hint">Same model, re-paired after a reset? That keeps its address, so it isn't a replacement: use Put all back for lost bindings instead.</p>
+        <div class="dialog-actions"><button class="btn btn-primary" id="replace-next" ${r.newIeee && this._replaceEnabled ? "" : "disabled"}>Check it</button><button class="btn" id="replace-cancel">Cancel</button></div>`;
+      } else if (r.step === "check") {
+        html = this._replaceCheckHtml();
+      } else if (r.step === "run") {
+        html = `<p>${escapeHtml(r.progress || "Copying\u2026")}</p><p class="hint">Each binding is read back from the device that holds it. A battery device
+        that's asleep gets its bindings at its next button press.</p>`;
+      } else if (r.step === "done") {
+        html = this._replaceDoneHtml();
+      }
+      body.innerHTML = `<div class="flow">${stepsHtml}${needs}${html}</div>`;
+      this._wireReplace();
+    }
+    _replaceCheckHtml() {
+      const r = this._replace;
+      if (r.error) return `<div class="flow-callout flow-result-warning">${escapeHtml(r.error)}</div><div class="dialog-actions"><button class="btn" id="replace-back">Back</button></div>`;
+      if (!r.plan) return `<p>Checking what the old device did and whether the new one can do it\u2026</p>`;
+      const p = r.plan;
+      const v = VERDICT[p.verdict] || VERDICT.unknown;
+      const oldD = this._replaceOldDevice();
+      const newD = this._devices.find((x) => normIeee(x.ieee) === r.newIeee) || { ieee: r.newIeee };
+      const inClusters = [...new Set(p.items.filter((i) => i.role === "in").flatMap((i) => i.clusters))].filter((c) => c !== 4);
+      const gaps = this._capExpIndex ? commandGaps(this._capExpIndex, oldD, newD, inClusters) : { gaps: [], unknown: true };
+      const gapHtml = gaps.gaps.length ? `<div class="flow-callout flow-result-warning">From the community database: ${gaps.gaps.map((g) => `${escapeHtml(clusterName(g.clusterId))}: the old model accepts ${escapeHtml(g.missing.join(", "))}; the new one was checked and doesn't`).join(". ")}. Those commands from your remotes won't work on it.</div>` : gaps.unknown ? `<p class="hint">Only clusters were checked: one of the models has no command check in the community database yet. Sharing a scan of it helps.</p>` : `<p class="hint">The community database confirms the new model accepts the same commands.</p>`;
+      const groupsOf = (kind, title, empty) => {
+        const items = p.items.filter((i) => i.kind === kind);
+        if (!items.length) return `<div class="drawer-section-title">${title}</div><p class="muted">${empty}</p>`;
+        return `<div class="drawer-section-title">${title}</div>${items.map((i) => {
+          const epSel = p.new_endpoints.length > 1 && i.old_ep != null ? ` <label class="muted">new ep <select data-epmap="${i.old_ep}">${p.new_endpoints.map((ep) => `<option value="${ep}" ${ep === i.new_ep ? "selected" : ""}>${ep}</option>`).join("")}</select></label>` : i.new_ep != null ? ` <span class="muted">\u2192 new ep ${i.new_ep}</span>` : "";
+          return `<label class="flow-target"><input type="checkbox" data-item="${i.id}" ${r.selected.has(i.id) ? "checked" : ""} ${i.ok === false ? "disabled" : ""}> <span>${escapeHtml(i.text)}${epSel}${i.reason ? `<br><span class="health-warning">${escapeHtml(i.reason)}</span>` : ""}</span></label>`;
+        }).join("")}`;
+      };
+      return `<div class="flow-callout flow-result-${v.level}"><strong>${v.icon} ${escapeHtml(v.text)}</strong></div>
+      ${gapHtml}
+      ${groupsOf("controlled_by", "Controlled by (bound on the other device)", "Nothing was bound to it.")}
+      ${groupsOf("controls", "Controls (bound on the new device)", "It didn't control anything.")}
+      ${groupsOf("group", "Groups (the new device joins)", "It wasn't in any ZHA group.")}
+      <details class="drawer-lost-expect"><summary>What to expect</summary><ul>
+        <li>This checks the clusters the new device declares and, where known, the commands the community confirmed. A device can
+          still behave differently: press each remote afterwards, and share the result.</li>
+        <li>Bindings to a dead device can only be found in saved scans. If a remote wasn't scanned since, it isn't listed: scan it first.</li>
+        <li>Battery remotes only accept bindings when awake. Those are queued and go on at their next button press, while Home Assistant runs.</li>
+        <li>Settings (power-on behaviour, a detached relay, LEDs) aren't copied: set them on the new device yourself.</li>
+      </ul></details>
+      <div class="dialog-actions"><button class="btn btn-primary" id="replace-run" ${r.selected.size ? "" : "disabled"}>Copy ${r.selected.size} item${r.selected.size === 1 ? "" : "s"}</button><button class="btn" id="replace-back">Back</button></div>`;
+    }
+    _replaceDoneHtml() {
+      const r = this._replace;
+      const p = r.plan;
+      const sum = runSummary(r.results);
+      const rows = p.items.filter((i) => r.results[i.id]).map((i) => `<li>${escapeHtml(i.text)}: <strong>${escapeHtml(RESULT_LABEL[r.results[i.id]] || r.results[i.id])}</strong></li>`).join("");
+      const old = this._replaceOldDevice();
+      const hasSources = p.items.some((i) => i.kind === "controlled_by");
+      const groups = p.items.filter((i) => i.kind === "group");
+      if (r.cleaned) {
+        return `<div class="flow-callout flow-result-success">${escapeHtml(r.cleaned)}</div>
+        <p>Now press each remote that controls the new device${p.items.some((i) => i.kind === "controls") ? ", and the new remote itself" : ""}, and check the lights respond.</p>
+        <div class="dialog-actions"><button class="btn btn-primary" id="replace-close">Done</button></div>`;
+      }
+      return `<div class="flow-callout flow-result-${sum.level}">${escapeHtml(sum.text)}.</div><ul>${rows}</ul>
+      <div class="drawer-section-title">Clean up</div>
+      ${hasSources ? `<label class="flow-target"><input type="checkbox" id="replace-unbind-old" checked> Remove the bindings that still point at ${escapeHtml(old.name || this._deviceLabel(old))}</label>` : ""}
+      ${!old.gone && groups.length ? `<label class="flow-target"><input type="checkbox" id="replace-leave-groups" checked> Take ${escapeHtml(this._deviceLabel(old))} out of its groups</label>` : ""}
+      ${!old.gone ? `<label class="flow-target"><input type="checkbox" id="replace-remove-old"> Remove ${escapeHtml(this._deviceLabel(old))} from ZHA <span class="muted">(leave unticked if you'll reuse it)</span></label>` : ""}
+      <p class="hint">Until then both devices stay bound, so nothing goes dark. The old device's bindings won't be reported as lost.</p>
+      <div class="dialog-actions"><button class="btn btn-primary" id="replace-cleanup">Clean up</button><button class="btn" id="replace-close">Not now</button></div>`;
+    }
+    async _replacePlan() {
+      const r = this._replace;
+      r.plan = null;
+      r.error = null;
+      this._renderReplace();
+      const old = this._replaceOldDevice();
+      try {
+        await Promise.all([old.gone ? null : this._ensureClusters(old.ieee).catch(() => {
+        }), this._ensureClusters(r.newIeee).catch(() => {
+        })]);
+        if (!this._capExpIndex && !this._capExpLoading) this._capExpLoadIndex();
+        const plan = await this._api.replacePlan(old.ieee, r.newIeee, {
+          oldClusters: old.gone ? null : this._clusterCache.get(old.ieee),
+          newClusters: this._clusterCache.get(r.newIeee),
+          endpointMap: r.endpointMap
+        });
+        r.plan = plan;
+        r.selected = defaultSelection(plan);
+      } catch (err) {
+        r.error = extractErrorMessage(err);
+      }
+      this._renderReplace();
+    }
+    async _replaceRun() {
+      const r = this._replace;
+      const ids2 = [...r.selected];
+      r.step = "run";
+      r.progress = "Copying bindings and reading them back\u2026";
+      this._renderReplace();
+      r.results = {};
+      try {
+        const res = await this._api.replaceRun(r.plan.plan_id, ids2.filter((id) => (r.plan.items.find((i) => i.id === id) || {}).kind !== "group"));
+        Object.assign(r.results, res.results || {});
+        for (const item of r.plan.items.filter((i) => i.kind === "group" && r.selected.has(i.id))) {
+          r.progress = `Adding it to group ${item.group_id}\u2026`;
+          this._renderReplace();
+          try {
+            await this._api.addGroupMembers(item.group_id, [{ ieee: r.newIeee, endpoint: item.new_ep }]);
+            r.results[item.id] = "added";
+          } catch (err) {
+            r.results[item.id] = "failed";
+          }
+        }
+      } catch (err) {
+        this._setStatus("error", `Copying failed: ${extractErrorMessage(err)}`, 0);
+      }
+      r.step = "done";
+      this._renderReplace();
+      this._pickUpIntegrationScans();
+      this._lostLoad();
+    }
+    async _replaceCleanup() {
+      const r = this._replace;
+      const box = (id) => {
+        const el = this._q(`#${id}`);
+        return !!(el && el.checked);
+      };
+      const unbindOld = box("replace-unbind-old");
+      const leaveGroups = box("replace-leave-groups");
+      const removeOld = box("replace-remove-old");
+      const old = this._replaceOldDevice();
+      const done = [];
+      try {
+        const res = await this._api.replaceCleanup(r.plan.plan_id, unbindOld);
+        if (unbindOld) done.push(`removed the old bindings on ${res.unbound.length} device${res.unbound.length === 1 ? "" : "s"}${res.failed.length ? ` (${res.failed.length} didn't answer)` : ""}`);
+        if (leaveGroups) {
+          for (const item of r.plan.items.filter((i) => i.kind === "group")) {
+            await this._api.removeGroupMembers(item.group_id, [{ ieee: old.ieee, endpoint: item.old_ep }]).catch(() => {
+            });
+          }
+          done.push("took the old device out of its groups");
+        }
+        if (removeOld) {
+          await this._api.removeZhaDevice(old.ieee);
+          done.push("removed the old device from ZHA");
+        }
+        r.cleaned = done.length ? `Done: ${done.join(", ")}.` : "Nothing to clean up.";
+      } catch (err) {
+        r.cleaned = `Clean-up stopped: ${extractErrorMessage(err)}`;
+      }
+      this._renderReplace();
+      this._reloadDevices({ quiet: true }).then(() => this._pickUpIntegrationScans());
+      this._lostLoad();
+    }
+    _wireReplace() {
+      const r = this._replace;
+      const root = this._q("#dialog-body");
+      const on = (sel, ev, fn) => root.querySelectorAll(sel).forEach((el) => el.addEventListener(ev, fn));
+      on("#replace-cancel", "click", () => this._closeReplace());
+      on("#replace-close", "click", () => this._closeReplace());
+      on('input[name="replace-old"]', "change", (e) => {
+        r.oldIeee = normIeee(e.target.value);
+        const next = root.querySelector("#replace-next");
+        if (next) next.disabled = false;
+      });
+      on('input[name="replace-new"]', "change", (e) => {
+        r.newIeee = normIeee(e.target.value);
+        const next = root.querySelector("#replace-next");
+        if (next) next.disabled = !this._replaceEnabled;
+      });
+      on("#replace-filter", "input", (e) => {
+        r.filter = e.target.value;
+        this._renderReplace();
+        const f = this._q("#replace-filter");
+        if (f) {
+          f.focus();
+          f.setSelectionRange(f.value.length, f.value.length);
+        }
+      });
+      on("#replace-next", "click", () => {
+        if (r.step === "old" && r.oldIeee) r.step = "pick";
+        else if (r.step === "pick" && r.newIeee) {
+          r.step = "check";
+          this._replacePlan();
+          return;
+        }
+        this._renderReplace();
+      });
+      on("#replace-back", "click", () => {
+        r.step = "pick";
+        r.plan = null;
+        this._renderReplace();
+      });
+      on("input[data-item]", "change", (e) => {
+        if (e.target.checked) r.selected.add(e.target.dataset.item);
+        else r.selected.delete(e.target.dataset.item);
+        this._renderReplace();
+      });
+      on("select[data-epmap]", "change", (e) => {
+        r.endpointMap[e.target.dataset.epmap] = Number(e.target.value);
+        this._replacePlan();
+      });
+      on("#replace-run", "click", () => this._replaceRun());
+      on("#replace-cleanup", "click", () => this._replaceCleanup());
+    }
+    _closeReplace() {
+      this._replace = null;
+      this._closeDialog();
+    }
+    // -------------------------------------------------------------------
+    // Device answers (1.9.0): how a device behaves, asked in the side panel
+    // and shared with the community database (data/questions.json).
+    // -------------------------------------------------------------------
+    _answersStoreRead(key) {
+      try {
+        return JSON.parse(localStorage.getItem(key) || "{}") || {};
+      } catch (e) {
+        return {};
+      }
+    }
+    _answersStoreWrite(key, value) {
+      try {
+        localStorage.setItem(key, JSON.stringify(value));
+      } catch (e) {
+      }
+    }
+    /** Remembers (in this browser) that a scan of this device was shared, so
+     *  its questions open before the scan has been merged into the database. */
+    _scanShared(ieee) {
+      const key = normIeee(ieee);
+      return this._sharedThisSession && this._sharedThisSession.has(key) || !!this._answersStoreRead("zbm-shared-scans")[key];
+    }
+    _markScanShared(ieee, record) {
+      (this._sharedThisSession = this._sharedThisSession || /* @__PURE__ */ new Set()).add(normIeee(ieee));
+      const all = this._answersStoreRead("zbm-shared-scans");
+      all[normIeee(ieee)] = {
+        at: (/* @__PURE__ */ new Date()).toISOString(),
+        sw_build_id: record && record.identity && record.identity.sw_build_id || null
+      };
+      this._answersStoreWrite("zbm-shared-scans", all);
+      if (this._drawerIeee) this._renderDrawer();
+    }
+    /** The firmware to file answers under: sw_build_id from a command check
+     *  this session (or a remembered share), plus Home Assistant's version. */
+    _deviceFirmware(d) {
+      let sw = null;
+      const prefix = `${normIeee(d.ieee)}:`;
+      for (const [key, entry] of this._commandScans.entries()) {
+        if (key.startsWith(prefix) && entry.status === "done" && entry.scan) {
+          const epScan = (entry.scan.endpoints || []).find((e) => Number(e.id) === Number(key.slice(prefix.length)));
+          const id = epScan && this._extractIdentity(epScan);
+          if (id && id.sw_build_id) sw = id.sw_build_id;
+        }
+      }
+      if (!sw) {
+        const shared = this._answersStoreRead("zbm-shared-scans")[normIeee(d.ieee)];
+        if (shared && shared.sw_build_id) sw = shared.sw_build_id;
+      }
+      const reg = this._haDeviceRegistryEntry(d.ieee);
+      return { sw_build_id: sw, registry_sw_version: reg && reg.sw_version || null };
+    }
+    async _answersLoad(force = false) {
+      if (this._answersLoading) return;
+      this._answersLoading = true;
+      try {
+        const [q, doc] = await Promise.all([fetchQuestions({ force }).catch(() => null), fetchAnswersDoc({ force }).catch(() => ({}))]);
+        this._answersQ = q && (q.version || 0) >= (questions_default.version || 0) ? q : questions_default;
+        this._answersDoc = doc || {};
+        this._answersError = null;
+      } catch (err) {
+        this._answersQ = questions_default;
+        this._answersDoc = {};
+      }
+      this._answersLoading = false;
+      if (this._drawerIeee) this._renderDrawer();
+    }
+    /** Facts row pointing at the questions section further down. */
+    _drawerAnswersFact(d) {
+      const community = this._answersQ ? answersForFirmware(this._answersDoc, d, this._deviceFirmware(d)) : { total: 0 };
+      const mine = this._answersStoreRead("zbm-device-answers")[normIeee(d.ieee)];
+      const said = community.total ? `${community.total} owner${community.total === 1 ? "" : "s"} answered` : "Nobody has said yet";
+      return `${escapeHtml(said)}. <a href="#" class="src-link" id="drawer-answers-link">${mine ? "Your answers" : "Answer questions"}</a>`;
+    }
+    _drawerAnswersHtml(d) {
+      if (!d.manufacturer && !d.model) return "";
+      if (this._answersQ === void 0) {
+        if (!this._answersLoading) this._answersLoad();
+        return "";
+      }
+      const q = this._answersQ;
+      if (!q) return "";
+      const fw = this._deviceFirmware(d);
+      const community = answersForFirmware(this._answersDoc, d, fw);
+      const inDb = this._capExpIndex ? matchLocalDevices([d], this._capExpIndex).length > 0 : false;
+      const shared = this._scanShared(d.ieee);
+      const mine = this._answersStoreRead("zbm-device-answers")[normIeee(d.ieee)] || null;
+      const unlocked = inDb || shared;
+      const draft = this._answerDraft && this._answerDraft.ieee === normIeee(d.ieee) ? this._answerDraft : null;
+      const communityHtml = this._answersCommunityHtml(q, community);
+      let body;
+      if (draft) {
+        body = this._answersFormHtml(q, d, fw, draft, mine, unlocked);
+      } else if (!unlocked) {
+        const type = detectDeviceType(this._clusterCache.get(d.ieee), d.power_source);
+        const preview = questionsFor(q, type, null).slice(0, 3).map((x) => `<li><strong>${escapeHtml(x.text)}</strong> <span class="muted">${escapeHtml(x.answers.map((a) => a.label).join(" \xB7 "))}</span></li>`).join("");
+        body = `<div class="answers-locked">
+          <p>Things a scan can't show: whether it stays connected, what a press really sends, whether it keeps its settings after a power cut.
+            Answering takes about a minute and helps the next person with this model.</p>
+          <ul class="answers-preview">${preview}</ul>
+          <p class="hint">This model isn't in the community database yet, so its capability scan goes in together with your answers:
+            answer now, then share the scan before you submit.</p>
+          <button class="btn btn-small btn-primary" id="drawer-answers-start">Answer a few questions (about 1 minute)</button>
+        </div>`;
+      } else {
+        const again = mine ? `<p class="hint">You answered on ${escapeHtml(new Date(mine.at).toLocaleDateString())}${mine.firmware && mine.firmware !== (fw.sw_build_id || fw.registry_sw_version) ? `, on firmware ${escapeHtml(mine.firmware)}` : ""}.</p>` : "";
+        body = `${again}<button class="btn btn-small ${mine ? "" : "btn-primary"}" id="drawer-answers-start">${mine ? "Change your answers" : "Answer a few questions (about 1 minute)"}</button>`;
+      }
+      return `<div class="drawer-section drawer-answers">
+      <div class="drawer-section-title">How does it behave? <span class="muted">Help the next person</span></div>
+      ${communityHtml}
+      ${body}
+    </div>`;
+    }
+    _answersCommunityHtml(q, community) {
+      if (!community.total) return `<p class="hint">Nobody has answered for this model yet.</p>`;
+      const otherFw = community.others.length ? `<p class="hint">Also answered for firmware ${community.others.map((o) => `${escapeHtml(o.firmware)} (${o.total})`).join(", ")}.</p>` : "";
+      if (!community.here) {
+        return `<p class="hint">${community.total} answer${community.total === 1 ? "" : "s"} for this model, none yet for this firmware.</p>${otherFw}`;
+      }
+      const lines = summaryLines(q, community.here);
+      const html = lines.map((u) => {
+        const rating = u.rating != null ? `<span class="answers-rating">\u2605 ${u.rating.toFixed(1)} <span class="muted">from ${u.ratingCount}</span></span>` : u.ratingCount ? `<span class="muted">${u.ratingCount} rating${u.ratingCount === 1 ? "" : "s"} (average shown from 3)</span>` : "";
+        const qs = u.questions.slice(0, 8).map((x) => `<li><span>${escapeHtml(x.text)}</span> <span class="muted">${escapeHtml(answerCountsText(x))}</span></li>`).join("");
+        const tips = u.tips.length ? `<ul class="answers-tips">${u.tips.map((t) => `<li>\u201C${escapeHtml(t.text)}\u201D</li>`).join("")}</ul>` : "";
+        return `<details class="answers-use" ${lines.length === 1 ? "open" : ""}><summary><strong>${escapeHtml(u.useLabel)}</strong>
+            <span class="muted">${u.count} ${u.count === 1 ? "person" : "people"}</span> ${rating}</summary>
+            <ul class="answers-list">${qs}</ul>${tips}</details>`;
+      }).join("");
+      const linked = community.here.scan_linked ? "" : ` <span class="muted">(no scan of this firmware in the database yet)</span>`;
+      return `<p class="hint">On firmware ${escapeHtml(community.hereKey)}${linked}:</p>${html}${otherFw}`;
+    }
+    _answersFormHtml(q, d, fw, draft, mine, unlocked = true) {
+      const fwText = fw.sw_build_id || fw.registry_sw_version;
+      const sel = (name, options, value, extra = "") => `<select data-answer="${escapeHtml(name)}" ${extra}><option value="">\u2013</option>${options.map((o) => `<option value="${escapeHtml(o.id)}" ${o.id === value ? "selected" : ""}>${escapeHtml(o.label)}</option>`).join("")}</select>`;
+      const otherBox = (key, value, placeholder) => `<input type="text" class="answers-other" data-other="${escapeHtml(key)}" maxlength="${q.free_text_max || 280}" value="${escapeHtml(
+        value || ""
+      )}" placeholder="${escapeHtml(placeholder)}">`;
+      const firmwareChanged = !!(mine && mine.firmware && fwText && mine.firmware !== fwText);
+      const uses = useAnswers(q, draft.deviceType);
+      const useOptions = [...uses, { id: "other", label: "Something else\u2026" }];
+      const battery = /battery/i.test(String(d.power_source || "")) ? true : /mains/i.test(String(d.power_source || "")) ? false : null;
+      const { main, more } = draft.use ? formQuestions(q, draft.deviceType, draft.use, { firmwareChanged, battery }) : { main: [], more: [] };
+      const qRow = (x) => {
+        const opts = [...x.answers, ...x.allow_other ? [{ id: "other", label: x.other_label || "Other\u2026" }] : []];
+        const v = draft.answers[x.id] || "";
+        return `<label class="answers-q"><span>${escapeHtml(x.text)}${x.help ? ` <span class="muted">${escapeHtml(x.help)}</span>` : ""}</span>
+          ${sel(`q:${x.id}`, opts, v)}
+          ${v === "other" ? otherBox(x.id, (draft.other || {})[x.id], "Tell us (no names or addresses)") : ""}</label>`;
+      };
+      const moreAnswered = more.some((x) => draft.answers[x.id]);
+      const qHtml = main.map(qRow).join("") + (more.length ? `<details class="answers-more" ${moreAnswered || this._answersMoreOpen ? "open" : ""}><summary>More questions (${more.length})</summary>${more.map(qRow).join("")}</details>` : "");
+      const ratingOpts = Object.entries(q.rating.labels).map(([n, l]) => ({ id: n, label: `${"\u2605".repeat(Number(n))} ${l}` }));
+      const ctx = (q.context || []).map((c) => `<label class="answers-q"><span>${escapeHtml(c.text)}</span>${sel(`ctx:${c.id}`, c.answers, (draft.context || {})[c.id] || "")}</label>`).join("");
+      const problem = draftProblem(q, fw, draft) || (unlocked ? "" : "Share this device's capability scan first: the model isn't in the community database yet.");
+      const shareFirst = unlocked ? "" : `<div class="flow-callout flow-result-warning">This model isn't in the community database yet. Share its capability scan too, so your
+          answers are tied to a scan anyone can check. Your answers are kept while you do.
+          <button class="btn btn-small" id="drawer-answers-share">Check and share capabilities\u2026</button></div>`;
+      return `<div class="answers-form">
+      <p class="hint">Answer for this one device, firmware ${fwText ? escapeHtml(fwText) : "<strong>unknown</strong>"}. Skip anything you're not sure about.
+        Free text is checked before it's shown, so leave out names, places and addresses.</p>
+      ${fwText ? "" : `<p class="hint health-warning">The firmware isn't known yet: run <strong>Check and share capabilities\u2026</strong> once (it reads it from the device).</p>`}
+      <label class="answers-q"><span>What kind of device is it?</span>${sel("type", q.device_types, draft.deviceType)}</label>
+      <label class="answers-q"><span>${escapeHtml(q.use.text)}</span>${sel("use", useOptions, draft.use)}
+        ${draft.use === "other" ? otherBox("use", (draft.other || {}).use, "What do you use it for?") : ""}</label>
+      ${draft.use ? qHtml : `<p class="hint">${escapeHtml(q.use.help || "")}</p>`}
+      ${draft.use ? `<label class="answers-q"><span>${escapeHtml(q.rating.text)}</span>${sel("rating", ratingOpts, draft.rating != null ? String(draft.rating) : "")}</label>
+             <details class="answers-context" ${this._answersContextOpen ? "open" : ""}><summary>About your setup (optional)</summary>${ctx}</details>
+             <label class="answers-q"><span>${escapeHtml(q.tip.text)} <span class="muted">${escapeHtml(q.tip.help || "")}</span></span>
+               <textarea class="answers-tip" maxlength="${q.free_text_max || 280}" rows="2">${escapeHtml(draft.tip || "")}</textarea></label>` : ""}
+      ${shareFirst}
+      <div class="dialog-actions">
+        <a class="btn btn-small btn-primary ${problem ? "disabled" : ""}" id="drawer-answers-submit" href="#" ${problem ? `aria-disabled="true" title="${escapeHtml(problem)}"` : ""}>Review on GitHub and submit</a>
+        <button class="btn btn-small" id="drawer-answers-cancel">Cancel</button>
+      </div>
+      ${problem && (draft.use || !unlocked) ? `<p class="hint">${escapeHtml(problem)}</p>` : ""}
+      <p class="hint">Opens a pre-filled GitHub issue; nothing is sent until you press Submit there. Not using GitHub? The same questions are on the
+        <a href="${escapeHtml(ISSUE_FORM_URL)}" target="_blank" rel="noopener">community form</a>.</p>
+    </div>`;
+    }
+    _wireDrawerAnswers(d) {
+      const root = this._q("#drawer-body .drawer-answers");
+      if (!root) return;
+      const ieee = normIeee(d.ieee);
+      const share = root.querySelector("#drawer-answers-share");
+      const jump = this._q("#drawer-answers-link");
+      if (jump)
+        jump.addEventListener("click", (e) => {
+          e.preventDefault();
+          if (root.scrollIntoView) root.scrollIntoView({ block: "start", behavior: "smooth" });
+        });
+      if (share)
+        share.addEventListener("click", () => {
+          this._drawerShareOpen = true;
+          this._renderDrawer();
+          const box = this._q("#drawer-body .drawer-share");
+          if (box && box.scrollIntoView) box.scrollIntoView({ block: "nearest", behavior: "smooth" });
+        });
+      const start = root.querySelector("#drawer-answers-start");
+      if (start)
+        start.addEventListener("click", () => {
+          const mine = this._answersStoreRead("zbm-device-answers")[ieee];
+          const prev = mine && mine.draft || {};
+          this._answerDraft = {
+            ieee,
+            deviceType: prev.deviceType || detectDeviceType(this._clusterCache.get(d.ieee), d.power_source),
+            use: prev.use || "",
+            answers: { ...prev.answers || {} },
+            other: { ...prev.other || {} },
+            rating: prev.rating != null ? prev.rating : null,
+            tip: prev.tip || "",
+            context: { system: "zha", ...prev.context || {} }
+          };
+          this._renderDrawer();
+        });
+      const draft = this._answerDraft && this._answerDraft.ieee === ieee ? this._answerDraft : null;
+      if (!draft) return;
+      root.querySelectorAll("select[data-answer]").forEach(
+        (el) => el.addEventListener("change", () => {
+          const name = el.dataset.answer;
+          const v = el.value;
+          if (name === "type") {
+            draft.deviceType = v;
+            draft.use = "";
+          } else if (name === "use") draft.use = v;
+          else if (name === "rating") draft.rating = v ? Number(v) : null;
+          else if (name.startsWith("q:")) draft.answers[name.slice(2)] = v;
+          else if (name.startsWith("ctx:")) draft.context[name.slice(4)] = v;
+          this._renderDrawer();
+        })
+      );
+      root.querySelectorAll("input[data-other]").forEach(
+        (el) => el.addEventListener("input", () => {
+          draft.other[el.dataset.other] = el.value;
+          this._answersRefreshSubmit(d);
+        })
+      );
+      const ctxBox = root.querySelector(".answers-context");
+      if (ctxBox) ctxBox.addEventListener("toggle", () => this._answersContextOpen = ctxBox.open);
+      const moreBox = root.querySelector(".answers-more");
+      if (moreBox) moreBox.addEventListener("toggle", () => this._answersMoreOpen = moreBox.open);
+      const tip = root.querySelector(".answers-tip");
+      if (tip) tip.addEventListener("input", () => draft.tip = tip.value);
+      const cancel = root.querySelector("#drawer-answers-cancel");
+      if (cancel)
+        cancel.addEventListener("click", () => {
+          this._answerDraft = null;
+          this._renderDrawer();
+        });
+      const submit = root.querySelector("#drawer-answers-submit");
+      if (submit)
+        submit.addEventListener("click", (e) => {
+          e.preventDefault();
+          const q = this._answersQ;
+          const fw = this._deviceFirmware(d);
+          const inDb = this._capExpIndex ? matchLocalDevices([d], this._capExpIndex).length > 0 : false;
+          const shared = this._scanShared(ieee);
+          const problem = draftProblem(q, fw, draft) || (inDb || shared ? "" : "Share this device's capability scan first (Check and share capabilities\u2026).");
+          if (problem) {
+            this._setStatus("warning", problem);
+            return;
+          }
+          const mine = this._answersStoreRead("zbm-device-answers")[ieee];
+          const fwText = fw.sw_build_id || fw.registry_sw_version;
+          const record = buildRecord(q, d, fw, { ...draft, firmwareChanged: !!(mine && mine.firmware && mine.firmware !== fwText) }, CARD_VERSION);
+          window.open(issueUrl(record), "_blank", "noopener");
+          const all = this._answersStoreRead("zbm-device-answers");
+          const { ieee: _i, ...keep } = draft;
+          all[ieee] = { at: (/* @__PURE__ */ new Date()).toISOString(), firmware: fwText, draft: keep };
+          this._answersStoreWrite("zbm-device-answers", all);
+          this._answerDraft = null;
+          this._setStatus(
+            "success",
+            "Opened your answers as a GitHub issue: press Submit there. They show up for everyone once the database has merged them.",
+            0
+          );
+          this._renderDrawer();
+        });
+    }
+    /** Re-checks the submit button while typing, without re-rendering (which
+     *  would take the cursor out of the box). */
+    _answersRefreshSubmit(d) {
+      const btn = this._q("#drawer-answers-submit");
+      if (!btn || !this._answerDraft) return;
+      const inDb = this._capExpIndex ? matchLocalDevices([d], this._capExpIndex).length > 0 : false;
+      const shared = this._scanShared(d.ieee);
+      const problem = draftProblem(this._answersQ, this._deviceFirmware(d), this._answerDraft) || (inDb || shared ? "" : "Share the capability scan first.");
+      btn.classList.toggle("disabled", !!problem);
+      if (problem) btn.setAttribute("title", problem);
+      else btn.removeAttribute("title");
+    }
+    /** Sends On/Off itself (a remote or switch), so a press can be checked. */
+    _isRemoteLike(d) {
+      return (this._clusterCache.get(d.ieee) || []).some((c) => c.type === "out" && Number(c.id) === 6);
+    }
+    /** Side panel: lost bindings and the watch setting for one device. */
+    _drawerLostHtml(d, rel) {
+      const hasOwn = rel.controls.length > 0 || this._rawBindings().some((b) => normIeee(b.sourceIeee) === normIeee(d.ieee));
+      if (!this._watchEnabled) {
+        if (this._backendInstalled || !hasOwn) return "";
+        return `<div class="drawer-section"><div class="drawer-section-title">Lost bindings</div>
+        <p class="hint">Devices sometimes lose their bindings (a reset, a firmware update, a power cut on some models). Install the
+        ZHA Bindings Manager integration and it checks every night and tells you, or puts them back for you.</p></div>`;
+      }
+      const w = lostFor(this._lost, d.ieee);
+      if (!hasOwn && !w.expected && w.policy === "notify") return "";
+      const busy = this._lostBusy;
+      const lostList = w.lost.length ? `<ul class="drawer-lost">${w.lost.map(
+        (b) => `<li class="health-error">Lost: ${escapeHtml(b.text || b.key)} <span class="muted">${escapeHtml(sinceText(b.since))}</span></li>`
+      ).join("")}</ul>
+        <button class="btn btn-small btn-primary" id="drawer-lost-put-back" ${busy ? "disabled" : ""}>${busy === "Put back" ? "Putting back\u2026" : "Put back"}</button>
+        <a href="#" class="src-link" id="drawer-lost-forget" title="Stop expecting these: you removed them yourself">Removed on purpose</a>
+        ${w.queued ? `<p class="hint">It didn't answer, probably asleep. It'll be done the next time you press one of its buttons.</p>` : ""}
+        ${w.autoPaused ? `<p class="hint">It lost them 3 times today, so it stopped putting them back automatically. Something keeps removing them: a full binding table, or another app.</p>` : ""}` : `<p class="hint">Nothing lost.${w.lastCheck ? ` Last checked ${escapeHtml(sinceText(w.lastCheck))}.` : ""}</p>`;
+      const opts = POLICIES.map(
+        (p) => `<option value="${p}" ${p === w.policy ? "selected" : ""}>${escapeHtml(POLICY_LABELS[p])}</option>`
+      ).join("");
+      return `<div class="drawer-section drawer-lost-section">
+      <div class="drawer-section-title">Lost bindings</div>
+      ${lostList}
+      <label class="drawer-lost-policy">If it loses a binding:
+        <select id="drawer-lost-policy" ${busy ? "disabled" : ""}>${opts}</select></label>
+      <p class="hint">${escapeHtml(POLICY_HINTS[w.policy] || "")}</p>
+      ${w.policy !== "off" && this._isRemoteLike(d) ? `<label class="drawer-check"><input type="checkbox" id="drawer-lost-fallback" ${w.fallback ? "checked" : ""} ${busy ? "disabled" : ""}>
+              <span>Switch the lights from Home Assistant if a press doesn't reach them</span></label>
+             <p class="hint">After On, Off or Toggle, any light it's bound to directly that hasn't changed within 2 seconds is switched by Home Assistant,
+               logged, and this device's bindings are checked straight away.</p>` : ""}
+      <details class="drawer-lost-expect"><summary>What to expect</summary>
+        <ul>
+          <li>Battery devices only answer when awake: a lost binding on one is noticed and put back after you press a button.</li>
+          <li>"Put back automatically" is for devices that keep losing bindings. If something removes them on purpose (another app, a
+            Zigbee2MQTT migration), it stops after 3 times a day.</li>
+          <li>Removing a binding in this card is never treated as lost. Removing one somewhere else is: use "Removed on purpose".</li>
+          <li>A device with a full binding table can't take it back; Put back then says it's still missing.</li>
+          <li>Switching from Home Assistant needs lights that report their state promptly, works for On, Off and Toggle only, and
+            never for group bindings: a light missing one group message hasn't lost a binding. Toggle is skipped when the lights
+            weren't all on or all off before the press.</li>
+        </ul>
+      </details>
+    </div>`;
     }
     /** 1.5.0: the integration reads binding tables itself (the device-page
      *  Rescan button, the nightly binding check). Use any read that's newer
@@ -4739,6 +6407,7 @@ a.btn { display:inline-block; text-decoration:none; }
         this._scanPartial.delete(normIeee(ieee));
       });
       await this._saveScanState();
+      this._lostSoon();
       const goneNames = notInZha.map((ieee) => this._ieeeLabel(ieee, { plain: true })).join(", ");
       if (notInZha.length && !targets.length) {
         this._setStatus(
@@ -4987,11 +6656,11 @@ a.btn { display:inline-block; text-decoration:none; }
      *  it yet. */
     _deviceEndpoints(d) {
       const clusters = this._clusterCache.get(d.ieee) || [];
-      const ids = new Set(clusters.map((c) => c.endpoint_id).filter((id) => id !== GREEN_POWER_ENDPOINT));
+      const ids2 = new Set(clusters.map((c) => c.endpoint_id).filter((id) => id !== GREEN_POWER_ENDPOINT));
       this._rawBindings().forEach((b) => {
-        if (b.sourceIeee === d.ieee && b.sourceEndpoint !== GREEN_POWER_ENDPOINT) ids.add(b.sourceEndpoint);
+        if (b.sourceIeee === d.ieee && b.sourceEndpoint !== GREEN_POWER_ENDPOINT) ids2.add(b.sourceEndpoint);
       });
-      return [...ids].sort((a, b) => a - b);
+      return [...ids2].sort((a, b) => a - b);
     }
     /** Whether an endpoint is in "detach relay mode" — read live from the
      *  matching switch.*_detach_relay_N-style entity's actual state, never
@@ -5197,11 +6866,11 @@ a.btn { display:inline-block; text-decoration:none; }
         const groupExists = this._groups.some((g) => g.group_id === b.groupId);
         if (!groupExists) {
           return {
-            level: "warning",
+            level: "info",
             code: "missing_group",
-            message: "Referenced Zigbee group no longer exists.",
-            why: "This binding sends commands to a Zigbee group that Home Assistant no longer knows about, so nothing receives them.",
-            recommendation: "Recreate the group or remove the binding."
+            message: `Group ${groupIdHex(b.groupId)} isn't a Home Assistant group.`,
+            why: "This binding sends commands to a Zigbee group that Home Assistant doesn't know about. It was probably made on the devices themselves (Find & Bind, a remote's pairing button, or another Zigbee system), or it's a ZHA group that was deleted. Any device that joined the group still receives the commands; Home Assistant just can't show which ones.",
+            recommendation: "Groups tab \u2192 Groups only on devices: add it to Home Assistant to see and change its lights, or remove the binding if you don't use it."
           };
         }
         if (isManufacturerSpecific(b.clusterId)) return manufacturerSpecificRule(b.clusterId);
@@ -5930,6 +7599,37 @@ a.btn { display:inline-block; text-decoration:none; }
         });
         this._edgesLayer.appendChild(line);
       });
+      if (this._watchEnabled) {
+        for (const dev of lostSummary(this._lost).devices) {
+          for (const b of dev.lost) {
+            const fromKey = this._nodeKey(b.sourceIeee || dev.ieee);
+            const toKey = b.isGroup ? this._groupNodeKey(b.groupId) : this._nodeKey(b.targetIeee);
+            if (!visibleKeys.has(fromKey) || !visibleKeys.has(toKey)) continue;
+            const pairKey = `${fromKey}->${toKey}`;
+            const idx = pairCount.get(pairKey) || 0;
+            pairCount.set(pairKey, idx + 1);
+            const line = this._svgEl("path", {
+              class: "edge edge-lost",
+              "data-from": fromKey,
+              "data-to": toKey,
+              "data-offset": idx,
+              stroke: LOST_EDGE_COLOR,
+              fill: "none",
+              "marker-end": "url(#arrow)"
+            });
+            line.style.setProperty("--edge-color", LOST_EDGE_COLOR);
+            const title = this._svgEl("title");
+            title.textContent = `Lost: ${b.text || b.key}. The device had this binding and doesn't any more. Click to put it back.`;
+            line.appendChild(title);
+            line.addEventListener("click", (ev) => {
+              ev.stopPropagation();
+              const d = this._devices.find((x) => normIeee(x.ieee) === dev.ieee);
+              if (d) this._openDeviceDrawer(d);
+            });
+            this._edgesLayer.appendChild(line);
+          }
+        }
+      }
       this._membershipEdges().forEach((m) => {
         const fromKey = this._groupNodeKey(m.groupId);
         const toKey = this._nodeKey(m.memberIeee);
@@ -6704,7 +8404,7 @@ a.btn { display:inline-block; text-decoration:none; }
       });
     }
     _flowShareKey() {
-      return `zbm:flow-shared:${this._flowSlugKey()}|${firmwareKey(this._flowFirmware())}|${this._flowBehaviour()}`;
+      return `zbm:flow-shared:${this._flowSlugKey()}|${firmwareKey2(this._flowFirmware())}|${this._flowBehaviour()}`;
     }
     _flowShareUrl(report) {
       const title = `[Behaviour Report] ${report.manufacturer || "Unknown"} ${report.model || "Unknown"}: ${report.behaviour === "group_binding" ? "group binding" : "direct binding"} ${RESULT_TEXT[report.result] || report.result}`;
@@ -7051,6 +8751,7 @@ a.btn { display:inline-block; text-decoration:none; }
       this._drawerShareOpen = false;
       this._drawerRouteOpen = false;
       this._renderDrawer();
+      if (this._experimental) this._activityLoad();
       const el = this._q("#drawer");
       this._wireDrawerSwipe();
       if (el) {
@@ -7225,6 +8926,10 @@ a.btn { display:inline-block; text-decoration:none; }
         this._closeDrawer();
         return;
       }
+      const keepScroll = body.scrollTop;
+      requestAnimationFrame(() => {
+        if (this._drawerIeee === d.ieee && body.scrollTop !== keepScroll) body.scrollTop = keepScroll;
+      });
       this._q("#drawer-title").textContent = this._deviceLabel(d);
       const rel = this._drawerRelations(d.ieee);
       this._ensureZ2mModels();
@@ -7238,7 +8943,9 @@ a.btn { display:inline-block; text-decoration:none; }
         reg && reg.sw_version ? ["Firmware", reg.sw_version] : null,
         ["Power", d.power_source || "Unknown"],
         ["Bindings read", this._lastScanCellInfo(d).html.replace(/<button[\s\S]*?<\/button>/, "")],
-        ["Community database", this._drawerCommunityStatus(d)]
+        ["Community database", this._drawerCommunityStatus(d)],
+        this._drawerActivityText(d) != null ? ["Messages to Home Assistant", this._drawerActivityText(d)] : null,
+        d.manufacturer || d.model ? ["How it behaves", this._drawerAnswersFact(d)] : null
       ].filter(Boolean);
       const battery = this._isBatteryDevice(d);
       const haUrl = deviceHaUrl(d);
@@ -7260,7 +8967,7 @@ a.btn { display:inline-block; text-decoration:none; }
         ${photo}
         <div>
           ${tags.length ? `<div class="drawer-tags">${tags.map((t) => `<span class="chip">${escapeHtml(t)}</span>`).join("")}</div>` : ""}
-          <table class="detail-table drawer-facts">${facts.map(([k, v]) => `<tr><td>${escapeHtml(k)}</td><td>${k === "Bindings read" || k === "Community database" ? v : escapeHtml(String(v))}</td></tr>`).join("")}</table>
+          <table class="detail-table drawer-facts">${facts.map(([k, v]) => `<tr><td>${escapeHtml(k)}</td><td>${k === "Bindings read" || k === "Community database" || k === "How it behaves" ? v : escapeHtml(String(v))}</td></tr>`).join("")}</table>
         </div>
       </div>
       ${problems}
@@ -7275,6 +8982,8 @@ a.btn { display:inline-block; text-decoration:none; }
         ${this._drawerRelListHtml(rel.controlledBy, "Nothing is bound to it.")}
         ${rel.memberOf.length ? `<p class="hint">Member of ${rel.memberOf.map((g) => escapeHtml(g.name)).join(", ")}.</p>` : ""}
       </div>
+      ${this._drawerLostHtml(d, rel)}
+      ${this._drawerAnswersHtml(d)}
       ${this._drawerMeshHtml(d)}
       <div class="drawer-section drawer-actions">
         <div class="drawer-section-title">Actions</div>
@@ -7285,6 +8994,7 @@ a.btn { display:inline-block; text-decoration:none; }
         ${share}
         ${this._experimental && rel.controls.length ? `<button class="btn" id="drawer-route" title="Experimental: the likely path each of its bindings takes through the mesh, and the weakest link">Check route\u2026</button>${this._drawerRouteHtml(d, rel)}` : ""}
         <button class="btn" id="drawer-endpoints" title="Per-endpoint layout: clusters, bindings and supported commands">Show endpoints\u2026</button>
+        <button class="btn" id="drawer-replace" title="Swapping this device for another one: copies its bindings and groups to the new device, after checking it can do the same job">Replace this device\u2026</button>
         ${haUrl ? `<a class="btn" href="${escapeHtml(haUrl)}" target="_blank" rel="noopener" title="Opens this device's page in Home Assistant, in a new tab">Open in Home Assistant</a>` : ""}
       </div>`;
       const on = (sel, fn) => {
@@ -7298,6 +9008,7 @@ a.btn { display:inline-block; text-decoration:none; }
         })
       );
       on("#drawer-control-lights", () => this._openGroupFlow(d));
+      on("#drawer-replace", () => this._openReplace({ ieee: d.ieee }));
       const showBindings = (e) => {
         if (e) e.preventDefault();
         this._setTableDeviceFilter(d.ieee);
@@ -7306,6 +9017,26 @@ a.btn { display:inline-block; text-decoration:none; }
       };
       on("#drawer-show-bindings", showBindings);
       on("#drawer-problems-link", showBindings);
+      on("#drawer-lost-put-back", () => this._lostPutBack(d.ieee));
+      this._wireDrawerAnswers(d);
+      const lostForget = this._q("#drawer-lost-forget");
+      if (lostForget)
+        lostForget.addEventListener("click", (e) => {
+          e.preventDefault();
+          this._lostForget(d.ieee, null);
+        });
+      const lostFallback = this._q("#drawer-lost-fallback");
+      if (lostFallback)
+        lostFallback.addEventListener(
+          "change",
+          () => this._lostAction("Change setting", () => this._api.watchFallback(d.ieee, lostFallback.checked))
+        );
+      const lostPolicy = this._q("#drawer-lost-policy");
+      if (lostPolicy)
+        lostPolicy.addEventListener(
+          "change",
+          () => this._lostAction("Change setting", () => this._api.watchPolicy(d.ieee, lostPolicy.value))
+        );
       on("#drawer-rescan", async () => {
         const btn = this._q("#drawer-rescan");
         if (btn) {
@@ -7520,6 +9251,113 @@ a.btn { display:inline-block; text-decoration:none; }
       <span>${sample("weak", 1.5, true)} weak, below ${thr.weak}: messages may be lost</span>
     </div>`;
     }
+    // ---- Experimental: messages to Home Assistant (1.7.0) ----
+    /** Loads activity_get, at most every 30 s unless forced. */
+    async _activityLoad(force = false) {
+      if (!this._experimental || this._activityLoading) return;
+      if (!force && this._activityAt && Date.now() - this._activityAt < 3e4) return;
+      this._activityLoading = true;
+      this._renderActivity();
+      try {
+        this._activity = await this._api.activityGet();
+        this._activityError = null;
+      } catch (err) {
+        this._activityError = err && (err.message || err.code) || String(err);
+      }
+      this._activityAt = Date.now();
+      this._activityLoading = false;
+      this._renderActivity();
+      if (this._drawerIeee) this._renderDrawer();
+    }
+    _renderActivity() {
+      const el = this._q("#activity-section");
+      if (!el) return;
+      if (!this._activity && !this._activityLoading && !this._activityError) {
+        this._activityLoad();
+        return;
+      }
+      const nameOf = (ieee) => {
+        const d = this._devices.find((x) => normIeee(x.ieee) === ieee);
+        return d ? this._deviceLabel(d) : ieee;
+      };
+      const refresh = `<button class="btn btn-small" id="activity-refresh" ${this._activityLoading ? "disabled" : ""}>${this._activityLoading ? "Loading\u2026" : "Refresh"}</button>`;
+      if (!this._activity) {
+        const msg = this._activityError ? `couldn't load the counts (${escapeHtml(this._activityError)})` : "loading\u2026";
+        el.innerHTML = `<div class="activity-summary-line"><strong>Messages to Home Assistant:</strong> <span class="muted">${msg}</span> ${refresh}</div>`;
+        this._wireActivity();
+        return;
+      }
+      const snap = this._activity;
+      const { rows, chatty, fromCoordinator } = activityRows(snap, { coordinatorIeee: this._coordinatorIeee() });
+      const since = snap.since ? new Date(snap.since) : null;
+      const clusterText = (r, n = 2) => r.clusters.slice(0, n).map(([id, c]) => `${clusterLabel(Number(id))} ${c}`).join(", ");
+      const alerts = [];
+      if (fromCoordinator) {
+        alerts.push(`<li class="mesh-tip-error"><strong>${fromCoordinator.hour} messages in the last hour claimed to come from the coordinator itself</strong> (0x0000).
+        The coordinator doesn't send to itself, so a device is probably using its network address. That can confuse or flood the whole network.
+        If the Network scan flags a device using 0x0000, unplug it, then reset and pair it again.</li>`);
+      }
+      for (const r of chatty) {
+        const x = timesTypical(r);
+        alerts.push(`<li class="mesh-tip-error"><strong>${escapeHtml(nameOf(r.ieee))}</strong> is sending ${r.now} messages a minute${x ? ` (${x} its usual ${r.typical})` : ""}, mostly ${escapeHtml(clusterText(r))}.
+        A device this chatty can delay or drop other devices' messages. Check its reporting settings, or power it off for a minute to see if the network recovers.</li>`);
+      }
+      if (!snap.attached) {
+        alerts.push(`<li class="mesh-tip-warning">Not counting: ZHA isn't running, or the counter couldn't attach to it yet. It retries every minute.</li>`);
+      }
+      const flagged = chatty.length + (fromCoordinator ? 1 : 0);
+      const busiest = rows[0];
+      const summary = flagged ? `<span class="activity-alert">${flagged} ${flagged === 1 ? "problem" : "problems"} found</span>` : !snap.attached ? `<span class="muted">not counting</span>` : busiest ? `nothing stands out <span class="muted">\xB7 busiest: ${escapeHtml(nameOf(busiest.ieee))}, ${busiest.now} a minute</span>` : `<span class="muted">no messages counted yet</span>`;
+      const open = alerts.length > 0 || !!this._activityOpen;
+      const counters = interestingCounters(snap);
+      const usual = (r) => r.typical == null ? "\u2013" : r.typical;
+      el.innerHTML = `<details class="activity-details" ${open ? "open" : ""}>
+        <summary class="activity-summary-line"><strong>Messages to Home Assistant:</strong> ${summary} ${refresh}</summary>
+        <p class="hint">Messages ZHA received from each device. Only traffic that reaches the coordinator is counted, and counts restart with Home Assistant${since ? ` (counting since ${escapeHtml(since.toLocaleString())})` : ""}. "Usual" is the typical rate since then, shown after 10 minutes.</p>
+        ${alerts.length ? `<ul class="mesh-tips">${alerts.join("")}</ul>` : ""}
+        ${rows.length ? `<table class="detail-table activity-table">
+                <colgroup><col class="activity-col-name"><col class="activity-col-num"><col class="activity-col-num"><col class="activity-col-num"><col></colgroup>
+                <thead><tr><th>Device</th><th class="num">Now /min</th><th class="num">Last hour</th><th class="num">Usual /min</th><th>Mostly</th></tr></thead>
+                <tbody>${rows.slice(0, TOP_ROWS).map(
+        (r) => `<tr class="${r.chatty ? "activity-chatty" : ""}"><td><a href="#" class="src-link" data-activity-ieee="${escapeHtml(r.ieee)}">${escapeHtml(nameOf(r.ieee))}</a></td>
+                      <td class="num">${r.now}</td><td class="num">${r.hour}</td><td class="num">${usual(r)}</td><td class="muted">${escapeHtml(clusterText(r))}</td></tr>`
+      ).join("")}</tbody>
+              </table>` : ""}
+        ${counters.length ? `<details class="activity-counters"><summary>Coordinator counters (${counters.length})</summary>
+                <table class="detail-table">${counters.map((c) => `<tr><td>${escapeHtml(c.name)}</td><td class="num">${Number(c.value)}</td></tr>`).join("")}</table>
+                <p class="hint">From the radio library; which counters exist depends on your adapter.</p></details>` : ""}
+      </details>`;
+      const det = el.querySelector(".activity-details");
+      if (det)
+        det.addEventListener("toggle", () => {
+          if (!alerts.length) this._activityOpen = det.open;
+        });
+      this._wireActivity();
+    }
+    _wireActivity() {
+      const btn = this._q("#activity-refresh");
+      if (btn)
+        btn.addEventListener("click", (e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          this._activityLoad(true);
+        });
+      this._qa("[data-activity-ieee]").forEach(
+        (a) => a.addEventListener("click", (e) => {
+          e.preventDefault();
+          const d = this._devices.find((x) => normIeee(x.ieee) === a.dataset.activityIeee);
+          if (d) this._openDeviceDrawer(d);
+        })
+      );
+    }
+    /** Side panel line: "X a minute now, Y over the hour". */
+    _drawerActivityText(d) {
+      if (!this._experimental || !this._activity) return null;
+      const { rows } = activityRows(this._activity, { coordinatorIeee: this._coordinatorIeee() });
+      const r = rows.find((x) => x.ieee === normIeee(d.ieee));
+      if (!r) return "None in the last hour";
+      return `${r.now} a minute now, ${r.hour} over the hour${r.chatty ? " (unusually high)" : ""}`;
+    }
     _renderMesh() {
       const el = this._q("#view-mesh");
       if (!el) return;
@@ -7562,8 +9400,9 @@ a.btn { display:inline-block; text-decoration:none; }
         ${this._meshFloorsHelpHtml()}
       </div>`;
       if (!read) {
-        el.innerHTML = intro + `<p class="muted">Click <strong>Scan network</strong> to read the tables. Nothing on your network is changed.</p>`;
+        el.innerHTML = intro + `<div id="activity-section" class="activity-section"></div><p class="muted">Click <strong>Scan network</strong> to read the tables. Nothing on your network is changed.</p>`;
         this._wireMesh();
+        this._renderActivity();
         this._renderMeshProgress();
         return;
       }
@@ -7579,6 +9418,7 @@ a.btn { display:inline-block; text-decoration:none; }
       const tips = meshSuggestions(mesh, { thr, nameOf, areaOf, routers: routers.map((d) => normIeee(d.ieee)) });
       const failed = Object.entries(this._meshSnapshot).filter(([, e]) => e && !e.ok);
       el.innerHTML = `${intro}
+      <div id="activity-section" class="activity-section"></div>
       <div class="mesh-layout">
         <div class="mesh-picture">${this._meshSvg(mesh)}
           ${this._meshSelectedLinkHtml(mesh, nameOf)}
@@ -7600,6 +9440,7 @@ a.btn { display:inline-block; text-decoration:none; }
         </div>
       </div>`;
       this._wireMesh();
+      this._renderActivity();
       this._renderMeshProgress();
     }
     _meshSvg(mesh) {
@@ -8257,6 +10098,7 @@ Used by: ${h.uses.join("; ")}`;
       });
       this._qa(".ep-cmd-share-open").forEach((a) => {
         a.addEventListener("click", async () => {
+          if (this._shareDraft) this._markScanShared(this._shareDraft.key, this._shareDraft.record);
           if (!this._shareDraft || !this._shareDraft.tooLong) return;
           const original = a.textContent;
           const ok = await this._copyShareText(this._shareDraft.body);
@@ -9095,6 +10937,7 @@ Used by: ${h.uses.join("; ")}`;
       const healthMap = this._computeHealthMap();
       this._renderHealthSummary(healthMap);
       this._renderStaleBanner();
+      this._renderLostBanner();
       this._renderPendingBanner();
       this._updateSortIndicators("#view-table", this._tableSort);
       let rows = this._filteredBindingRows(healthMap).map((b) => {
@@ -9228,6 +11071,7 @@ Used by: ${h.uses.join("; ")}`;
         <div class="stale-row">
           <span><strong>${dead.length} binding${dead.length === 1 ? "" : "s"}</strong> on ${sources} device${sources === 1 ? "" : "s"} point to devices that are no longer in ZHA. They use binding-table slots and send commands to nobody.</span>
           <button class="btn btn-small" id="btn-stale-show">Show</button>
+          <button class="btn btn-small" id="btn-stale-move" title="Replaced it with a new device? Point these bindings at the new one instead">Move to a new device\u2026</button>
           <button class="btn btn-small btn-danger" id="btn-stale-unbind-all">Unbind all</button>
         </div>`);
       }
@@ -9250,6 +11094,8 @@ Used by: ${h.uses.join("; ")}`;
           );
           this._renderTable();
         });
+      const move = this._q("#btn-stale-move");
+      if (move) move.addEventListener("click", () => this._openReplace({ deadTargets: [...new Set(dead.map((b) => normIeee(b.targetIeee)))] }));
       const unbindAll = this._q("#btn-stale-unbind-all");
       if (unbindAll) unbindAll.addEventListener("click", () => this._confirmUnbindDeadTargets());
       const forgetAll = this._q("#btn-stale-forget-all");
@@ -9372,6 +11218,7 @@ Used by: ${h.uses.join("; ")}`;
         return;
       }
       const counts = { ok: 0, info: 0, warning: 0, error: 0 };
+      const lost = this._watchEnabled ? lostSummary(this._lost).total : 0;
       bindings.forEach((b) => {
         const h = healthMap.get(b.id);
         if (h) counts[h.level] = (counts[h.level] || 0) + 1;
@@ -9384,7 +11231,17 @@ Used by: ${h.uses.join("; ")}`;
       ${counts.warning ? `<span class="health-chip health-warning">${HEALTH_ICON.warning} ${counts.warning} Warning${counts.warning === 1 ? "" : "s"}</span>` : ""}
       ${counts.error ? `<span class="health-chip health-error">${HEALTH_ICON.error} ${counts.error} Error${counts.error === 1 ? "" : "s"}</span>` : ""}
       ${counts.info ? `<span class="health-chip health-info">${HEALTH_ICON.info} ${counts.info} Info</span>` : ""}
+      ${lost ? `<a href="#" class="health-chip health-error health-chip-lost" id="health-chip-lost" title="Bindings the devices had before and don't any more">${HEALTH_ICON.error} ${lost} Lost</a>` : ""}
     `;
+      const chip = this._q("#health-chip-lost");
+      if (chip)
+        chip.addEventListener("click", (e) => {
+          e.preventDefault();
+          this._lostOpen = true;
+          this._renderLostBanner();
+          const b = this._q("#lost-banner");
+          if (b && b.scrollIntoView) b.scrollIntoView({ block: "nearest", behavior: "smooth" });
+        });
     }
     /** Detail popover for a Health badge — answers what's wrong, why it
      *  matters, and what to do next, reusing the generic dialog. */
@@ -9594,8 +11451,23 @@ Used by: ${h.uses.join("; ")}`;
           and you can change which lights are in it without touching the remote.</p>
         <button class="btn btn-primary" id="groups-new" ${dis} title="Pick a remote and the lights it should control. The card makes or reuses a group, binds the remote to it and checks it works.">New group for a remote\u2026</button>
       </div>`;
+      const orphans = deviceOnlyGroups({ groups: this._groups, bindings: this._rawBindings(), classify: (b) => this._classifyBinding(b), coordinatorIeee: coord });
+      const orphanHtml = orphans.length ? `<section class="group-card group-orphans">
+          <div class="group-card-head"><strong>Groups only on devices</strong>
+            <span class="muted">${orphans.length} group${orphans.length === 1 ? "" : "s"} Home Assistant doesn't know</span></div>
+          <p class="hint">Bindings point at ${orphans.length === 1 ? "this group" : "these groups"}, but ${orphans.length === 1 ? "it isn't" : "they aren't"} in ZHA. Usually
+            made on the devices themselves (Find & Bind, or a remote's pairing button). Devices that joined still receive the commands;
+            Home Assistant can't tell which devices those are. Adding it to Home Assistant lets you see and change its lights here
+            (add them with Add lights\u2026 afterwards: devices already in it are fine to add again).</p>
+          <ul class="groups-list">${orphans.map(
+        (o) => `<li><strong>${groupIdHex(o.groupId)}</strong> <span class="muted">(${o.groupId})</span> used by
+                ${o.controllers.length ? o.controllers.map((c) => devLink(c.sourceIeee, ` <span class="muted">ep ${c.endpoint}: ${escapeHtml(c.clusters.map(clusterName).join(", "))}</span>`)).join(", ") : `<span class="muted">${o.others} reporting binding${o.others === 1 ? "" : "s"}</span>`}
+                <input type="text" class="groups-orphan-name" data-gid="${o.groupId}" value="${escapeHtml(`Group ${groupIdHex(o.groupId)}`)}" aria-label="Name for the new group" ${dis}>
+                <button class="btn btn-small" data-group-adopt="${o.groupId}" ${dis} title="Creates a ZHA group with this same group ID, so the bindings point at a group Home Assistant knows">Add to Home Assistant</button></li>`
+      ).join("")}</ul>
+        </section>` : "";
       if (!rows.length) {
-        el.innerHTML = `${head}<p class="muted">No ZHA groups yet. <strong>New group for a remote\u2026</strong> creates one.</p>`;
+        el.innerHTML = `${head}<p class="muted">No ZHA groups yet. <strong>New group for a remote\u2026</strong> creates one.</p>${orphanHtml}`;
         this._wireGroupsTab(rows);
         return;
       }
@@ -9627,7 +11499,7 @@ Used by: ${h.uses.join("; ")}`;
         ${this._groupsDeleteOpen === r.groupId ? this._groupsDeleteHtml(r) : ""}
       </section>`;
       });
-      el.innerHTML = head + cards.join("");
+      el.innerHTML = head + cards.join("") + orphanHtml;
       this._wireGroupsTab(rows);
       if (this._groupsFocus != null) {
         const sec = this._q(`#view-groups .group-card[data-gid="${this._groupsFocus}"]`);
@@ -9706,6 +11578,11 @@ Used by: ${h.uses.join("; ")}`;
         e.preventDefault();
         const d = this._devices.find((x) => x.ieee === e.currentTarget.dataset.ieee);
         if (d) this._openDeviceDrawer(d);
+      });
+      on("[data-group-adopt]", (e) => {
+        const gid = Number(e.currentTarget.dataset.groupAdopt);
+        const input = root.querySelector(`.groups-orphan-name[data-gid="${gid}"]`);
+        this._groupsAdopt(gid, (input && input.value || "").trim() || `Group ${groupIdHex(gid)}`);
       });
       on("[data-group-remote]", (e) => this._openGroupFlowPickRemote({ groupId: Number(e.currentTarget.dataset.groupRemote) }));
       on("[data-group-add]", async (e) => {
@@ -9798,6 +11675,24 @@ Used by: ${h.uses.join("; ")}`;
         }
       } catch (err) {
         this._setStatus("error", `Couldn't add to ${name}: ${toolkitErrorText(err)}`, 0);
+      } finally {
+        this._groupsBusy = null;
+        this._renderGroupsTab();
+      }
+    }
+    /** Creates a ZHA group with the id a device-only group already uses. */
+    async _groupsAdopt(gid, name) {
+      if (this._groupsBusy != null) return;
+      this._groupsBusy = gid;
+      this._renderGroupsTab();
+      this._setStatus("info", `Adding ${name} to Home Assistant\u2026`, 0);
+      try {
+        await this._api.createGroupWithId(name, gid);
+        await this._groupsRefresh();
+        this._groupsFocus = gid;
+        this._setStatus("success", `${name} is now a Home Assistant group. Use Add lights\u2026 to list the lights that are in it.`, 0);
+      } catch (err) {
+        this._setStatus("error", `Couldn't add ${name}: ${toolkitErrorText(err)}`, 0);
       } finally {
         this._groupsBusy = null;
         this._renderGroupsTab();

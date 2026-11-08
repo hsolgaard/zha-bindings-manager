@@ -1,0 +1,378 @@
+{
+  "schema": 1,
+  "version": 1,
+  "about": "Questions about how a Zigbee device behaves in real use: things a capability scan can't show. Shared by every tool that asks them (ZHA Bindings Manager, the issue form, the website). Answers are stored per firmware and per use in each device file under device_answers and summarised in data/answers.json. Ids never change meaning: reword a question freely, but add a new id for a different question.",
+  "free_text_max": 280,
+  "device_types": [
+    { "id": "remote", "label": "Remote, button or battery switch (sends commands, no load)" },
+    { "id": "wall_switch", "label": "Wall switch or rocker with a relay (can switch a load)" },
+    { "id": "light", "label": "Light, bulb or LED driver" },
+    { "id": "plug", "label": "Plug, socket or in-line relay" },
+    { "id": "cover", "label": "Blind, curtain or shutter motor" },
+    { "id": "sensor", "label": "Sensor (motion, contact, temperature, leak…)" },
+    { "id": "other", "label": "Something else" }
+  ],
+  "context": [
+    {
+      "id": "system",
+      "text": "Which Zigbee system do you use it with?",
+      "answers": [
+        { "id": "zha", "label": "ZHA (Home Assistant)" },
+        { "id": "z2m", "label": "Zigbee2MQTT" },
+        { "id": "deconz", "label": "deCONZ / Phoscon" },
+        { "id": "hub", "label": "A vendor hub (Hue, IKEA, Aqara…)" },
+        { "id": "other", "label": "Something else" }
+      ]
+    },
+    {
+      "id": "coordinator",
+      "text": "What chip is your coordinator?",
+      "help": "Some behaviour depends on the coordinator, not the device.",
+      "answers": [
+        { "id": "silabs", "label": "Silicon Labs (EFR32 / EmberZNet, e.g. Sonoff Dongle-E/M, SkyConnect, ZBT-1)" },
+        { "id": "ti", "label": "Texas Instruments (CC2652 / CC1352, e.g. Sonoff Dongle-P)" },
+        { "id": "conbee", "label": "ConBee / RaspBee" },
+        { "id": "other", "label": "Something else" },
+        { "id": "not_sure", "label": "Not sure" }
+      ]
+    },
+    {
+      "id": "owned_for",
+      "text": "How long have you had it?",
+      "answers": [
+        { "id": "lt_month", "label": "Less than a month" },
+        { "id": "lt_year", "label": "1 to 12 months" },
+        { "id": "gt_year", "label": "Over a year" }
+      ]
+    }
+  ],
+  "use": {
+    "id": "use",
+    "text": "What do you use this one for?",
+    "help": "Answer for this one device. Everything else is read in the light of it: a rocker can be great as a wired switch and poor as a remote.",
+    "allow_other": true,
+    "answers_by_type": {
+      "remote": [
+        { "id": "control_lights", "label": "Controlling lights directly (bound to them or to a group)" },
+        { "id": "automations", "label": "Buttons for automations only" },
+        { "id": "scenes", "label": "Scene controller" }
+      ],
+      "wall_switch": [
+        { "id": "wired_own_load", "label": "Wired, switching its own light" },
+        { "id": "decoupled_smart_bulbs", "label": "Wired, button separated from the relay, controlling smart bulbs" },
+        { "id": "remote_only", "label": "Not switching a load: used as a remote" },
+        { "id": "automations", "label": "Buttons for automations only" }
+      ],
+      "light": [
+        { "id": "main_light", "label": "Main room light" },
+        { "id": "lamp", "label": "Lamp" },
+        { "id": "accent", "label": "Accent, strip or spot" },
+        { "id": "outdoor", "label": "Outdoor" }
+      ],
+      "plug": [
+        { "id": "lamp", "label": "A lamp" },
+        { "id": "appliance", "label": "An appliance" },
+        { "id": "power_monitoring", "label": "Mainly measuring power" },
+        { "id": "router", "label": "Mainly as a router (repeater)" }
+      ],
+      "cover": [
+        { "id": "blind", "label": "Roller or venetian blind" },
+        { "id": "curtain", "label": "Curtain" },
+        { "id": "shutter", "label": "Shutter or garage door" }
+      ],
+      "sensor": [
+        { "id": "lighting", "label": "Switching lights" },
+        { "id": "security", "label": "Security or alarm" },
+        { "id": "climate", "label": "Heating or climate" },
+        { "id": "leak", "label": "Leak or safety" }
+      ],
+      "other": [
+        { "id": "general", "label": "General use" }
+      ]
+    }
+  },
+  "questions": [
+    {
+      "id": "stays_connected",
+      "topic": "connection",
+      "text": "Does it stay connected?",
+      "types": ["remote", "wall_switch", "light", "plug", "cover", "sensor", "other"],
+      "answers": [
+        { "id": "always", "label": "Always" },
+        { "id": "drops_occasionally", "label": "Drops off occasionally" },
+        { "id": "drops_often", "label": "Drops off often" }
+      ]
+    },
+    {
+      "id": "routers",
+      "topic": "connection",
+      "text": "Which routers does it work through?",
+      "help": "Some devices only stay connected through certain brands of router, or only directly to the coordinator.",
+      "types": ["remote", "sensor", "other"],
+      "answers": [
+        { "id": "any", "label": "Any router" },
+        { "id": "some_brands", "label": "Only some brands" },
+        { "id": "coordinator_only", "label": "Only directly to the coordinator" },
+        { "id": "not_sure", "label": "Not sure" }
+      ]
+    },
+    {
+      "id": "rejoins",
+      "topic": "connection",
+      "text": "If it drops off, does it come back?",
+      "types": ["remote", "wall_switch", "light", "plug", "cover", "sensor", "other"],
+      "answers": [
+        { "id": "by_itself", "label": "Yes, by itself" },
+        { "id": "after_press", "label": "After a button press" },
+        { "id": "needs_repair", "label": "Only by pairing it again" },
+        { "id": "never_dropped", "label": "It has never dropped" }
+      ]
+    },
+    {
+      "id": "pairing",
+      "topic": "pairing",
+      "text": "Did pairing work as the manual says?",
+      "types": ["remote", "wall_switch", "light", "plug", "cover", "sensor", "other"],
+      "allow_other": true,
+      "other_label": "It needed a trick (tell us)",
+      "answers": [
+        { "id": "first_time", "label": "First time" },
+        { "id": "several_tries", "label": "Took several tries" }
+      ]
+    },
+    {
+      "id": "direct_control",
+      "topic": "direct_control",
+      "text": "Does it control lights directly when your Zigbee system or Home Assistant is off?",
+      "help": "Bound straight to the lights, not through an automation.",
+      "types": ["remote", "wall_switch"],
+      "uses": ["control_lights", "scenes", "decoupled_smart_bulbs", "remote_only"],
+      "answers": [
+        { "id": "yes", "label": "Yes, bound to the lights" },
+        { "id": "group_only", "label": "Only through a group" },
+        { "id": "no", "label": "No" },
+        { "id": "didnt_try", "label": "Didn't try" }
+      ]
+    },
+    {
+      "id": "press_sends",
+      "topic": "direct_control",
+      "text": "What does a press send?",
+      "help": "With Toggle, two remotes on the same light can get out of step; separate On and Off can't.",
+      "types": ["remote", "wall_switch"],
+      "uses": ["control_lights", "scenes", "decoupled_smart_bulbs", "remote_only"],
+      "answers": [
+        { "id": "toggle", "label": "Toggle" },
+        { "id": "on_and_off", "label": "Separate On and Off" },
+        { "id": "depends_on_mode", "label": "Depends on a mode setting" },
+        { "id": "not_sure", "label": "Not sure" }
+      ]
+    },
+    {
+      "id": "needed_setting",
+      "topic": "direct_control",
+      "text": "Did it need a setting changed before it controlled lights directly?",
+      "types": ["remote", "wall_switch"],
+      "uses": ["control_lights", "scenes", "decoupled_smart_bulbs", "remote_only"],
+      "allow_other": true,
+      "other_label": "Yes, something else (tell us)",
+      "answers": [
+        { "id": "no", "label": "No" },
+        { "id": "mode_setting", "label": "Yes, a mode setting" },
+        { "id": "button_sequence", "label": "Yes, a button sequence" },
+        { "id": "never_worked", "label": "It never worked" },
+        { "id": "not_sure", "label": "Not sure" }
+      ]
+    },
+    {
+      "id": "presses_arrive",
+      "topic": "direct_control",
+      "text": "Does every press arrive?",
+      "types": ["remote", "wall_switch"],
+      "uses": ["control_lights", "scenes", "decoupled_smart_bulbs", "remote_only", "automations"],
+      "answers": [
+        { "id": "always", "label": "Always" },
+        { "id": "sometimes_missed", "label": "Sometimes missed" },
+        { "id": "often_missed", "label": "Often missed" }
+      ]
+    },
+    {
+      "id": "hold_to_dim",
+      "topic": "direct_control",
+      "text": "Does holding a button dim the lights?",
+      "types": ["remote", "wall_switch"],
+      "uses": ["control_lights", "scenes", "decoupled_smart_bulbs", "remote_only"],
+      "answers": [
+        { "id": "works", "label": "Yes" },
+        { "id": "no", "label": "No" },
+        { "id": "no_dim_buttons", "label": "It has no dim buttons" },
+        { "id": "not_sure", "label": "Not sure" }
+      ]
+    },
+    {
+      "id": "keeps_bindings",
+      "topic": "direct_control",
+      "text": "Does it keep its bindings after a battery change, power cut or firmware update?",
+      "types": ["remote", "wall_switch"],
+      "uses": ["control_lights", "scenes", "decoupled_smart_bulbs", "remote_only"],
+      "answers": [
+        { "id": "yes", "label": "Yes" },
+        { "id": "lost_them", "label": "It lost them" },
+        { "id": "not_seen", "label": "Haven't had one yet" }
+      ]
+    },
+    {
+      "id": "decoupled",
+      "topic": "relay",
+      "text": "Can the button be separated from the relay (decoupled mode)?",
+      "types": ["wall_switch"],
+      "allow_other": true,
+      "other_label": "Yes, another way (tell us)",
+      "answers": [
+        { "id": "system_setting", "label": "Yes, a setting in my Zigbee system" },
+        { "id": "button_sequence", "label": "Yes, a button sequence on the device" },
+        { "id": "no", "label": "No" },
+        { "id": "not_sure", "label": "Not sure" }
+      ]
+    },
+    {
+      "id": "wiring",
+      "topic": "relay",
+      "text": "How is it wired?",
+      "types": ["wall_switch"],
+      "answers": [
+        { "id": "with_neutral", "label": "With neutral" },
+        { "id": "no_neutral_fine", "label": "Without neutral, works fine" },
+        { "id": "no_neutral_problems", "label": "Without neutral, flickers or has problems" },
+        { "id": "battery", "label": "Battery, not wired" }
+      ]
+    },
+    {
+      "id": "power_on",
+      "topic": "power_cut",
+      "text": "What does it do after a power cut?",
+      "help": "Many devices list a power-on setting that they don't actually honour.",
+      "types": ["light", "plug", "wall_switch"],
+      "uses": ["main_light", "lamp", "accent", "outdoor", "appliance", "power_monitoring", "router", "wired_own_load", "decoupled_smart_bulbs"],
+      "answers": [
+        { "id": "last_state", "label": "Goes back to how it was" },
+        { "id": "always_on", "label": "Always comes on" },
+        { "id": "always_off", "label": "Always stays off" },
+        { "id": "ignores_setting", "label": "Ignores its power-on setting" },
+        { "id": "not_sure", "label": "Not sure" }
+      ]
+    },
+    {
+      "id": "remembers_colour",
+      "topic": "power_cut",
+      "text": "After a power cut, does it remember brightness and colour too?",
+      "types": ["light"],
+      "answers": [
+        { "id": "yes", "label": "Yes" },
+        { "id": "on_only", "label": "Only on or off" },
+        { "id": "no", "label": "No" },
+        { "id": "not_sure", "label": "Not sure" }
+      ]
+    },
+    {
+      "id": "router_quality",
+      "topic": "connection",
+      "text": "Is it a good router for other devices?",
+      "types": ["light", "plug", "wall_switch"],
+      "answers": [
+        { "id": "good", "label": "Yes" },
+        { "id": "children_drop", "label": "Devices connected through it drop off" },
+        { "id": "not_sure", "label": "Not sure" }
+      ]
+    },
+    {
+      "id": "position_accurate",
+      "topic": "cover",
+      "text": "Does the position it reports match where it really is?",
+      "types": ["cover"],
+      "answers": [
+        { "id": "yes", "label": "Yes" },
+        { "id": "drifts", "label": "Drifts over time" },
+        { "id": "no", "label": "No" }
+      ]
+    },
+    {
+      "id": "reports_promptly",
+      "topic": "sensor",
+      "text": "Do its reports arrive promptly?",
+      "types": ["sensor"],
+      "answers": [
+        { "id": "instant", "label": "Straight away" },
+        { "id": "delayed", "label": "Noticeably delayed" },
+        { "id": "misses_some", "label": "Some go missing" }
+      ]
+    },
+    {
+      "id": "battery_life",
+      "topic": "battery",
+      "text": "How long do its batteries last?",
+      "types": ["remote", "sensor", "cover", "wall_switch"],
+      "answers": [
+        { "id": "lt_1m", "label": "Less than a month" },
+        { "id": "m1_6", "label": "1 to 6 months" },
+        { "id": "m6_12", "label": "6 to 12 months" },
+        { "id": "gt_1y", "label": "Over a year" },
+        { "id": "too_early", "label": "Too early to say" },
+        { "id": "not_battery", "label": "It isn't battery powered" }
+      ]
+    },
+    {
+      "id": "battery_report",
+      "topic": "battery",
+      "text": "Is the battery level it reports right?",
+      "types": ["remote", "sensor", "cover", "wall_switch"],
+      "answers": [
+        { "id": "accurate", "label": "Yes" },
+        { "id": "drops_suddenly", "label": "Drops suddenly near the end" },
+        { "id": "stuck", "label": "Stuck or never changes" },
+        { "id": "not_reported", "label": "It doesn't report one" },
+        { "id": "not_battery", "label": "It isn't battery powered" }
+      ]
+    },
+    {
+      "id": "ota",
+      "topic": "firmware",
+      "text": "Has your Zigbee system offered it a firmware update?",
+      "types": ["remote", "wall_switch", "light", "plug", "cover", "sensor", "other"],
+      "answers": [
+        { "id": "worked", "label": "Yes, and it worked" },
+        { "id": "failed", "label": "Yes, but it failed" },
+        { "id": "never_offered", "label": "Never offered" },
+        { "id": "not_sure", "label": "Not sure" }
+      ]
+    },
+    {
+      "id": "update_changed",
+      "topic": "firmware",
+      "text": "Did a firmware update change any of the above?",
+      "help": "Asked when you answered before on a different firmware.",
+      "types": ["remote", "wall_switch", "light", "plug", "cover", "sensor", "other"],
+      "after_firmware_change": true,
+      "allow_other": true,
+      "other_label": "Yes, something specific (tell us)",
+      "answers": [
+        { "id": "better", "label": "Better" },
+        { "id": "worse", "label": "Worse" },
+        { "id": "no_change", "label": "No change" }
+      ]
+    }
+  ],
+  "rating": {
+    "id": "rating",
+    "text": "Ignoring price, how good is it at what you use it for?",
+    "min": 1,
+    "max": 5,
+    "labels": { "1": "Poor", "2": "Not great", "3": "OK", "4": "Good", "5": "Excellent" },
+    "min_ratings_for_average": 3
+  },
+  "tip": {
+    "id": "tip",
+    "text": "Anything the next person should know?",
+    "help": "Optional, up to 280 characters. No names, places or addresses. Shown after review."
+  }
+}

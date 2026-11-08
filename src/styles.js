@@ -177,6 +177,32 @@ a.btn { display:inline-block; text-decoration:none; }
 .status .status-action { margin-left:8px; flex:0 0 auto; }
 .stale-row { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
 .stale-row > span { flex: 1 1 260px; }
+.lost-banner { background: rgba(219,68,55,0.10); }
+.lost-list { margin-top:8px; display:flex; flex-direction:column; gap:8px; }
+.lost-device { padding:6px 8px; border-radius:6px; background: var(--card-background-color, rgba(255,255,255,0.6)); }
+.lost-device-head { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+.lost-device-head .muted { flex: 1 1 160px; }
+.lost-device ul { margin:4px 0 0 0; padding-left:18px; }
+.lost-device li { margin:2px 0; }
+a.health-chip-lost { text-decoration:none; cursor:pointer; }
+.drawer-lost { margin:0 0 6px 0; padding-left:18px; }
+.drawer-lost-policy { display:flex; align-items:center; gap:6px; flex-wrap:wrap; margin-top:8px; font-size:0.9em; }
+.drawer-lost-expect { margin-top:4px; font-size:0.88em; }
+.drawer-lost-expect ul { margin:4px 0; padding-left:18px; }
+.answers-locked { opacity: 0.85; }
+.answers-preview { margin:6px 0; padding-left:18px; font-size:0.9em; }
+.answers-preview li { margin:3px 0; }
+.answers-form { display:flex; flex-direction:column; gap:8px; }
+.answers-q { display:flex; flex-direction:column; gap:3px; font-size:0.92em; }
+.answers-q select, .answers-q input, .answers-q textarea { max-width:100%; font:inherit; }
+.answers-other { margin-top:2px; }
+.answers-use { margin:4px 0; font-size:0.92em; }
+.answers-use summary { cursor:pointer; }
+.answers-list, .answers-tips { margin:4px 0; padding-left:18px; }
+.answers-list li { margin:2px 0; }
+.answers-tips li { font-style:italic; }
+.answers-rating { color:#b26a00; }
+.btn.disabled { opacity:0.5; pointer-events:auto; cursor:not-allowed; }
 .table-filter-info { display:flex; flex-wrap:wrap; align-items:center; gap:10px; margin-bottom:8px; padding:6px 10px;
   border-radius:8px; background: rgba(76,154,255,0.12); font-size:0.85em; }
 .dir-cell { white-space:nowrap; font-weight:600; }
@@ -243,7 +269,13 @@ a.btn { display:inline-block; text-decoration:none; }
   background: var(--secondary-background-color, #f5f5f5); }
 .drawer-tags { display:flex; flex-wrap:wrap; gap:4px; margin-bottom:4px; }
 .drawer-tags .chip { cursor: default; }
-.drawer-facts td:first-child { color: var(--secondary-text-color); white-space: nowrap; }
+.drawer-body { overflow-x:hidden; }
+.drawer-head > div { flex: 1 1 auto; min-width: 0; }
+.drawer-facts { width:100%; table-layout: fixed; }
+.drawer-facts td { overflow-wrap: anywhere; vertical-align: top; }
+.drawer-facts td:first-child { color: var(--secondary-text-color); width: 42%; }
+.drawer-check { display:flex; align-items:flex-start; gap:8px; margin-top:8px; font-size:0.95em; }
+.drawer-check input { flex: 0 0 auto; margin-top:3px; }
 .drawer-facts .scan-cell { display:block; }
 .map-route-banner { margin: 6px 0; padding: 8px 10px; border-left: 4px solid var(--primary-color); background: var(--secondary-background-color, #f5f5f5); border-radius: 6px; font-size: 13px; display:flex; gap:8px; align-items:flex-start; flex-wrap: wrap; }
 .map-route-banner .map-route-text { flex: 1 1 260px; }
@@ -306,6 +338,7 @@ a.btn { display:inline-block; text-decoration:none; }
 .mesh-picture { position: relative; }
 .mesh-picture > .mesh-selected { position: absolute; left: 8px; top: 8px; z-index: 2; max-width: min(340px, calc(100% - 16px)); background: var(--card-background-color, #fff); box-shadow: 0 2px 8px rgba(0,0,0,0.25); }
 .edge-pending { stroke-dasharray: 6 5; opacity: 0.85; cursor: pointer; }
+.edge-lost { stroke-dasharray: 7 5; stroke-width: 2.5; opacity: 0.9; cursor: pointer; }
 .mesh-show-hint { margin:4px 0 0; }
 .mesh-battery circle { fill: var(--card-background-color, #fff); stroke-width:2; }
 .mesh-battery.orphan circle { stroke: var(--disabled-text-color, #999) !important; stroke-dasharray: 2 2; }
@@ -336,6 +369,29 @@ a.btn { display:inline-block; text-decoration:none; }
 .mesh-kids { fill: var(--secondary-text-color); font-weight:600; }
 .mesh-legend { display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-top:6px; font-size:0.85em; }
 .mesh-tips { padding-left:18px; margin:0 0 12px; }
+.activity-section { margin: 4px 0 12px; }
+.activity-summary-line { display:flex; flex-wrap:wrap; align-items:center; gap:6px 8px; cursor:pointer; padding:6px 0; }
+.activity-details > summary { list-style:none; }
+.activity-details > summary::-webkit-details-marker { display:none; }
+.activity-details > summary::before { content:"▸"; display:inline-block; width:1em; transition: transform .15s; }
+.activity-details[open] > summary::before { transform: rotate(90deg); }
+.activity-alert { color: var(--error-color, #c62828); font-weight:600; }
+.activity-table { width:100%; max-width:900px; border-collapse:collapse; table-layout:fixed; }
+.activity-table th, .activity-table td { padding:4px 8px; text-align:left; vertical-align:top; overflow:hidden; text-overflow:ellipsis; }
+.activity-table th { font-weight:600; white-space:nowrap; }
+.activity-table .num { text-align:right; font-variant-numeric: tabular-nums; }
+.activity-table .activity-col-name { width:32%; }
+.activity-table .activity-col-num { width:11%; }
+.activity-table tr.activity-chatty td { color: var(--error-color, #c62828); }
+.activity-counters { margin-top:8px; }
+.activity-counters .num { text-align:right; font-variant-numeric: tabular-nums; }
+@media (max-width: 600px) {
+  .activity-table .activity-col-name { width:46%; }
+  .activity-table .activity-col-num { width:18%; }
+  .activity-table th { white-space:normal; font-size:0.9em; }
+  .activity-table th, .activity-table td { padding:4px 4px; }
+  .activity-table th:nth-child(5), .activity-table td:nth-child(5) { display:none; }
+}
 .mesh-tips li { margin-bottom:6px; }
 .mesh-tip-error { color: var(--error-color, #db4437); font-weight: 500; }
 .mesh-tip-warning { color: var(--primary-text-color); }

@@ -136,13 +136,63 @@ Supported-command discovery is a separate, on-demand live-device scan. It is int
 - Click a device (in the Devices tab, the Source or Target column, or on the Map) to open its side panel. **Show its bindings** there filters the table to every binding that device is involved in: the ones it controls (Outbound) and the ones where another device controls it (Inbound). A Direction column and an All / Outbound / Inbound toggle appear while a device is selected.
 - Typing a name into the search box that matches exactly one device (at least three characters) does the same thing, and a "Clear search" button in the banner empties the box. A term that matches several devices stays an ordinary text search.
 - Detect missing devices, targets, endpoints or clusters.
-- Flag duplicates and bindings to groups that no longer exist.
+- Flag duplicates, and bindings to groups Home Assistant doesn't know (Info: often made on the devices themselves by Find & Bind).
 - Explain each health finding in plain English.
 - Rescan the relevant device directly from a health finding.
 - Each device's side panel says whether its model is in the community capability database yet, with a link to check and share it if not.
 - Export the filtered data as CSV or JSON, or print/save it as PDF.
+- With the integration, see **lost bindings**: see [Lost bindings](#lost-bindings-needs-the-integration).
 
 Binding Health is a **structural check**. It verifies that the objects referenced by a binding still exist in ZHA; it does not prove that the devices can currently communicate over the air.
+
+### Lost bindings (needs the integration)
+
+Bindings sometimes disappear: a remote is reset or re-paired, loses its table after a firmware update, or some
+devices just drop them now and then. With the [integration](https://github.com/hsolgaard/zha-bindings-manager-integration)
+and its **Watch for lost bindings** (on by default), every read of a device's binding table is compared with what it
+had before:
+
+- A **red banner** above the Bindings table lists lost bindings, with **Put all back**, **Check again** and, per
+  binding, **Removed on purpose**. Binding Health shows a **Lost** count, and the Map draws them as dashed red lines.
+- Battery devices that are asleep are put back the next time you press one of their buttons.
+- In a device's side panel, choose **Off**, **Tell me** or **Put back automatically** (at most 3 times a day, then it
+  stops and tells you: something keeps removing them).
+- **Switch the lights from Home Assistant if a press doesn't reach them** (per remote): after On, Off or Toggle, a
+  light bound directly that hasn't changed within 2 seconds is switched by Home Assistant and logged, and the
+  remote's bindings are checked. Not for group bindings, and Toggle only when the lights agreed before the press.
+- Unbinding in the card is never reported as lost. Removing a binding some other way is: use **Removed on purpose**.
+
+### Replace a device
+
+**Replace this device…** in a device's side panel (or **Move to a new device…** on the banner for bindings to
+devices no longer in ZHA) moves everything to a new device, after checking it can do the same job:
+
+1. Choose the new device: the same model and the same kind of device are listed first.
+2. Check: each binding and group is checked against the new device's clusters in the right role (a light needs to
+   accept the commands, a remote needs to send them), with the community database's confirmed commands where known.
+   A verdict says whether it can do everything, most of it (what it can't do is unticked and explained), or not.
+   Multi-gang devices get an endpoint choice.
+3. Copy: bindings on other devices are pointed at the new one, its own bindings are recreated, and it joins the old
+   device's groups. Each is read back. Battery devices that are asleep get theirs at their next button press.
+4. Clean up: remove the bindings still pointing at the old device, take it out of its groups, and optionally remove
+   it from ZHA. Until then both stay bound, so nothing goes dark.
+
+Settings such as power-on behaviour aren't copied. Needs the integration.
+
+### How does it behave? (device questions)
+
+Every device's side panel has **How does it behave? Help the next person**: a minute's worth of questions with
+preset answers about what a scan can't show. It starts with what you use the device for (a rocker wired to a light
+and the same rocker used as a remote get different questions), then asks about staying connected, what a press
+really sends, power-cut behaviour, batteries and firmware updates, with an optional 1–5 rating ("ignoring price, how
+good is it at what you use it for?") and a tip.
+
+- Answers go to the community [zigbee-capabilities](https://github.com/hsolgaard/zigbee-capabilities) database as a
+  pre-filled GitHub issue that you review and submit. They're kept per firmware and per use, and free text is
+  reviewed before it's shown.
+- What others answered for your model and firmware is shown in the same place, and on the
+  [website](https://hsolgaard.github.io/zigbee-capabilities/).
+- For a model that isn't in the database yet, share its capability scan alongside your answers.
 
 ### Inspect devices endpoint by endpoint
 
@@ -212,6 +262,7 @@ The **Groups** tab lists every ZHA group with its lights and the remotes bound t
 - **Delete group…** first lists any bindings that still point to the group. **Unbind them, then delete** removes those bindings (wake battery remotes first) and only deletes the group once they're gone; **Delete anyway** skips that. If some can't be removed, it says why for each device (a battery device asleep, a mains device offline) and offers **Try again** or **Delete and leave these bindings**. Deleting a group also removes its light entity in Home Assistant.
 - A light reporting its own state to the group is bound on a cluster it receives, which zha-toolkit's `unbind_group` can't remove. The card removes that binding with `binds_remove_all` limited to its endpoint and cluster, but only when the light has no other binding on that endpoint and cluster (which would be removed too); otherwise it's left and the card says so.
 - Bindings where a device only reports its own state to the group are counted separately, not listed as control.
+- **Groups only on devices** lists group IDs that bindings use but ZHA doesn't know (for example made by a remote's Find & Bind). **Add to Home Assistant** creates a ZHA group with the same ID; add its lights with **Add lights…**.
 
 ### Floors
 
@@ -235,6 +286,10 @@ With the [integration](https://github.com/hsolgaard/zha-bindings-manager-integra
 - **Suggestions and weakest links** point at devices that hang on a single weak link and places where an extra router would help.
 - **Show route on the Map:** click a device-to-device binding on the Map, then **Show route on the Map** (or use **Show on the Map** next to a binding in a remote's **Check route…**). Each hop is drawn over the Map in its link-quality colour with its LQI, and a banner names the path and its weakest hop. **Clear route** removes it.
 - **Check route…** in a remote's side panel shows the likely path of each of its bindings and the weakest hop. Group bindings are broadcast, so only the first hop to its parent is shown.
+
+- **Messages to Home Assistant:** how many messages each device sends a minute now and over the hour, its busiest
+  clusters, and the coordinator's own counters. A device sending far more than usual, or one using the
+  coordinator's address, is flagged in red: it can slow the whole network down.
 
 These tables are a snapshot: Zigbee re-chooses routes all the time, and an end device is only known through its parent. Treat the map as a guide, not proof.
 

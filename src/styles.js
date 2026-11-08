@@ -336,6 +336,11 @@ a.btn { display:inline-block; text-decoration:none; }
 .mesh-kids { fill: var(--secondary-text-color); font-weight:600; }
 .mesh-legend { display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-top:6px; font-size:0.85em; }
 .mesh-tips { padding-left:18px; margin:0 0 12px; }
+.activity-section { margin: 0 0 16px; }
+.activity-head { display:flex; align-items:center; gap:8px; }
+.activity-table th { text-align:left; font-weight:600; }
+.activity-table tr.activity-chatty td { color: var(--error-color, #c62828); }
+.activity-counters { margin-top:8px; }
 .mesh-tips li { margin-bottom:6px; }
 .mesh-tip-error { color: var(--error-color, #db4437); font-weight: 500; }
 .mesh-tip-warning { color: var(--primary-text-color); }

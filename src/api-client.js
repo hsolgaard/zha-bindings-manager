@@ -35,6 +35,11 @@ export class ZhaApi {
     return this.hass.callWS({ type: "zha_bindings_manager/mesh_get" });
   }
 
+  /** Experimental (1.7.0): messages per device to Home Assistant. */
+  async activityGet() {
+    return this.hass.callWS({ type: "zha_bindings_manager/activity_get" });
+  }
+
   async fetchClusters(ieee) {
     return this.hass.callWS({ type: "zha/devices/clusters", ieee });
   }

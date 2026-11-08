@@ -37,6 +37,7 @@ import {
   downloadFile,
 } from "./utils.js";
 import { bindingMatches, bindingMatchesLoose, bindingKey, isIeee, sanitizeStoredBindings } from "./parser.js";
+import { activityRows, interestingCounters, timesTypical, TOP_ROWS } from "./activity.js";
 import { ZhaApi } from "./api-client.js";
 import { SHELL_HTML } from "./template.js";
 import { LocalStorageProvider } from "./storage/local-storage-provider.js";
@@ -4271,6 +4272,7 @@ export class ZhaBindingMapCard extends HTMLElement {
     this._drawerShareOpen = false;
     this._drawerRouteOpen = false;
     this._renderDrawer();
+    if (this._experimental) this._activityLoad();
     const el = this._q("#drawer");
     this._wireDrawerSwipe();
     if (el) {
@@ -4482,6 +4484,7 @@ export class ZhaBindingMapCard extends HTMLElement {
       ["Power", d.power_source || "Unknown"],
       ["Bindings read", this._lastScanCellInfo(d).html.replace(/<button[\s\S]*?<\/button>/, "")],
       ["Community database", this._drawerCommunityStatus(d)],
+      this._drawerActivityText(d) != null ? ["Messages to Home Assistant", this._drawerActivityText(d)] : null,
     ].filter(Boolean);
     const battery = this._isBatteryDevice(d);
     const haUrl = deviceHaUrl(d);
@@ -4804,6 +4807,118 @@ export class ZhaBindingMapCard extends HTMLElement {
     </div>`;
   }
 
+  // ---- Experimental: messages to Home Assistant (1.7.0) ----
+
+  /** Loads activity_get, at most every 30 s unless forced. */
+  async _activityLoad(force = false) {
+    if (!this._experimental || this._activityLoading) return;
+    if (!force && this._activityAt && Date.now() - this._activityAt < 30000) return;
+    this._activityLoading = true;
+    this._renderActivity();
+    try {
+      this._activity = await this._api.activityGet();
+      this._activityError = null;
+    } catch (err) {
+      this._activityError = (err && (err.message || err.code)) || String(err);
+    }
+    this._activityAt = Date.now();
+    this._activityLoading = false;
+    this._renderActivity();
+    if (this._drawerIeee) this._renderDrawer();
+  }
+
+  _renderActivity() {
+    const el = this._q("#activity-section");
+    if (!el) return;
+    if (!this._activity && !this._activityLoading && !this._activityError) {
+      this._activityLoad();
+      return;
+    }
+    const nameOf = (ieee) => {
+      const d = this._devices.find((x) => normIeee(x.ieee) === ieee);
+      return d ? this._deviceLabel(d) : ieee;
+    };
+    const head = `<div class="drawer-section-title activity-head">Messages to Home Assistant
+        <button class="btn btn-small" id="activity-refresh" ${this._activityLoading ? "disabled" : ""}>${this._activityLoading ? "Loading…" : "Refresh"}</button></div>`;
+    if (this._activityError && !this._activity) {
+      el.innerHTML = `${head}<p class="muted">Couldn't load the message counts: ${escapeHtml(this._activityError)}</p>`;
+      this._wireActivity();
+      return;
+    }
+    if (!this._activity) {
+      el.innerHTML = `${head}<p class="muted">Loading…</p>`;
+      return;
+    }
+    const snap = this._activity;
+    const { rows, chatty, fromCoordinator } = activityRows(snap, { coordinatorIeee: this._coordinatorIeee() });
+    const since = snap.since ? new Date(snap.since) : null;
+    const hex = (n) => (n == null ? "" : `0x${Number(n).toString(16).padStart(4, "0")}`);
+    const clusterText = (r) => r.clusters.slice(0, 3).map(([id, n]) => `${clusterName(Number(id))} ${n}`).join(", ");
+    const alerts = [];
+    if (fromCoordinator) {
+      alerts.push(`<li class="mesh-tip-error"><strong>${fromCoordinator.hour} messages in the last hour claimed to come from the coordinator itself</strong> (${escapeHtml(hex(0))}).
+        The coordinator doesn't send to itself, so a device is probably using its network address. That can confuse or flood the whole network.
+        If the Network scan flags a device using 0x0000, unplug it, then reset and pair it again.</li>`);
+    }
+    for (const r of chatty) {
+      const x = timesTypical(r);
+      alerts.push(`<li class="mesh-tip-error"><strong>${escapeHtml(nameOf(r.ieee))}</strong> is sending ${r.now} messages a minute${x ? ` (${x} its usual ${r.typical})` : ""}, mostly ${escapeHtml(clusterText(r))}.
+        A device this chatty can delay or drop other devices' messages. Check its reporting settings, or power it off for a minute to see if the network recovers.</li>`);
+    }
+    if (!snap.attached) {
+      alerts.push(`<li class="mesh-tip-warning">Not counting: ZHA isn't running, or the counter couldn't attach to it yet. It retries every minute.</li>`);
+    }
+    const counters = interestingCounters(snap);
+    el.innerHTML = `${head}
+      <p class="hint">Messages ZHA received from each device, per minute. Only traffic that reaches the coordinator is counted, and counts restart with Home Assistant${
+        since ? ` (counting since ${escapeHtml(since.toLocaleString())})` : ""
+      }.</p>
+      ${alerts.length ? `<ul class="mesh-tips">${alerts.join("")}</ul>` : rows.length ? `<p class="muted">No device stands out.</p>` : ""}
+      ${
+        rows.length
+          ? `<table class="detail-table activity-table">
+              <tr><th>Device</th><th>Now /min</th><th>Last hour</th><th>Usual /min</th><th>Mostly</th></tr>
+              ${rows
+                .slice(0, TOP_ROWS)
+                .map(
+                  (r) => `<tr class="${r.chatty ? "activity-chatty" : ""}"><td><a href="#" class="src-link" data-activity-ieee="${escapeHtml(r.ieee)}">${escapeHtml(nameOf(r.ieee))}</a></td>
+                    <td>${r.now}</td><td>${r.hour}</td><td>${r.typical}</td><td class="muted">${escapeHtml(clusterText(r))}</td></tr>`
+                )
+                .join("")}
+            </table>`
+          : `<p class="muted">No messages counted yet.</p>`
+      }
+      ${
+        counters.length
+          ? `<details class="activity-counters"><summary>Coordinator counters (${counters.length})</summary>
+              <table class="detail-table">${counters.map((c) => `<tr><td>${escapeHtml(c.name)}</td><td>${Number(c.value)}</td></tr>`).join("")}</table>
+              <p class="hint">From the radio library; which counters exist depends on your adapter.</p></details>`
+          : ""
+      }`;
+    this._wireActivity();
+  }
+
+  _wireActivity() {
+    const btn = this._q("#activity-refresh");
+    if (btn) btn.addEventListener("click", () => this._activityLoad(true));
+    this._qa("[data-activity-ieee]").forEach((a) =>
+      a.addEventListener("click", (e) => {
+        e.preventDefault();
+        const d = this._devices.find((x) => normIeee(x.ieee) === a.dataset.activityIeee);
+        if (d) this._openDeviceDrawer(d);
+      })
+    );
+  }
+
+  /** Side panel line: "X a minute now, Y over the hour". */
+  _drawerActivityText(d) {
+    if (!this._experimental || !this._activity) return null;
+    const { rows } = activityRows(this._activity, { coordinatorIeee: this._coordinatorIeee() });
+    const r = rows.find((x) => x.ieee === normIeee(d.ieee));
+    if (!r) return "None in the last hour";
+    return `${r.now} a minute now, ${r.hour} over the hour${r.chatty ? " (unusually high)" : ""}`;
+  }
+
   _renderMesh() {
     const el = this._q("#view-mesh");
     if (!el) return;
@@ -4848,8 +4963,9 @@ export class ZhaBindingMapCard extends HTMLElement {
         ${this._meshFloorsHelpHtml()}
       </div>`;
     if (!read) {
-      el.innerHTML = intro + `<p class="muted">Click <strong>Scan network</strong> to read the tables. Nothing on your network is changed.</p>`;
+      el.innerHTML = intro + `<div id="activity-section" class="activity-section"></div><p class="muted">Click <strong>Scan network</strong> to read the tables. Nothing on your network is changed.</p>`;
       this._wireMesh();
+      this._renderActivity();
       this._renderMeshProgress();
       return;
     }
@@ -4865,6 +4981,7 @@ export class ZhaBindingMapCard extends HTMLElement {
     const tips = meshSuggestions(mesh, { thr, nameOf, areaOf, routers: routers.map((d) => normIeee(d.ieee)) });
     const failed = Object.entries(this._meshSnapshot).filter(([, e]) => e && !e.ok);
     el.innerHTML = `${intro}
+      <div id="activity-section" class="activity-section"></div>
       <div class="mesh-layout">
         <div class="mesh-picture">${this._meshSvg(mesh)}
           ${this._meshSelectedLinkHtml(mesh, nameOf)}
@@ -4903,6 +5020,7 @@ export class ZhaBindingMapCard extends HTMLElement {
         </div>
       </div>`;
     this._wireMesh();
+    this._renderActivity();
     this._renderMeshProgress();
   }
 

@@ -21,7 +21,7 @@
  * zha_toolkit MUST be installed (via HACS) and working for bind/unbind/scan
  * to function. See README.md for details.
  *
- * Version: 1.6.1
+ * Version: 1.7.0b1
  */
 (() => {
   // src/capexplorer-constants.js
@@ -78,7 +78,7 @@
 
   // src/constants.js
   var ZTK_DOMAIN = "zha_toolkit";
-  var CARD_VERSION = "1.6.1";
+  var CARD_VERSION = "1.7.0b1";
   var CHANGELOG_URL = "https://github.com/hsolgaard/zha-bindings-manager/blob/main/CHANGELOG.md";
   var DEFAULT_BINDABLE_OUT_CLUSTERS = [5, 6, 8, 258, 768];
   var MEMBERSHIP_EDGE_COLOR = "#8e24aa";
@@ -681,6 +681,47 @@
     return { bindings: out, dropped };
   }
 
+  // src/activity.js
+  var CHATTY_MIN_RATE = 20;
+  var CHATTY_FACTOR = 10;
+  var FLOOD_RATE = 60;
+  var TOP_ROWS = 8;
+  function median(values) {
+    const v = [...values || []].sort((a, b) => a - b);
+    if (!v.length) return 0;
+    const mid = Math.floor(v.length / 2);
+    return v.length % 2 ? v[mid] : (v[mid - 1] + v[mid]) / 2;
+  }
+  var round1 = (n) => Math.round(n * 10) / 10;
+  function activityRows(snapshot, { coordinatorIeee = null } = {}) {
+    const coord = normIeee(coordinatorIeee || snapshot && snapshot.coordinator_ieee || "");
+    const rows = [];
+    let fromCoordinator = null;
+    for (const [ieee, d] of Object.entries(snapshot && snapshot.by_device || {})) {
+      const pm = Array.isArray(d.per_minute) ? d.per_minute.map(Number) : [];
+      if (!pm.length) continue;
+      const last5 = pm.slice(-5);
+      const now = round1(last5.reduce((a, b) => a + b, 0) / last5.length);
+      const hour = pm.reduce((a, b) => a + b, 0);
+      const typical = round1(median(pm));
+      const clusters = Object.entries(d.clusters || {}).map(([id, n]) => [id, Number(n)]).sort((a, b) => b[1] - a[1]);
+      const chatty = now >= CHATTY_MIN_RATE && (now >= CHATTY_FACTOR * Math.max(typical, 0.5) || now >= FLOOD_RATE);
+      const row = { ieee: normIeee(ieee), nwk: d.nwk, now, hour, typical, clusters, chatty };
+      if (coord && row.ieee === coord) fromCoordinator = row;
+      else rows.push(row);
+    }
+    rows.sort((a, b) => b.now - a.now || b.hour - a.hour);
+    return { rows, chatty: rows.filter((r) => r.chatty), fromCoordinator };
+  }
+  function timesTypical(row) {
+    if (!row || row.typical <= 0) return "";
+    const x = row.now / row.typical;
+    return x >= 2 ? `\xD7${Math.round(x)}` : "";
+  }
+  function interestingCounters(snapshot) {
+    return (snapshot && snapshot.coordinator_counters || []).filter((c) => c && Number(c.value) > 0).sort((a, b) => b.value - a.value);
+  }
+
   // src/api-client.js
   var ZhaApi = class {
     constructor(hass) {
@@ -705,6 +746,10 @@
     /** Experimental: every stored entry, {devices: {ieee: entry}}. */
     async meshGet() {
       return this.hass.callWS({ type: "zha_bindings_manager/mesh_get" });
+    }
+    /** Experimental (1.7.0): messages per device to Home Assistant. */
+    async activityGet() {
+      return this.hass.callWS({ type: "zha_bindings_manager/activity_get" });
     }
     async fetchClusters(ieee) {
       return this.hass.callWS({ type: "zha/devices/clusters", ieee });
@@ -2261,6 +2306,11 @@ a.btn { display:inline-block; text-decoration:none; }
 .mesh-kids { fill: var(--secondary-text-color); font-weight:600; }
 .mesh-legend { display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-top:6px; font-size:0.85em; }
 .mesh-tips { padding-left:18px; margin:0 0 12px; }
+.activity-section { margin: 0 0 16px; }
+.activity-head { display:flex; align-items:center; gap:8px; }
+.activity-table th { text-align:left; font-weight:600; }
+.activity-table tr.activity-chatty td { color: var(--error-color, #c62828); }
+.activity-counters { margin-top:8px; }
 .mesh-tips li { margin-bottom:6px; }
 .mesh-tip-error { color: var(--error-color, #db4437); font-weight: 500; }
 .mesh-tip-warning { color: var(--primary-text-color); }
@@ -7051,6 +7101,7 @@ a.btn { display:inline-block; text-decoration:none; }
       this._drawerShareOpen = false;
       this._drawerRouteOpen = false;
       this._renderDrawer();
+      if (this._experimental) this._activityLoad();
       const el = this._q("#drawer");
       this._wireDrawerSwipe();
       if (el) {
@@ -7238,7 +7289,8 @@ a.btn { display:inline-block; text-decoration:none; }
         reg && reg.sw_version ? ["Firmware", reg.sw_version] : null,
         ["Power", d.power_source || "Unknown"],
         ["Bindings read", this._lastScanCellInfo(d).html.replace(/<button[\s\S]*?<\/button>/, "")],
-        ["Community database", this._drawerCommunityStatus(d)]
+        ["Community database", this._drawerCommunityStatus(d)],
+        this._drawerActivityText(d) != null ? ["Messages to Home Assistant", this._drawerActivityText(d)] : null
       ].filter(Boolean);
       const battery = this._isBatteryDevice(d);
       const haUrl = deviceHaUrl(d);
@@ -7520,6 +7572,100 @@ a.btn { display:inline-block; text-decoration:none; }
       <span>${sample("weak", 1.5, true)} weak, below ${thr.weak}: messages may be lost</span>
     </div>`;
     }
+    // ---- Experimental: messages to Home Assistant (1.7.0) ----
+    /** Loads activity_get, at most every 30 s unless forced. */
+    async _activityLoad(force = false) {
+      if (!this._experimental || this._activityLoading) return;
+      if (!force && this._activityAt && Date.now() - this._activityAt < 3e4) return;
+      this._activityLoading = true;
+      this._renderActivity();
+      try {
+        this._activity = await this._api.activityGet();
+        this._activityError = null;
+      } catch (err) {
+        this._activityError = err && (err.message || err.code) || String(err);
+      }
+      this._activityAt = Date.now();
+      this._activityLoading = false;
+      this._renderActivity();
+      if (this._drawerIeee) this._renderDrawer();
+    }
+    _renderActivity() {
+      const el = this._q("#activity-section");
+      if (!el) return;
+      if (!this._activity && !this._activityLoading && !this._activityError) {
+        this._activityLoad();
+        return;
+      }
+      const nameOf = (ieee) => {
+        const d = this._devices.find((x) => normIeee(x.ieee) === ieee);
+        return d ? this._deviceLabel(d) : ieee;
+      };
+      const head = `<div class="drawer-section-title activity-head">Messages to Home Assistant
+        <button class="btn btn-small" id="activity-refresh" ${this._activityLoading ? "disabled" : ""}>${this._activityLoading ? "Loading\u2026" : "Refresh"}</button></div>`;
+      if (this._activityError && !this._activity) {
+        el.innerHTML = `${head}<p class="muted">Couldn't load the message counts: ${escapeHtml(this._activityError)}</p>`;
+        this._wireActivity();
+        return;
+      }
+      if (!this._activity) {
+        el.innerHTML = `${head}<p class="muted">Loading\u2026</p>`;
+        return;
+      }
+      const snap = this._activity;
+      const { rows, chatty, fromCoordinator } = activityRows(snap, { coordinatorIeee: this._coordinatorIeee() });
+      const since = snap.since ? new Date(snap.since) : null;
+      const hex2 = (n) => n == null ? "" : `0x${Number(n).toString(16).padStart(4, "0")}`;
+      const clusterText = (r) => r.clusters.slice(0, 3).map(([id, n]) => `${clusterName(Number(id))} ${n}`).join(", ");
+      const alerts = [];
+      if (fromCoordinator) {
+        alerts.push(`<li class="mesh-tip-error"><strong>${fromCoordinator.hour} messages in the last hour claimed to come from the coordinator itself</strong> (${escapeHtml(hex2(0))}).
+        The coordinator doesn't send to itself, so a device is probably using its network address. That can confuse or flood the whole network.
+        If the Network scan flags a device using 0x0000, unplug it, then reset and pair it again.</li>`);
+      }
+      for (const r of chatty) {
+        const x = timesTypical(r);
+        alerts.push(`<li class="mesh-tip-error"><strong>${escapeHtml(nameOf(r.ieee))}</strong> is sending ${r.now} messages a minute${x ? ` (${x} its usual ${r.typical})` : ""}, mostly ${escapeHtml(clusterText(r))}.
+        A device this chatty can delay or drop other devices' messages. Check its reporting settings, or power it off for a minute to see if the network recovers.</li>`);
+      }
+      if (!snap.attached) {
+        alerts.push(`<li class="mesh-tip-warning">Not counting: ZHA isn't running, or the counter couldn't attach to it yet. It retries every minute.</li>`);
+      }
+      const counters = interestingCounters(snap);
+      el.innerHTML = `${head}
+      <p class="hint">Messages ZHA received from each device, per minute. Only traffic that reaches the coordinator is counted, and counts restart with Home Assistant${since ? ` (counting since ${escapeHtml(since.toLocaleString())})` : ""}.</p>
+      ${alerts.length ? `<ul class="mesh-tips">${alerts.join("")}</ul>` : rows.length ? `<p class="muted">No device stands out.</p>` : ""}
+      ${rows.length ? `<table class="detail-table activity-table">
+              <tr><th>Device</th><th>Now /min</th><th>Last hour</th><th>Usual /min</th><th>Mostly</th></tr>
+              ${rows.slice(0, TOP_ROWS).map(
+        (r) => `<tr class="${r.chatty ? "activity-chatty" : ""}"><td><a href="#" class="src-link" data-activity-ieee="${escapeHtml(r.ieee)}">${escapeHtml(nameOf(r.ieee))}</a></td>
+                    <td>${r.now}</td><td>${r.hour}</td><td>${r.typical}</td><td class="muted">${escapeHtml(clusterText(r))}</td></tr>`
+      ).join("")}
+            </table>` : `<p class="muted">No messages counted yet.</p>`}
+      ${counters.length ? `<details class="activity-counters"><summary>Coordinator counters (${counters.length})</summary>
+              <table class="detail-table">${counters.map((c) => `<tr><td>${escapeHtml(c.name)}</td><td>${Number(c.value)}</td></tr>`).join("")}</table>
+              <p class="hint">From the radio library; which counters exist depends on your adapter.</p></details>` : ""}`;
+      this._wireActivity();
+    }
+    _wireActivity() {
+      const btn = this._q("#activity-refresh");
+      if (btn) btn.addEventListener("click", () => this._activityLoad(true));
+      this._qa("[data-activity-ieee]").forEach(
+        (a) => a.addEventListener("click", (e) => {
+          e.preventDefault();
+          const d = this._devices.find((x) => normIeee(x.ieee) === a.dataset.activityIeee);
+          if (d) this._openDeviceDrawer(d);
+        })
+      );
+    }
+    /** Side panel line: "X a minute now, Y over the hour". */
+    _drawerActivityText(d) {
+      if (!this._experimental || !this._activity) return null;
+      const { rows } = activityRows(this._activity, { coordinatorIeee: this._coordinatorIeee() });
+      const r = rows.find((x) => x.ieee === normIeee(d.ieee));
+      if (!r) return "None in the last hour";
+      return `${r.now} a minute now, ${r.hour} over the hour${r.chatty ? " (unusually high)" : ""}`;
+    }
     _renderMesh() {
       const el = this._q("#view-mesh");
       if (!el) return;
@@ -7562,8 +7708,9 @@ a.btn { display:inline-block; text-decoration:none; }
         ${this._meshFloorsHelpHtml()}
       </div>`;
       if (!read) {
-        el.innerHTML = intro + `<p class="muted">Click <strong>Scan network</strong> to read the tables. Nothing on your network is changed.</p>`;
+        el.innerHTML = intro + `<div id="activity-section" class="activity-section"></div><p class="muted">Click <strong>Scan network</strong> to read the tables. Nothing on your network is changed.</p>`;
         this._wireMesh();
+        this._renderActivity();
         this._renderMeshProgress();
         return;
       }
@@ -7579,6 +7726,7 @@ a.btn { display:inline-block; text-decoration:none; }
       const tips = meshSuggestions(mesh, { thr, nameOf, areaOf, routers: routers.map((d) => normIeee(d.ieee)) });
       const failed = Object.entries(this._meshSnapshot).filter(([, e]) => e && !e.ok);
       el.innerHTML = `${intro}
+      <div id="activity-section" class="activity-section"></div>
       <div class="mesh-layout">
         <div class="mesh-picture">${this._meshSvg(mesh)}
           ${this._meshSelectedLinkHtml(mesh, nameOf)}
@@ -7600,6 +7748,7 @@ a.btn { display:inline-block; text-decoration:none; }
         </div>
       </div>`;
       this._wireMesh();
+      this._renderActivity();
       this._renderMeshProgress();
     }
     _meshSvg(mesh) {

@@ -3,6 +3,20 @@
 All notable changes to ZHA Bindings Manager are documented here.
 
 
+## [1.10.1]
+
+### Changed
+
+- **Device questions: switch modules get their own type.** A module fitted behind a normal wall switch (a Sonoff
+  ZBMINI, for example) was asked about "the button", which it doesn't have. It's now its own device type, with its
+  own uses (wired to a normal switch, switch input separated from the relay, or switched only over Zigbee) and a
+  detached-mode question about the switch wired to it.
+- **New question for anything that switches a load:** "Does it respond to remotes bound to it?", including "Stops
+  responding until bound again".
+- "Is it a good router?" can now be answered "It isn't a router", for end devices such as the ZBMINIL2.
+- The questions come from the community database, so this applies as soon as the database has it; 1.10.1 bundles
+  the same questions for when the database can't be reached.
+
 ## [1.10.0]
 
 ### Added

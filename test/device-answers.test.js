@@ -118,3 +118,22 @@ describe("form order", () => {
     expect(formQuestions(q, "wall_switch", "wired_own_load").main[0].id).toBe("power_on");
   });
 });
+
+describe("switch module behind a normal wall switch", () => {
+  it("asks about the switch wired to it, not a button, and about remotes bound to it", () => {
+    const { main, more } = formQuestions(q, "switch_module", "wired_own_load", { battery: false });
+    const ids = [...main, ...more].map((x) => x.id);
+    expect(main[0].id).toBe("power_on");
+    expect(ids).toContain("input_detached");
+    expect(ids).toContain("wiring");
+    expect(main.map((x) => x.id)).toContain("responds_to_bindings");
+    expect(ids).not.toContain("decoupled");
+    expect(ids).not.toContain("hold_to_dim");
+    expect(ids).not.toContain("direct_control");
+    expect(q.questions.find((x) => x.id === "router_quality").answers.map((a) => a.id)).toContain("not_a_router");
+  });
+  it("asks the direct-control questions when the switch input is separated and drives smart bulbs", () => {
+    const ids = questionsFor(q, "switch_module", "decoupled_smart_bulbs").map((x) => x.id);
+    expect(ids).toEqual(expect.arrayContaining(["direct_control", "press_sends", "presses_arrive", "keeps_bindings"]));
+  });
+});

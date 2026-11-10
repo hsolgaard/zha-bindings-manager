@@ -21,7 +21,7 @@
  * zha_toolkit MUST be installed (via HACS) and working for bind/unbind/scan
  * to function. See README.md for details.
  *
- * Version: 1.10.1
+ * Version: 1.10.2
  */
 (() => {
   // src/capexplorer-constants.js
@@ -78,7 +78,7 @@
 
   // src/constants.js
   var ZTK_DOMAIN = "zha_toolkit";
-  var CARD_VERSION = "1.10.1";
+  var CARD_VERSION = "1.10.2";
   var CHANGELOG_URL = "https://github.com/hsolgaard/zha-bindings-manager/blob/main/CHANGELOG.md";
   var DEFAULT_BINDABLE_OUT_CLUSTERS = [5, 6, 8, 258, 768];
   var MEMBERSHIP_EDGE_COLOR = "#8e24aa";
@@ -3196,6 +3196,25 @@
     const s = params.toString();
     return s ? `?${s}` : "";
   }
+  var TAB_NAMES = {
+    graph: "map",
+    floorplan: "floor-plan",
+    table: "bindings",
+    devices: "devices",
+    groups: "groups",
+    capexplorer: "capabilities",
+    advanced: "advanced",
+    mesh: "network"
+  };
+  function viewFromHash(hash) {
+    const name = String(hash || "").replace(/^#/, "").trim().toLowerCase();
+    if (!name) return null;
+    const hit = Object.entries(TAB_NAMES).find(([, n]) => n === name);
+    return hit ? hit[0] : null;
+  }
+  function hashForView(view) {
+    return `#${TAB_NAMES[view] || TAB_NAMES.graph}`;
+  }
 
   // src/group-support.js
   function groupClusterSupport({ members, clusterId, clustersFor }) {
@@ -4726,6 +4745,8 @@ a.health-chip-lost { text-decoration:none; cursor:pointer; }
       this._fpListDrag = null;
       this._fpNodeEls = /* @__PURE__ */ new Map();
       this._onResize = debounce(() => this._layoutSvgSize(), 150);
+      this.tabInUrl = false;
+      this._onHashChange = () => this._applyHashView();
     }
     setConfig(config) {
       this._config = config || {};
@@ -4790,10 +4811,12 @@ a.health-chip-lost { text-decoration:none; cursor:pointer; }
     }
     connectedCallback() {
       window.addEventListener("resize", this._onResize);
+      if (this.tabInUrl) window.addEventListener("hashchange", this._onHashChange);
       if (this._hass) this._subscribeRegistry();
     }
     disconnectedCallback() {
       window.removeEventListener("resize", this._onResize);
+      window.removeEventListener("hashchange", this._onHashChange);
       this._unsubscribeRegistry();
     }
     /** Listens for Home Assistant device-registry changes, so a device removed
@@ -5004,6 +5027,12 @@ a.health-chip-lost { text-decoration:none; cursor:pointer; }
       this._evidenceEnabled = !!probe.evidence;
       if (this._api) this._api.watchEnabled = this._watchEnabled;
       this._lqiThr = probe.lqi || { ...LQI_RECOMMENDED };
+      this._experimentalKnown = true;
+      if (this._pendingHashView === "mesh") {
+        this._pendingHashView = null;
+        if (this._experimental && this.shadowRoot && this.shadowRoot.firstChild) this._switchView("mesh");
+        else this._writeHashView(this._view);
+      }
       this._toggleExperimentalUi();
       if (!this._backendAvailable) {
         this._storageMode = "local";
@@ -7257,6 +7286,7 @@ a.health-chip-lost { text-decoration:none; cursor:pointer; }
       if (!root.firstChild) {
         root.innerHTML = SHELL_HTML + `<style>${STYLE}</style>`;
         this._wireShell();
+        if (this.tabInUrl) this._applyHashView();
       }
       this._renderStatus();
       this._renderToolbarState();
@@ -7279,11 +7309,44 @@ a.health-chip-lost { text-decoration:none; cursor:pointer; }
     }
     _switchView(view) {
       this._view = view;
+      this._writeHashView(view);
       this._qa(".tab").forEach((b) => b.classList.toggle("active", b.dataset.view === view));
       const search = this._q("#search");
       if (search) search.style.display = SEARCHABLE_VIEWS.has(view) ? "" : "none";
       this._qa(".view").forEach((v) => v.classList.toggle("active", v.id === `view-${view}`));
       this._render();
+    }
+    /** Opens the tab named in the address (#bindings…), sidebar page only.
+     *  The Network tab exists only with experimental features on, which isn't
+     *  known until the integration has answered: it's opened then, or the
+     *  address falls back to the Map. Unknown names are left alone. */
+    _applyHashView() {
+      if (!this.tabInUrl) return;
+      let hash = "";
+      try {
+        hash = window.location.hash;
+      } catch (e) {
+        return;
+      }
+      const view = viewFromHash(hash);
+      if (!view || view === this._view) return;
+      if (view === "mesh" && !this._experimental) {
+        if (!this._experimentalKnown) this._pendingHashView = "mesh";
+        else this._writeHashView(this._view);
+        return;
+      }
+      this._switchView(view);
+    }
+    /** Puts the selected tab in the address without adding a history entry,
+     *  so Back still leaves the page instead of stepping through tabs. */
+    _writeHashView(view) {
+      if (!this.tabInUrl) return;
+      try {
+        const hash = hashForView(view);
+        if (window.location.hash === hash) return;
+        window.history.replaceState(window.history.state, "", window.location.pathname + window.location.search + hash);
+      } catch (e) {
+      }
     }
     _wireShell() {
       this._qa(".tab").forEach((btn) => {
@@ -14023,6 +14086,7 @@ Used by: ${h.uses.join("; ")}`;
       this._menu = document.createElement("ha-menu-button");
       this.shadowRoot.querySelector(".menu").appendChild(this._menu);
       this._card = document.createElement("zha-binding-map-card");
+      this._card.tabInUrl = true;
       if (typeof this._card.setConfig === "function") {
         this._card.setConfig({ type: "custom:zha-binding-map-card" });
       }

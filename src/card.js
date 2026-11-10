@@ -75,7 +75,7 @@ import {
 import { aboutIntegrationText } from "./about.js";
 import { summarizeScan, toolkitAvailable } from "./scan-summary.js";
 import { isManufacturerSpecific, manufacturerSpecificRule, unusualDeviceBindingRule } from "./health-rules.js";
-import { deepLinkIeee, withoutDeviceParam } from "./deep-link.js";
+import { deepLinkIeee, withoutDeviceParam, viewFromHash, hashForView } from "./deep-link.js";
 import { groupClusterSupport, groupSupportSummary, groupSupportHealth } from "./group-support.js";
 import {
   FLOW_CLUSTERS,
@@ -337,6 +337,11 @@ export class ZhaBindingMapCard extends HTMLElement {
     this._fpNodeEls = new Map();
 
     this._onResize = debounce(() => this._layoutSvgSize(), 150);
+    // Set by the integration's sidebar page (panel.js) before the card is
+    // attached: keep the selected tab in the address (#bindings etc.). Never
+    // on a dashboard, where the address belongs to the dashboard.
+    this.tabInUrl = false;
+    this._onHashChange = () => this._applyHashView();
   }
 
   setConfig(config) {
@@ -416,11 +421,13 @@ export class ZhaBindingMapCard extends HTMLElement {
 
   connectedCallback() {
     window.addEventListener("resize", this._onResize);
+    if (this.tabInUrl) window.addEventListener("hashchange", this._onHashChange);
     // Re-attached (e.g. back from another dashboard view): listen again.
     if (this._hass) this._subscribeRegistry();
   }
   disconnectedCallback() {
     window.removeEventListener("resize", this._onResize);
+    window.removeEventListener("hashchange", this._onHashChange);
     this._unsubscribeRegistry();
   }
 
@@ -645,6 +652,12 @@ export class ZhaBindingMapCard extends HTMLElement {
     this._evidenceEnabled = !!probe.evidence;
     if (this._api) this._api.watchEnabled = this._watchEnabled;
     this._lqiThr = probe.lqi || { ...LQI_RECOMMENDED };
+    this._experimentalKnown = true;
+    if (this._pendingHashView === "mesh") {
+      this._pendingHashView = null;
+      if (this._experimental && this.shadowRoot && this.shadowRoot.firstChild) this._switchView("mesh");
+      else this._writeHashView(this._view);
+    }
     this._toggleExperimentalUi();
     if (!this._backendAvailable) {
       this._storageMode = "local";
@@ -3331,6 +3344,7 @@ export class ZhaBindingMapCard extends HTMLElement {
     if (!root.firstChild) {
       root.innerHTML = SHELL_HTML + `<style>${STYLE}</style>`;
       this._wireShell();
+      if (this.tabInUrl) this._applyHashView();
     }
     this._renderStatus();
     this._renderToolbarState();
@@ -3355,6 +3369,7 @@ export class ZhaBindingMapCard extends HTMLElement {
 
   _switchView(view) {
     this._view = view;
+    this._writeHashView(view);
     this._qa(".tab").forEach((b) => b.classList.toggle("active", b.dataset.view === view));
     // The toolbar search only filters the Map, Bindings and Devices tabs.
     // Hide it elsewhere so it never looks like it should do something it
@@ -3364,6 +3379,41 @@ export class ZhaBindingMapCard extends HTMLElement {
     if (search) search.style.display = SEARCHABLE_VIEWS.has(view) ? "" : "none";
     this._qa(".view").forEach((v) => v.classList.toggle("active", v.id === `view-${view}`));
     this._render();
+  }
+
+  /** Opens the tab named in the address (#bindings…), sidebar page only.
+   *  The Network tab exists only with experimental features on, which isn't
+   *  known until the integration has answered: it's opened then, or the
+   *  address falls back to the Map. Unknown names are left alone. */
+  _applyHashView() {
+    if (!this.tabInUrl) return;
+    let hash = "";
+    try {
+      hash = window.location.hash;
+    } catch (e) {
+      return;
+    }
+    const view = viewFromHash(hash);
+    if (!view || view === this._view) return;
+    if (view === "mesh" && !this._experimental) {
+      if (!this._experimentalKnown) this._pendingHashView = "mesh";
+      else this._writeHashView(this._view);
+      return;
+    }
+    this._switchView(view);
+  }
+
+  /** Puts the selected tab in the address without adding a history entry,
+   *  so Back still leaves the page instead of stepping through tabs. */
+  _writeHashView(view) {
+    if (!this.tabInUrl) return;
+    try {
+      const hash = hashForView(view);
+      if (window.location.hash === hash) return;
+      window.history.replaceState(window.history.state, "", window.location.pathname + window.location.search + hash);
+    } catch (e) {
+      /* not essential */
+    }
   }
 
   _wireShell() {

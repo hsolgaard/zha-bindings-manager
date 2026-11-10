@@ -3,6 +3,16 @@
 All notable changes to ZHA Bindings Manager are documented here.
 
 
+## [1.10.2]
+
+### Added
+
+- **The selected tab stays in the address** in the integration's sidebar page: `/zha-bindings-manager#bindings`.
+  Reloading keeps you on the same tab, and a link can open one directly (`#map`, `#floor-plan`, `#bindings`,
+  `#devices`, `#groups`, `#capabilities`, `#advanced`, `#network`). Switching tabs updates the address without
+  adding to the browser history, so Back still leaves the page. On your own dashboards the address is left alone.
+  Requested by asbachb (integration issue #40).
+
 ## [1.10.1]
 
 ### Changed

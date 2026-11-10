@@ -20,3 +20,21 @@ describe("withoutDeviceParam", () => {
     expect(withoutDeviceParam("?a=1&device=08fd52fffe0b3f86")).toBe("?a=1");
   });
 });
+
+import { TAB_NAMES, viewFromHash, hashForView } from "../src/deep-link.js";
+describe("tab in the address (1.10.2)", () => {
+  it("maps readable tab names to views and back", () => {
+    expect(viewFromHash("#bindings")).toBe("table");
+    expect(viewFromHash("#Floor-Plan")).toBe("floorplan");
+    expect(viewFromHash("network")).toBe("mesh");
+    expect(viewFromHash("#capabilities")).toBe("capexplorer");
+    for (const view of Object.keys(TAB_NAMES)) expect(viewFromHash(hashForView(view))).toBe(view);
+  });
+  it("ignores anything that isn't a tab", () => {
+    expect(viewFromHash("")).toBeNull();
+    expect(viewFromHash("#")).toBeNull();
+    expect(viewFromHash("#table")).toBeNull();
+    expect(viewFromHash("#device=1")).toBeNull();
+    expect(hashForView("nonsense")).toBe("#map");
+  });
+});

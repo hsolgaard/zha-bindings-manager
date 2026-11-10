@@ -25,3 +25,32 @@ export function withoutDeviceParam(search) {
   const s = params.toString();
   return s ? `?${s}` : "";
 }
+
+// The selected tab in the address (1.10.2), in the integration's sidebar
+// page only: /zha-bindings-manager#bindings. A reload keeps you on the same
+// tab, and a link can open one directly. Readable names, matching the tab
+// labels, mapped to the card's internal view ids.
+export const TAB_NAMES = {
+  graph: "map",
+  floorplan: "floor-plan",
+  table: "bindings",
+  devices: "devices",
+  groups: "groups",
+  capexplorer: "capabilities",
+  advanced: "advanced",
+  mesh: "network",
+};
+
+/** The view id for a location hash such as "#bindings" (case-insensitive),
+ *  or null if it isn't one of the tabs. */
+export function viewFromHash(hash) {
+  const name = String(hash || "").replace(/^#/, "").trim().toLowerCase();
+  if (!name) return null;
+  const hit = Object.entries(TAB_NAMES).find(([, n]) => n === name);
+  return hit ? hit[0] : null;
+}
+
+/** The hash for a view id ("#map" for anything unknown). */
+export function hashForView(view) {
+  return `#${TAB_NAMES[view] || TAB_NAMES.graph}`;
+}

@@ -43,6 +43,9 @@ export class ZhaBindingsPanel extends HTMLElement {
     this._menu = document.createElement("ha-menu-button");
     this.shadowRoot.querySelector(".menu").appendChild(this._menu);
     this._card = document.createElement("zha-binding-map-card");
+    // This page owns its address, so the card keeps the selected tab in it
+    // (#bindings…): a reload stays on the same tab.
+    this._card.tabInUrl = true;
     if (typeof this._card.setConfig === "function") {
       this._card.setConfig({ type: "custom:zha-binding-map-card" });
     }

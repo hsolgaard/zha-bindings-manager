@@ -3,6 +3,19 @@
 All notable changes to ZHA Bindings Manager are documented here.
 
 
+## [1.10.3]
+
+### Added
+
+- **Remove what a failed setup added.** When "Set up what this controls" ends with the devices not responding
+  (answering **None**: the remote stored the binding but doesn't send to it), the result now offers **Remove what this
+  set up**. It removes only the bindings this run added (not ones the remote already had), checks the remote's table
+  to confirm they're gone, and can also delete the group the run created. A battery remote is asked to wake first. The
+  group is only deleted once nothing points at it, and removals count as on purpose, so the lost-bindings watch doesn't
+  report them. Requested by asbachb (integration issue #41).
+- If a group binding didn't work, **bind to each device directly** now removes the group binding first, so the remote
+  isn't left with both.
+
 ## [1.10.2]
 
 ### Added

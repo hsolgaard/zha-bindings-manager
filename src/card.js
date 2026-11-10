@@ -90,6 +90,8 @@ import {
   knownBehaviour,
   firmwareKey,
   suggestGroupName,
+  undoPlan,
+  undoSummary,
   targetKey,
   RESULT_TEXT,
   modeOptions,
@@ -5012,11 +5014,12 @@ export class ZhaBindingMapCard extends HTMLElement {
     }[f.result];
     const level = f.result === "works" ? "success" : f.result === "partial" ? "info" : "warning";
     const many = this._flowTargets().length > DIRECT_BINDING_MAX_LIGHTS;
+    const failedRun = f.result === "rejected" || f.result === "stored_ignored";
     const fallback =
-      f.mode === "group" && (f.result === "rejected" || f.result === "stored_ignored")
-        ? `<button class="btn" id="flow-direct">Bind to each device directly instead</button>${
-            many ? `<p class="hint">${escapeHtml(this._flowModeOptions().direct.warning)}</p>` : ""
-          }`
+      f.mode === "group" && failedRun && !f.undo
+        ? `<button class="btn" id="flow-direct">${
+            undoPlan(f.items).unbind.length ? "Remove the group binding and bind to each device directly" : "Bind to each device directly instead"
+          }</button>${many ? `<p class="hint">${escapeHtml(this._flowModeOptions().direct.warning)}</p>` : ""}`
         : "";
     let shared = false;
     try {
@@ -5036,7 +5039,131 @@ export class ZhaBindingMapCard extends HTMLElement {
         </div>`;
     return `<div class="flow-result flow-result-${level}"><strong>Result: ${escapeHtml(RESULT_TEXT[f.result] || f.result)}.</strong> ${escapeHtml(advice)}</div>
       ${share}
+      ${failedRun ? this._flowUndoHtml() : ""}
       <div class="dialog-actions">${fallback}<button class="btn" id="flow-cancel">Close</button></div>`;
+  }
+
+  /** After "None" (or a rejected group binding): offer to remove what this
+   *  run set up, so useless bindings don't sit in the remote's table
+   *  (integration issue #41). */
+  _flowUndoHtml() {
+    const f = this._flow;
+    const plan = undoPlan(f.items, { createdGroup: f.createdGroup, groupId: f.groupId });
+    if (f.undo && f.undo.state === "done") return `<div class="flow-undo"><p>${escapeHtml(f.undo.summary)}</p></div>`;
+    if (f.undo && f.undo.state === "running") return `<div class="flow-undo"><p class="muted">Removing…</p></div>`;
+    if (plan.empty) return "";
+    const srcName = this._deviceLabel(this._flowSource());
+    if (f.undo && f.undo.state === "wake") {
+      return `<div class="flow-undo"><p class="flow-callout">Press a button on <strong>${escapeHtml(srcName)}</strong> to wake it, then click Remove now straight away.</p>
+        <div class="dialog-actions"><button class="btn btn-primary" id="flow-undo-now">Remove now</button></div></div>`;
+    }
+    const what = plan.unbind.length
+      ? `This removes the ${plan.unbind.length} binding${plan.unbind.length === 1 ? "" : "s"} this added to ${srcName}, then checks they're gone. Bindings ${srcName} already had are left alone.`
+      : `${srcName} didn't keep any of the bindings, so only the group this created is left to remove.`;
+    const keptGroup =
+      f.mode === "group" && !f.createdGroup && f.groupId != null ? ` The group ${this._groupName(f.groupId)} was there before, so it stays as it is.` : "";
+    const groupBox = plan.deleteGroup
+      ? `<label class="flow-undo-group"><input type="checkbox" id="flow-undo-group" checked> Also delete the group ${escapeHtml(this._groupName(f.groupId))}</label>`
+      : "";
+    return `<div class="flow-undo"><strong>Remove what this set up?</strong>
+      Bindings that nothing responds to only take up space in the remote's binding table. ${escapeHtml(what)}${escapeHtml(keptGroup)}
+      ${groupBox}
+      <div class="dialog-actions"><button class="btn" id="flow-undo">Remove what this set up</button></div></div>`;
+  }
+
+  /** Starts the undo; a battery remote is asked to wake first. `then` runs
+   *  afterwards instead of re-rendering (used by "bind directly instead",
+   *  which keeps the group). */
+  _flowUndoStart(then = null) {
+    const f = this._flow;
+    const box = this._q("#flow-undo-group");
+    const plan = undoPlan(f.items, { createdGroup: f.createdGroup, groupId: f.groupId });
+    f.undo = { state: "wake", deleteGroup: !!(plan.deleteGroup && !then && (!box || box.checked)), then };
+    if (plan.unbind.length && this._isBatteryDevice(this._flowSource())) {
+      this._renderGroupFlow();
+      return;
+    }
+    this._flowUndoRun();
+  }
+
+  /** Removes the bindings this run added, checks the remote's table once,
+   *  and deletes the group it created only once nothing points at it any
+   *  more. Removals go through the integration as on purpose, so the
+   *  lost-bindings watch doesn't report them. */
+  async _flowUndoRun() {
+    const f = this._flow;
+    if (!f || !f.undo) return;
+    const src = this._flowSource();
+    const ep = Number(f.endpoint);
+    const plan = undoPlan(f.items, { createdGroup: f.createdGroup, groupId: f.groupId });
+    f.undo.state = "running";
+    this._renderGroupFlow();
+    const before = plan.unbind.map((i) => this._bindingPresent(src.ieee, ep, i.clusterId, i.target));
+    for (const item of plan.unbind) {
+      try {
+        if (item.target.isGroup) await this._api.unbindGroup(src.ieee, item.target.groupId, [item.clusterId], { endpoint: ep });
+        else await this._api.unbindIeee(src.ieee, item.target.ieee, [item.clusterId], { endpoint: ep, dstEndpoint: item.target.endpoint });
+      } catch (err) {
+        console.warn("[ZHA Bindings Manager] unbind call raised, verifying against rescan anyway", err);
+      }
+    }
+    let outcomes = [];
+    if (plan.unbind.length) {
+      const scan = await this._scanBindings([src.ieee], { tries: 1 });
+      if (!this._flow || this._flow !== f) return;
+      outcomes = plan.unbind.map(
+        (item, i) =>
+          this._settleChange("unbind", { sourceIeee: src.ieee, sourceEndpoint: ep, clusterId: item.clusterId, target: item.target }, scan, before[i])
+            .outcome
+      );
+      const word = {
+        confirmed: ["ok", "removed"],
+        absent: ["ok", "already gone"],
+        unconfirmed: ["warn", "removal not confirmed yet"],
+        failed: ["fail", "still on the remote"],
+      };
+      plan.unbind.forEach((item, i) => {
+        const [state, text] = word[outcomes[i]] || ["info", outcomes[i]];
+        f.log.push({ state, text: `${item.label}: ${text}` });
+      });
+    }
+    let groupDeleted = null;
+    const groupName = f.groupId != null ? this._groupName(f.groupId) : "";
+    if (f.undo.deleteGroup) {
+      // Deleting the group while the remote may still hold a binding to it
+      // would leave a binding to a group that no longer exists.
+      if (outcomes.every((o) => o === "confirmed" || o === "absent")) {
+        try {
+          await this._api.removeGroups([f.groupId]);
+          await this._reloadDevices({ quiet: true });
+          groupDeleted = !this._groups.some((g) => Number(g.group_id) === Number(f.groupId));
+        } catch (err) {
+          groupDeleted = false;
+        }
+        f.log.push({ state: groupDeleted ? "ok" : "fail", text: groupDeleted ? `Group ${groupName} deleted.` : `Group ${groupName} not deleted.` });
+      } else {
+        groupDeleted = "kept";
+      }
+    }
+    const then = f.undo.then;
+    f.undo = { state: "done", summary: undoSummary(outcomes, { groupDeleted, groupName }) };
+    if (then) then();
+    else this._renderGroupFlow();
+  }
+
+  /** Group binding didn't work: bind each device directly instead. */
+  _flowSwitchToDirect() {
+    const f = this._flow;
+    if (!f) return;
+    f.mode = "direct";
+    f.modeTouched = true;
+    f.result = null;
+    f.test = null;
+    f.items = [];
+    f.undo = null;
+    f.log.push({ state: "info", text: "Switching to binding each device directly." });
+    f.step = "run";
+    this._flowStartBinds();
   }
 
   _flowReport() {
@@ -5183,15 +5310,11 @@ export class ZhaBindingMapCard extends HTMLElement {
       this._renderGroupFlow();
     });
     this._qa("[data-flow-test]").forEach((b) => b.addEventListener("click", () => this._flowAnswerTest(b.dataset.flowTest)));
+    on("#flow-undo", "click", () => this._flowUndoStart());
+    on("#flow-undo-now", "click", () => this._flowUndoRun());
     on("#flow-direct", "click", () => {
-      f.mode = "direct";
-      f.modeTouched = true;
-      f.result = null;
-      f.test = null;
-      f.items = [];
-      f.log.push({ state: "info", text: "Switching to binding each device directly." });
-      f.step = "run";
-      this._flowStartBinds();
+      if (undoPlan(f.items).unbind.length) this._flowUndoStart(() => this._flowSwitchToDirect());
+      else this._flowSwitchToDirect();
     });
     on("#flow-share", "click", () => {
       try {
@@ -5251,6 +5374,7 @@ export class ZhaBindingMapCard extends HTMLElement {
         const res = await this._api.createGroup(name, targets);
         f.groupId = res && res.group_id != null ? Number(res.group_id) : null;
         f.createdName = name;
+        f.createdGroup = true;
       }
     } catch (err) {
       f.log = f.log.filter((l) => l.state !== "wait");
@@ -5309,6 +5433,9 @@ export class ZhaBindingMapCard extends HTMLElement {
           );
       }
     }
+    f.items.forEach((item) => {
+      item.existedBefore = this._bindingPresent(src.ieee, ep, item.clusterId, item.target);
+    });
     this._flowLog("wait", `Binding ${f.items.length} item${f.items.length === 1 ? "" : "s"}…`);
     for (const item of f.items) {
       try {

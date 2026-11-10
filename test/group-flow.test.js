@@ -221,3 +221,30 @@ describe("community reports per cluster (#387)", () => {
     expect(knownBehaviour(doc, "old/remote", "group_binding", null, [6]).state).toBe("works");
   });
 });
+
+import { undoPlan, undoSummary } from "../src/group-flow.js";
+describe("removing what the setup added (integration issue #41)", () => {
+  const items = [
+    { clusterId: 6, target: { isGroup: false, ieee: "a", endpoint: 1 }, outcome: "confirmed", existedBefore: false },
+    { clusterId: 6, target: { isGroup: false, ieee: "b", endpoint: 1 }, outcome: "unconfirmed", existedBefore: false },
+    { clusterId: 8, target: { isGroup: false, ieee: "a", endpoint: 1 }, outcome: "confirmed", existedBefore: true },
+    { clusterId: 8, target: { isGroup: false, ieee: "b", endpoint: 1 }, outcome: "failed", existedBefore: false },
+  ];
+  it("removes only bindings this run added that the remote stored or may have stored", () => {
+    const plan = undoPlan(items);
+    expect(plan.unbind.map((i) => `${i.target.ieee}:${i.clusterId}`)).toEqual(["a:6", "b:6"]);
+    expect(plan.deleteGroup).toBe(false);
+    expect(plan.empty).toBe(false);
+  });
+  it("offers the group only if this run created it", () => {
+    expect(undoPlan([], { createdGroup: true, groupId: 7 })).toEqual({ unbind: [], deleteGroup: true, empty: false });
+    expect(undoPlan([], { createdGroup: false, groupId: 7 }).empty).toBe(true);
+    expect(undoPlan([{ outcome: "failed", existedBefore: false }]).empty).toBe(true);
+  });
+  it("sums up the result plainly", () => {
+    expect(undoSummary(["confirmed", "absent"], { groupDeleted: true, groupName: "Kitchen" })).toBe("Removed 2 bindings. Deleted the group Kitchen.");
+    expect(undoSummary(["confirmed", "unconfirmed"], { groupDeleted: "kept", groupName: "K" })).toMatch(/Removed 1 binding\. 1 not confirmed yet.*Kept the group K/);
+    expect(undoSummary(["failed"])).toBe("1 still on the remote: it didn't accept the removal.");
+    expect(undoSummary([])).toBe("Nothing to remove.");
+  });
+});

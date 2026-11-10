@@ -308,3 +308,34 @@ export function suggestGroupName(areaName, remoteName) {
   const base = areaName && areaName !== "No area" ? areaName : remoteName || "Remote";
   return `${base} lights`;
 }
+
+/**
+ * What "Remove what this set up" would undo (1.10.3, integration issue #41):
+ * after a "None" answer the bindings this run added do nothing but take
+ * binding-table slots. Only bindings this run added are removed: not ones
+ * the remote already had, and not ones it rejected (nothing was stored).
+ * A group is offered for deletion only if this run created it.
+ * items: [{clusterId, target, label, outcome, existedBefore}].
+ */
+export function undoPlan(items, { createdGroup = false, groupId = null } = {}) {
+  const unbind = (items || []).filter((i) => !i.existedBefore && i.outcome !== "failed");
+  return { unbind, deleteGroup: !!createdGroup && groupId != null, empty: !unbind.length && !(createdGroup && groupId != null) };
+}
+
+/** One line for the result of an undo: counts by unbind outcome
+ *  ("confirmed" removed, "absent" already gone, "unconfirmed" pending,
+ *  "failed" still there). */
+export function undoSummary(outcomes, { groupDeleted = null, groupName = "" } = {}) {
+  const n = (k) => outcomes.filter((o) => o === k).length;
+  const removed = n("confirmed") + n("absent");
+  const parts = [];
+  if (removed) parts.push(`Removed ${removed} binding${removed === 1 ? "" : "s"}.`);
+  if (n("unconfirmed"))
+    parts.push(`${n("unconfirmed")} not confirmed yet: the remote didn't answer the check. They're kept on the pending list and checked again when it next answers.`);
+  if (n("failed")) parts.push(`${n("failed")} still on the remote: it didn't accept the removal.`);
+  if (groupDeleted === true) parts.push(`Deleted the group ${groupName}.`);
+  if (groupDeleted === false) parts.push(`Couldn't delete the group ${groupName}: remove it in the Groups tab.`);
+  if (groupDeleted === "kept")
+    parts.push(`Kept the group ${groupName}, as the remote may still have a binding to it: delete it in the Groups tab once that's gone.`);
+  return parts.join(" ") || "Nothing to remove.";
+}

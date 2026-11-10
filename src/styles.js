@@ -158,6 +158,9 @@ a.btn { display:inline-block; text-decoration:none; }
 .flow-known-mixed, .flow-result-info { background: rgba(3,169,244,0.12); }
 .flow-known-problems, .flow-result-warning { background: rgba(255,152,0,0.18); }
 .flow-share, .flow-callout { background: rgba(3,169,244,0.10); }
+.flow-undo { padding:8px 12px; border-radius:8px; margin:8px 0; border:1px solid var(--divider-color, #e0e0e0); }
+.flow-undo .flow-callout { margin:0 0 4px; }
+.flow-undo-group { display:flex; gap:6px; align-items:center; margin-top:6px; }
 .flow-pitfalls { margin:8px 0; }
 .flow-pitfalls summary { cursor:pointer; font-weight:600; }
 .flow-pitfalls ul, .flow-clusters, .flow-log { margin:6px 0; padding-left:20px; }

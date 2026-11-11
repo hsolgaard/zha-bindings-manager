@@ -21,7 +21,7 @@
  * zha_toolkit MUST be installed (via HACS) and working for bind/unbind/scan
  * to function. See README.md for details.
  *
- * Version: 1.10.6
+ * Version: 1.10.7
  */
 (() => {
   // src/capexplorer-constants.js
@@ -78,7 +78,7 @@
 
   // src/constants.js
   var ZTK_DOMAIN = "zha_toolkit";
-  var CARD_VERSION = "1.10.6";
+  var CARD_VERSION = "1.10.7";
   var CHANGELOG_URL = "https://github.com/hsolgaard/zha-bindings-manager/blob/main/CHANGELOG.md";
   var DEFAULT_BINDABLE_OUT_CLUSTERS = [5, 6, 8, 258, 768];
   var MEMBERSHIP_EDGE_COLOR = "#8e24aa";
@@ -726,6 +726,11 @@
     }
     rows.sort((a, b) => b.now - a.now || b.hour - a.hour);
     return { rows, chatty: rows.filter((r) => r.chatty), fromCoordinator };
+  }
+  function coordinatorOwnMessages(snapshot) {
+    const z = snapshot && snapshot.coordinator_zdo;
+    if (!z || !Array.isArray(z.per_minute)) return null;
+    return Math.round(z.per_minute.map(Number).reduce((a, b) => a + b, 0));
   }
   function timesTypical(row) {
     if (!row || row.typical == null || row.typical <= 0) return "";
@@ -9878,10 +9883,13 @@ a.health-chip-lost { text-decoration:none; cursor:pointer; }
       const since = snap.since ? new Date(snap.since) : null;
       const clusterText = (r, n = 2) => r.clusters.slice(0, n).map(([id, c]) => `${clusterLabel(Number(id))} ${c}`).join(", ");
       const alerts = [];
+      const ownMessages = coordinatorOwnMessages(snap);
       if (fromCoordinator) {
-        alerts.push(`<li class="mesh-tip-error"><strong>${fromCoordinator.hour} messages in the last hour claimed to come from the coordinator itself</strong> (0x0000).
-        The coordinator doesn't send to itself, so a device is probably using its network address. That can confuse or flood the whole network.
-        If the Network scan flags a device using 0x0000, unplug it, then reset and pair it again.</li>`);
+        const what = fromCoordinator.clusters.length ? `, mostly ${escapeHtml(clusterText(fromCoordinator, 3))}` : "";
+        const older = ownMessages == null ? ` Integration versions before 1.10.7 also count the coordinator's replies to its own requests here (for example to ZHA's network scan), which are harmless: update the integration first and see if this warning goes away.` : "";
+        alerts.push(`<li class="mesh-tip-error"><strong>${fromCoordinator.hour} messages in the last hour came from address 0x0000</strong>${what}.
+        0x0000 is always the coordinator's own address, and the coordinator doesn't send messages like these to Home Assistant, so a device is probably using its address. That can confuse or flood the whole network.
+        If the Network scan flags a device using 0x0000, unplug it, then reset and pair it again.${older}</li>`);
       }
       for (const r of chatty) {
         const x = timesTypical(r);
@@ -9899,7 +9907,7 @@ a.health-chip-lost { text-decoration:none; cursor:pointer; }
       const usual = (r) => r.typical == null ? "\u2013" : r.typical;
       el.innerHTML = `<details class="activity-details" ${open ? "open" : ""}>
         <summary class="activity-summary-line"><strong>Messages to Home Assistant:</strong> ${summary} ${refresh}</summary>
-        <p class="hint">Messages ZHA received from each device. Only traffic that reaches the coordinator is counted, and counts restart with Home Assistant${since ? ` (counting since ${escapeHtml(since.toLocaleString())})` : ""}. "Usual" is the typical rate since then, shown after 10 minutes.</p>
+        <p class="hint">Messages ZHA received from each device. Only traffic that reaches the coordinator is counted, and counts restart with Home Assistant${since ? ` (counting since ${escapeHtml(since.toLocaleString())})` : ""}. "Usual" is the typical rate since then, shown after 10 minutes.${ownMessages ? ` The coordinator's own network-management messages (${ownMessages} in the last hour, for example answering ZHA's network scan of itself) aren't counted.` : ""}</p>
         ${alerts.length ? `<ul class="mesh-tips">${alerts.join("")}</ul>` : ""}
         ${rows.length ? `<table class="detail-table activity-table">
                 <colgroup><col class="activity-col-name"><col class="activity-col-num"><col class="activity-col-num"><col class="activity-col-num"><col></colgroup>

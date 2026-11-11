@@ -57,9 +57,11 @@ const round1 = (n) => Math.round(n * 10) / 10;
  * right after a restart most of the hour is empty, and a median of zeros
  * would make every device look unusual. Without a usual rate, only the
  * flood rule can flag a device.
- * Messages "from" the coordinator itself are reported separately: the
- * coordinator doesn't send to itself, so they come from a device using its
- * address (0x0000).
+ * Messages "from" the coordinator itself (address 0x0000) are reported
+ * separately. From integration 1.10.7 its own network-management (ZDO)
+ * messages, e.g. answering ZHA's network scan of the coordinator, are kept
+ * apart in `coordinator_zdo` (see coordinatorOwnMessages), so what's left is
+ * ordinary traffic that suggests a device using the coordinator's address.
  */
 export function activityRows(snapshot, { coordinatorIeee = null, nowMs = Date.now() } = {}) {
   const counted = countedMinutes(snapshot, nowMs);
@@ -84,6 +86,14 @@ export function activityRows(snapshot, { coordinatorIeee = null, nowMs = Date.no
   }
   rows.sort((a, b) => b.now - a.now || b.hour - a.hour);
   return { rows, chatty: rows.filter((r) => r.chatty), fromCoordinator };
+}
+
+/** The coordinator's own network-management messages in the last hour, or
+ *  null when the integration doesn't report them (before 1.10.7). */
+export function coordinatorOwnMessages(snapshot) {
+  const z = snapshot && snapshot.coordinator_zdo;
+  if (!z || !Array.isArray(z.per_minute)) return null;
+  return Math.round(z.per_minute.map(Number).reduce((a, b) => a + b, 0));
 }
 
 /** "×12" style ratio against the typical rate, or "" when not meaningful. */

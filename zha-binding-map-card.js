@@ -21,7 +21,7 @@
  * zha_toolkit MUST be installed (via HACS) and working for bind/unbind/scan
  * to function. See README.md for details.
  *
- * Version: 1.10.5
+ * Version: 1.10.6
  */
 (() => {
   // src/capexplorer-constants.js
@@ -78,7 +78,7 @@
 
   // src/constants.js
   var ZTK_DOMAIN = "zha_toolkit";
-  var CARD_VERSION = "1.10.5";
+  var CARD_VERSION = "1.10.6";
   var CHANGELOG_URL = "https://github.com/hsolgaard/zha-bindings-manager/blob/main/CHANGELOG.md";
   var DEFAULT_BINDABLE_OUT_CLUSTERS = [5, 6, 8, 258, 768];
   var MEMBERSHIP_EDGE_COLOR = "#8e24aa";
@@ -960,6 +960,13 @@
      *  tell which entry to remove and reports failure even when the source,
      *  target, and cluster are all correct (see v0.8.1 bug report). */
     async unbindIeee(sourceIeee, targetIeee, clusterIds, opts = {}) {
+      if (this.directUnbind && opts.endpoint != null && opts.dstEndpoint != null && clusterIds && clusterIds.length) {
+        for (const c of clusterIds) {
+          await this.unbindDirect(sourceIeee, opts.endpoint, c, { targetIeee, targetEndpoint: opts.dstEndpoint });
+        }
+        await this._reportRemoved({ sourceIeee, sourceEndpoint: opts.endpoint, clusterIds: clusterIds.map(Number), targetIeee, targetEndpoint: opts.dstEndpoint });
+        return { success: true };
+      }
       const data = {
         ieee: sourceIeee,
         command_data: targetIeee
@@ -1051,7 +1058,30 @@
     async removeGroups(groupIds) {
       return this.hass.callWS({ type: "zha/group/remove", group_ids: groupIds.map(Number) });
     }
+    /** 1.10.6: the integration sends the ZDO Unbind_req itself. Needs no
+     *  lookup of the target (so bindings to devices no longer in ZHA can be
+     *  removed) and works for a light's own binding to a group too. Throws
+     *  with the device's own answer unless it removed it (SUCCESS). */
+    async unbindDirect(sourceIeee, endpoint, clusterId, { groupId = null, targetIeee = null, targetEndpoint = null } = {}) {
+      const msg = { type: "zha_bindings_manager/unbind", source_ieee: sourceIeee, endpoint: Number(endpoint), cluster: Number(clusterId) };
+      if (groupId != null) msg.group_id = Number(groupId);
+      else {
+        msg.target_ieee = targetIeee;
+        msg.target_endpoint = Number(targetEndpoint);
+      }
+      const res = await this.hass.callWS(msg);
+      const status = res && res.status;
+      if (status === "SUCCESS") return res;
+      if (status === "no_answer") throw new Error("the device didn't answer");
+      if (status === "unavailable") throw new Error(`the device isn't available${res.detail ? ` (${res.detail})` : ""}`);
+      throw new Error(`the device answered ${status}`);
+    }
     async unbindGroup(sourceIeee, groupId, clusterIds, opts = {}) {
+      if (this.directUnbind && opts.endpoint != null && clusterIds && clusterIds.length) {
+        for (const c of clusterIds) await this.unbindDirect(sourceIeee, opts.endpoint, c, { groupId });
+        await this._reportRemoved({ sourceIeee, sourceEndpoint: opts.endpoint, clusterIds: clusterIds.map(Number), isGroup: true, groupId: Number(groupId) });
+        return { success: true };
+      }
       const data = { ieee: sourceIeee, command_data: groupId };
       if (clusterIds && clusterIds.length === 1) data.cluster = clusterIds[0];
       if (opts.endpoint != null) data.endpoint = opts.endpoint;
@@ -2873,7 +2903,7 @@
      *  - bundledCardVersion: the card version the integration ships (1.0.0+).
      *  Unknown values are null. */
     static async probe(hass) {
-      const none = { installed: false, available: false, version: null, bundledCardVersion: null, experimental: false, watch: false, replace: false, evidence: false, lqi: null };
+      const none = { installed: false, available: false, version: null, bundledCardVersion: null, experimental: false, watch: false, replace: false, evidence: false, directUnbind: false, lqi: null };
       try {
         const res = await hass.connection.sendMessagePromise({ type: WS_GET_CAPABILITIES });
         if (!res || !res.available) return none;
@@ -2892,6 +2922,8 @@
           replace: !!(res.features && res.features.replace === true),
           // 1.10.0: address changes and missed presses.
           evidence: !!(res.features && res.features.evidence === true),
+          // 1.10.6: the integration sends unbinds itself.
+          directUnbind: !!(res.features && res.features.direct_unbind === true),
           lqi: res.lqi_thresholds && Number.isInteger(res.lqi_thresholds.good) && Number.isInteger(res.lqi_thresholds.weak) ? { good: res.lqi_thresholds.good, weak: res.lqi_thresholds.weak } : null
         };
       } catch (e) {
@@ -4203,12 +4235,23 @@ a.health-chip-lost { text-decoration:none; cursor:pointer; }
     const msg = err && (err.message || String(err)) || "";
     return msg.replace(/^binds_remove_all failed:\s*/i, "").trim();
   }
-  function explainUnbindFailure({ errors = [], targetRemoved = false } = {}) {
+  function explainUnbindFailure({ errors = [], targetRemoved = false, targetIeee = null } = {}) {
     const real = [...new Set(errors.filter(Boolean))];
-    if (targetRemoved && (!real.length || real.some((e) => /keyerror|unknown error/i.test(e)))) {
-      return "zha-toolkit can't remove a binding to a device that's no longer in ZHA: it looks the removed device up, fails, and never sends the unbind (a known zha-toolkit bug, reported to its developer). Until it's fixed, these bindings stay. They only use a slot in the switch's binding table. If you need the slot now, pair the removed device again (it keeps its address), then unbind it normally.";
+    const addr = targetIeee ? String(targetIeee).toLowerCase() : null;
+    const isLookupBug = (e) => /keyerror|unknown error/i.test(e) || addr && String(e).toLowerCase().includes(addr);
+    if (targetRemoved && (!real.length || real.some(isLookupBug))) {
+      return "zha-toolkit can't remove a binding to a device that's no longer in ZHA: it looks the removed device up, fails, and never sends the unbind (a known zha-toolkit bug, reported to its developer). With the ZHA Bindings Manager integration installed, the card sends the unbind itself and isn't affected.";
     }
-    if (real.length) return `zha-toolkit said: ${real.slice(0, 2).join("; ")}${real.length > 2 ? " (and more)" : ""}.`;
+    if (real.some((e) => /NO_ENTRY/.test(e))) {
+      return "The device answered NO_ENTRY: it says it has no such binding, although its binding table lists it. Some devices won't remove a binding they created themselves. A factory reset of the device clears it.";
+    }
+    if (real.some((e) => /NOT_SUPPORTED/.test(e))) {
+      return "The device answered NOT_SUPPORTED: it doesn't let bindings be removed this way. A factory reset of the device clears them.";
+    }
+    if (real.length) {
+      const fromDevice = real.every((e) => /^the device /i.test(e));
+      return `${fromDevice ? "" : "zha-toolkit said: "}${real.slice(0, 2).join("; ")}${real.length > 2 ? " (and more)" : ""}.`.replace(/^the/, "The");
+    }
     return "";
   }
 
@@ -4248,17 +4291,22 @@ a.health-chip-lost { text-decoration:none; cursor:pointer; }
     const op = { sourceIeee: normIeee(binding.sourceIeee), endpoint: Number(binding.sourceEndpoint), clusterId: Number(binding.clusterId) };
     const sends = (clusters || []).some((c) => c.type === "out" && Number(c.id) === op.clusterId && Number(c.endpoint_id) === op.endpoint);
     if (sends || !clusters) return { ...op, method: "group" };
-    const gid = Number(binding.groupId);
+    return removeAndRestoreOp(binding, bindings);
+  }
+  var targetKeyOf = (x) => x.isGroup ? `g:${Number(x.groupId)}` : `d:${normIeee(x.targetIeee || x.ieee)}:${x.targetEndpoint != null ? Number(x.targetEndpoint) : x.endpoint != null ? Number(x.endpoint) : 1}`;
+  function removeAndRestoreOp(binding, bindings, alsoRemoving = []) {
+    const op = { sourceIeee: normIeee(binding.sourceIeee), endpoint: Number(binding.sourceEndpoint), clusterId: Number(binding.clusterId) };
+    const gone = new Set([binding, ...alsoRemoving].map(targetKeyOf));
     const seen = /* @__PURE__ */ new Set();
     const restore = [];
     for (const x of bindings || []) {
       if (!x || normIeee(x.sourceIeee) !== op.sourceIeee || Number(x.sourceEndpoint) !== op.endpoint || Number(x.clusterId) !== op.clusterId) continue;
-      if (x.isGroup && Number(x.groupId) === gid) continue;
-      const t = x.isGroup ? { isGroup: true, groupId: Number(x.groupId) } : { isGroup: false, ieee: normIeee(x.targetIeee), endpoint: x.targetEndpoint != null ? Number(x.targetEndpoint) : 1 };
-      const key = t.isGroup ? `g:${t.groupId}` : `d:${t.ieee}:${t.endpoint}`;
-      if (seen.has(key)) continue;
+      const key = targetKeyOf(x);
+      if (gone.has(key) || seen.has(key)) continue;
       seen.add(key);
-      restore.push(t);
+      restore.push(
+        x.isGroup ? { isGroup: true, groupId: Number(x.groupId) } : { isGroup: false, ieee: normIeee(x.targetIeee), endpoint: x.targetEndpoint != null ? Number(x.targetEndpoint) : 1 }
+      );
     }
     return { ...op, method: "remove", restore };
   }
@@ -4846,6 +4894,7 @@ a.health-chip-lost { text-decoration:none; cursor:pointer; }
       this._hass = hass;
       this._api = new ZhaApi(hass);
       this._api.watchEnabled = !!this._watchEnabled;
+      this._api.directUnbind = !!this._directUnbind;
       if (first) {
         this._render();
         this._loadAll();
@@ -5083,7 +5132,11 @@ a.health-chip-lost { text-decoration:none; cursor:pointer; }
       this._watchEnabled = !!probe.watch;
       this._replaceEnabled = !!probe.replace;
       this._evidenceEnabled = !!probe.evidence;
-      if (this._api) this._api.watchEnabled = this._watchEnabled;
+      this._directUnbind = !!probe.directUnbind;
+      if (this._api) {
+        this._api.watchEnabled = this._watchEnabled;
+        this._api.directUnbind = this._directUnbind;
+      }
       this._lqiThr = probe.lqi || { ...LQI_RECOMMENDED };
       this._experimentalKnown = true;
       if (this._pendingHashView === "mesh") {
@@ -11322,10 +11375,14 @@ Used by: ${h.uses.join("; ")}`;
         let reportingOp = null;
         const rescanTargets = binding.isGroup ? [binding.sourceIeee] : this._impactedIeees(binding.sourceIeee, binding.targetIeee);
         try {
-          if (binding.isGroup) {
-            const clusters = await this._ensureClusters(normIeee(binding.sourceIeee)).catch(() => void 0);
-            const op = groupBindingOp(binding, this._rawBindings(), clusters);
-            if (op.method === "remove") reportingOp = op;
+          if (!this._api.directUnbind) {
+            if (binding.isGroup) {
+              const clusters = await this._ensureClusters(normIeee(binding.sourceIeee)).catch(() => void 0);
+              const op = groupBindingOp(binding, this._rawBindings(), clusters);
+              if (op.method === "remove") reportingOp = op;
+            } else if (this._isRemovedDevice(binding.targetIeee)) {
+              reportingOp = removeAndRestoreOp(binding, this._rawBindings());
+            }
           }
           if (reportingOp) {
             const errs = await this._removeReportingBinding(reportingOp);
@@ -11366,7 +11423,8 @@ Used by: ${h.uses.join("; ")}`;
           if (res.level !== "success") {
             const why = explainUnbindFailure({
               errors: unbindError ? [unbindError] : [],
-              targetRemoved: !binding.isGroup && this._isRemovedDevice(binding.targetIeee)
+              targetRemoved: !binding.isGroup && this._isRemovedDevice(binding.targetIeee),
+              targetIeee: binding.isGroup ? null : binding.targetIeee
             });
             if (why) message = `${message} ${why}`;
           }
@@ -11726,20 +11784,40 @@ Used by: ${h.uses.join("; ")}`;
       }
       const sources = [...new Map(dead.map((b) => [normIeee(b.sourceIeee), b.sourceIeee])).values()];
       const errors = [];
-      for (let i = 0; i < dead.length; i++) {
-        const b = dead[i];
-        this._setStatus("info", `Unbinding ${i + 1} of ${dead.length}\u2026`, 0);
-        try {
-          await this._api.unbindIeee(b.sourceIeee, b.targetIeee, [b.clusterId], {
-            endpoint: b.sourceEndpoint,
-            dstEndpoint: b.targetEndpoint
-          });
-        } catch (err) {
-          errors.push(toolkitErrorText(err));
-          console.warn("[ZHA Bindings Manager] unbind call raised, verifying against rescan anyway", err);
+      const restoreOps = [];
+      if (this._api.directUnbind) {
+        for (let i = 0; i < dead.length; i++) {
+          const b = dead[i];
+          this._setStatus("info", `Unbinding ${i + 1} of ${dead.length}\u2026`, 0);
+          try {
+            await this._api.unbindIeee(b.sourceIeee, b.targetIeee, [b.clusterId], {
+              endpoint: b.sourceEndpoint,
+              dstEndpoint: b.targetEndpoint
+            });
+          } catch (err) {
+            errors.push(toolkitErrorText(err));
+            console.warn("[ZHA Bindings Manager] unbind call raised, verifying against rescan anyway", err);
+          }
+        }
+      } else {
+        const byKey = /* @__PURE__ */ new Map();
+        for (const b of dead) {
+          const k = `${normIeee(b.sourceIeee)}|${b.sourceEndpoint}|${b.clusterId}`;
+          if (!byKey.has(k)) byKey.set(k, []);
+          byKey.get(k).push(b);
+        }
+        let i = 0;
+        for (const group of byKey.values()) {
+          this._setStatus("info", `Unbinding ${++i} of ${byKey.size}\u2026`, 0);
+          const op = removeAndRestoreOp(group[0], this._rawBindings(), group.slice(1));
+          restoreOps.push(op);
+          errors.push(...await this._removeReportingBinding(op));
         }
       }
-      await this._scanBindings(sources);
+      const scan = await this._scanBindings(sources);
+      const notBack = restoreOps.flatMap(
+        (op) => scan && scan.read && scan.read.has(op.sourceIeee) ? this._restoresMissing(op).map((t) => `${this._ieeeLabel(op.sourceIeee, { plain: true })}: ${this._describeRestore(t)}`) : []
+      );
       const stillThere = dead.filter(
         (b) => this._bindingPresent(b.sourceIeee, b.sourceEndpoint, b.clusterId, {
           isGroup: false,
@@ -11749,12 +11827,18 @@ Used by: ${h.uses.join("; ")}`;
       );
       const removed = dead.length - stillThere.length;
       if (!stillThere.length) {
-        this._setStatus("success", `Removed all ${removed} binding${removed === 1 ? "" : "s"} to removed devices.`);
+        if (notBack.length)
+          this._setStatus(
+            "warning",
+            `Removed all ${removed} binding${removed === 1 ? "" : "s"} to removed devices. Other bindings on the same clusters were removed with them, and these aren't back yet: ${notBack.join("; ")}. Scan again to check, or add them again.`,
+            0
+          );
+        else this._setStatus("success", `Removed all ${removed} binding${removed === 1 ? "" : "s"} to removed devices.`);
       } else {
         const unreadable = sources.filter((s) => this._scanFailures.has(normIeee(s))).length;
         this._setStatus(
           "error",
-          `Removed ${removed} of ${dead.length}. ${stillThere.length} still present${unreadable ? ` (${unreadable} device${unreadable === 1 ? "" : "s"} didn't respond to the check, probably asleep)` : ""}. ${explainUnbindFailure({ errors, targetRemoved: true }) || 'Wake those devices and click "Unbind all" again.'}`,
+          `Removed ${removed} of ${dead.length}. ${stillThere.length} still present${unreadable ? ` (${unreadable} device${unreadable === 1 ? "" : "s"} didn't respond to the check, probably asleep)` : ""}. ${explainUnbindFailure({ errors, targetRemoved: true, targetIeee: stillThere[0].targetIeee }) || 'Wake those devices and click "Unbind all" again.'}`,
           0
         );
       }
@@ -12320,7 +12404,7 @@ Used by: ${h.uses.join("; ")}`;
           for (const op of plan) {
             if (op.method === "skip") continue;
             try {
-              if (op.method === "remove") errors.get(op.sourceIeee).push(...await this._removeReportingBinding(op));
+              if (op.method === "remove" && !this._api.directUnbind) errors.get(op.sourceIeee).push(...await this._removeReportingBinding(op));
               else await this._api.unbindGroup(op.sourceIeee, gid, [op.clusterId], { endpoint: op.endpoint });
             } catch (err) {
               errors.get(op.sourceIeee).push(toolkitErrorText(err).replace(/^unbind_group failed:\s*/i, ""));

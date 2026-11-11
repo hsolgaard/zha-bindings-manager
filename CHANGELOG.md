@@ -3,6 +3,21 @@
 All notable changes to ZHA Bindings Manager are documented here.
 
 
+## [1.10.6]
+
+### Fixed
+
+- **Bindings to devices that are no longer in ZHA can be removed.** zha-toolkit looks the target device up before
+  removing a binding, fails for a removed device, and never sends the request (a known zha-toolkit bug, reported to its
+  developer), so **Unbind** and **Unbind all** left them in place. With the integration 1.10.6 the card now has the
+  integration send the unbind itself, which needs no lookup and removes exactly that binding. Without the integration,
+  the card removes the bindings on that endpoint and cluster and puts the others back. Reported by Mayhem_SWE on the
+  forum (five bindings from an IKEA bulb to an old IKEA device).
+- With the integration, a light's own binding to a group is also removed directly, without the remove-and-restore
+  step from 1.10.5.
+- When a device refuses to remove a binding, the message now says what it answered (for example NO_ENTRY: some devices
+  won't remove a binding they created themselves) instead of a bare address.
+
 ## [1.10.5]
 
 ### Fixed

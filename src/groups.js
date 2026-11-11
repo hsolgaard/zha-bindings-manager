@@ -77,19 +77,37 @@ export function groupBindingOp(binding, bindings, clusters) {
   const op = { sourceIeee: normIeee(binding.sourceIeee), endpoint: Number(binding.sourceEndpoint), clusterId: Number(binding.clusterId) };
   const sends = (clusters || []).some((c) => c.type === "out" && Number(c.id) === op.clusterId && Number(c.endpoint_id) === op.endpoint);
   if (sends || !clusters) return { ...op, method: "group" };
-  const gid = Number(binding.groupId);
+  return removeAndRestoreOp(binding, bindings);
+}
+
+const targetKeyOf = (x) =>
+  x.isGroup ? `g:${Number(x.groupId)}` : `d:${normIeee(x.targetIeee || x.ieee)}:${x.targetEndpoint != null ? Number(x.targetEndpoint) : x.endpoint != null ? Number(x.endpoint) : 1}`;
+
+/**
+ * Remove a binding with binds_remove_all filtered to its source endpoint and
+ * cluster (no target filter), then bind the others it had there again
+ * (1.10.6, generalised from groupBindingOp). Used where zha-toolkit can't
+ * remove the one binding on its own and the integration isn't there to do
+ * it: a light's own binding to a group, and a binding to a device that's no
+ * longer in ZHA (zha-toolkit's target lookup fails). `alsoRemoving` are other
+ * bindings on the same endpoint and cluster that should go too (not restored).
+ * Returns {sourceIeee, endpoint, clusterId, method: "remove", restore}.
+ */
+export function removeAndRestoreOp(binding, bindings, alsoRemoving = []) {
+  const op = { sourceIeee: normIeee(binding.sourceIeee), endpoint: Number(binding.sourceEndpoint), clusterId: Number(binding.clusterId) };
+  const gone = new Set([binding, ...alsoRemoving].map(targetKeyOf));
   const seen = new Set();
   const restore = [];
   for (const x of bindings || []) {
     if (!x || normIeee(x.sourceIeee) !== op.sourceIeee || Number(x.sourceEndpoint) !== op.endpoint || Number(x.clusterId) !== op.clusterId) continue;
-    if (x.isGroup && Number(x.groupId) === gid) continue;
-    const t = x.isGroup
-      ? { isGroup: true, groupId: Number(x.groupId) }
-      : { isGroup: false, ieee: normIeee(x.targetIeee), endpoint: x.targetEndpoint != null ? Number(x.targetEndpoint) : 1 };
-    const key = t.isGroup ? `g:${t.groupId}` : `d:${t.ieee}:${t.endpoint}`;
-    if (seen.has(key)) continue;
+    const key = targetKeyOf(x);
+    if (gone.has(key) || seen.has(key)) continue;
     seen.add(key);
-    restore.push(t);
+    restore.push(
+      x.isGroup
+        ? { isGroup: true, groupId: Number(x.groupId) }
+        : { isGroup: false, ieee: normIeee(x.targetIeee), endpoint: x.targetEndpoint != null ? Number(x.targetEndpoint) : 1 }
+    );
   }
   return { ...op, method: "remove", restore };
 }

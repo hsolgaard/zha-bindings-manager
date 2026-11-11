@@ -285,6 +285,13 @@ export class ZhaApi {
    *  tell which entry to remove and reports failure even when the source,
    *  target, and cluster are all correct (see v0.8.1 bug report). */
   async unbindIeee(sourceIeee, targetIeee, clusterIds, opts = {}) {
+    if (this.directUnbind && opts.endpoint != null && opts.dstEndpoint != null && clusterIds && clusterIds.length) {
+      for (const c of clusterIds) {
+        await this.unbindDirect(sourceIeee, opts.endpoint, c, { targetIeee, targetEndpoint: opts.dstEndpoint });
+      }
+      await this._reportRemoved({ sourceIeee, sourceEndpoint: opts.endpoint, clusterIds: clusterIds.map(Number), targetIeee, targetEndpoint: opts.dstEndpoint });
+      return { success: true };
+    }
     const data = {
       ieee: sourceIeee,
       command_data: targetIeee,
@@ -385,7 +392,31 @@ export class ZhaApi {
     return this.hass.callWS({ type: "zha/group/remove", group_ids: groupIds.map(Number) });
   }
 
+  /** 1.10.6: the integration sends the ZDO Unbind_req itself. Needs no
+   *  lookup of the target (so bindings to devices no longer in ZHA can be
+   *  removed) and works for a light's own binding to a group too. Throws
+   *  with the device's own answer unless it removed it (SUCCESS). */
+  async unbindDirect(sourceIeee, endpoint, clusterId, { groupId = null, targetIeee = null, targetEndpoint = null } = {}) {
+    const msg = { type: "zha_bindings_manager/unbind", source_ieee: sourceIeee, endpoint: Number(endpoint), cluster: Number(clusterId) };
+    if (groupId != null) msg.group_id = Number(groupId);
+    else {
+      msg.target_ieee = targetIeee;
+      msg.target_endpoint = Number(targetEndpoint);
+    }
+    const res = await this.hass.callWS(msg);
+    const status = res && res.status;
+    if (status === "SUCCESS") return res;
+    if (status === "no_answer") throw new Error("the device didn't answer");
+    if (status === "unavailable") throw new Error(`the device isn't available${res.detail ? ` (${res.detail})` : ""}`);
+    throw new Error(`the device answered ${status}`);
+  }
+
   async unbindGroup(sourceIeee, groupId, clusterIds, opts = {}) {
+    if (this.directUnbind && opts.endpoint != null && clusterIds && clusterIds.length) {
+      for (const c of clusterIds) await this.unbindDirect(sourceIeee, opts.endpoint, c, { groupId });
+      await this._reportRemoved({ sourceIeee, sourceEndpoint: opts.endpoint, clusterIds: clusterIds.map(Number), isGroup: true, groupId: Number(groupId) });
+      return { success: true };
+    }
     const data = { ieee: sourceIeee, command_data: groupId };
     if (clusterIds && clusterIds.length === 1) data.cluster = clusterIds[0];
     if (opts.endpoint != null) data.endpoint = opts.endpoint;

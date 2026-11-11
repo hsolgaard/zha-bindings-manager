@@ -103,7 +103,7 @@ import { COMMAND_CHECK_LIMIT_MS, formatElapsed, shouldApplyResult } from "./comm
 import { bindOutcome, unbindOutcome, OUTCOME_LEVEL, pendingKey, reconcilePending } from "./action-verify.js";
 import { STYLE } from "./styles.js";
 import { explainUnbindFailure, toolkitErrorText } from "./unbind-errors.js";
-import { groupRows, groupUnbindPlan, groupBindingOp, groupIdHex, groupDeleteReasons, deviceOnlyGroups } from "./groups.js";
+import { groupRows, groupUnbindPlan, groupBindingOp, removeAndRestoreOp, groupIdHex, groupDeleteReasons, deviceOnlyGroups } from "./groups.js";
 import { LQI_RECOMMENDED, buildMesh, routePath, pathVerdict, rateLqi, groupCheck, weakestLinks, meshSuggestions, conflictSourceText, isRouterLike, visibleRouterLinks } from "./mesh.js";
 import {
   DIRECTION_ALL,
@@ -396,6 +396,7 @@ export class ZhaBindingMapCard extends HTMLElement {
     this._hass = hass;
     this._api = new ZhaApi(hass);
     this._api.watchEnabled = !!this._watchEnabled;
+    this._api.directUnbind = !!this._directUnbind;
     if (first) {
       this._render();
       this._loadAll();
@@ -652,7 +653,11 @@ export class ZhaBindingMapCard extends HTMLElement {
     this._watchEnabled = !!probe.watch;
     this._replaceEnabled = !!probe.replace;
     this._evidenceEnabled = !!probe.evidence;
-    if (this._api) this._api.watchEnabled = this._watchEnabled;
+    this._directUnbind = !!probe.directUnbind;
+    if (this._api) {
+      this._api.watchEnabled = this._watchEnabled;
+      this._api.directUnbind = this._directUnbind;
+    }
     this._lqiThr = probe.lqi || { ...LQI_RECOMMENDED };
     this._experimentalKnown = true;
     if (this._pendingHashView === "mesh") {
@@ -8034,12 +8039,17 @@ export class ZhaBindingMapCard extends HTMLElement {
         ? [binding.sourceIeee]
         : this._impactedIeees(binding.sourceIeee, binding.targetIeee);
       try {
-        if (binding.isGroup) {
-          // 1.10.5: a light's own (reporting) binding to a group can't be
-          // removed with unbind_group; see groupBindingOp.
-          const clusters = await this._ensureClusters(normIeee(binding.sourceIeee)).catch(() => undefined);
-          const op = groupBindingOp(binding, this._rawBindings(), clusters);
-          if (op.method === "remove") reportingOp = op;
+        if (!this._api.directUnbind) {
+          // Without the integration (1.10.6 sends unbinds itself), zha-toolkit
+          // can't remove a light's own (reporting) binding to a group, nor a
+          // binding to a device no longer in ZHA: remove and restore instead.
+          if (binding.isGroup) {
+            const clusters = await this._ensureClusters(normIeee(binding.sourceIeee)).catch(() => undefined);
+            const op = groupBindingOp(binding, this._rawBindings(), clusters);
+            if (op.method === "remove") reportingOp = op;
+          } else if (this._isRemovedDevice(binding.targetIeee)) {
+            reportingOp = removeAndRestoreOp(binding, this._rawBindings());
+          }
         }
         if (reportingOp) {
           const errs = await this._removeReportingBinding(reportingOp);
@@ -8091,6 +8101,7 @@ export class ZhaBindingMapCard extends HTMLElement {
           const why = explainUnbindFailure({
             errors: unbindError ? [unbindError] : [],
             targetRemoved: !binding.isGroup && this._isRemovedDevice(binding.targetIeee),
+            targetIeee: binding.isGroup ? null : binding.targetIeee,
           });
           if (why) message = `${message} ${why}`;
         }
@@ -8544,20 +8555,42 @@ export class ZhaBindingMapCard extends HTMLElement {
     }
     const sources = [...new Map(dead.map((b) => [normIeee(b.sourceIeee), b.sourceIeee])).values()];
     const errors = [];
-    for (let i = 0; i < dead.length; i++) {
-      const b = dead[i];
-      this._setStatus("info", `Unbinding ${i + 1} of ${dead.length}…`, 0);
-      try {
-        await this._api.unbindIeee(b.sourceIeee, b.targetIeee, [b.clusterId], {
-          endpoint: b.sourceEndpoint,
-          dstEndpoint: b.targetEndpoint,
-        });
-      } catch (err) {
-        errors.push(toolkitErrorText(err));
-        console.warn("[ZHA Bindings Manager] unbind call raised, verifying against rescan anyway", err);
+    const restoreOps = [];
+    if (this._api.directUnbind) {
+      for (let i = 0; i < dead.length; i++) {
+        const b = dead[i];
+        this._setStatus("info", `Unbinding ${i + 1} of ${dead.length}…`, 0);
+        try {
+          await this._api.unbindIeee(b.sourceIeee, b.targetIeee, [b.clusterId], {
+            endpoint: b.sourceEndpoint,
+            dstEndpoint: b.targetEndpoint,
+          });
+        } catch (err) {
+          errors.push(toolkitErrorText(err));
+          console.warn("[ZHA Bindings Manager] unbind call raised, verifying against rescan anyway", err);
+        }
+      }
+    } else {
+      // Card only: zha-toolkit can't target a device no longer in ZHA, so
+      // remove everything on each endpoint and cluster and put the rest back.
+      const byKey = new Map();
+      for (const b of dead) {
+        const k = `${normIeee(b.sourceIeee)}|${b.sourceEndpoint}|${b.clusterId}`;
+        if (!byKey.has(k)) byKey.set(k, []);
+        byKey.get(k).push(b);
+      }
+      let i = 0;
+      for (const group of byKey.values()) {
+        this._setStatus("info", `Unbinding ${++i} of ${byKey.size}…`, 0);
+        const op = removeAndRestoreOp(group[0], this._rawBindings(), group.slice(1));
+        restoreOps.push(op);
+        errors.push(...(await this._removeReportingBinding(op)));
       }
     }
-    await this._scanBindings(sources);
+    const scan = await this._scanBindings(sources);
+    const notBack = restoreOps.flatMap((op) =>
+      scan && scan.read && scan.read.has(op.sourceIeee) ? this._restoresMissing(op).map((t) => `${this._ieeeLabel(op.sourceIeee, { plain: true })}: ${this._describeRestore(t)}`) : []
+    );
     const stillThere = dead.filter((b) =>
       this._bindingPresent(b.sourceIeee, b.sourceEndpoint, b.clusterId, {
         isGroup: false,
@@ -8567,7 +8600,13 @@ export class ZhaBindingMapCard extends HTMLElement {
     );
     const removed = dead.length - stillThere.length;
     if (!stillThere.length) {
-      this._setStatus("success", `Removed all ${removed} binding${removed === 1 ? "" : "s"} to removed devices.`);
+      if (notBack.length)
+        this._setStatus(
+          "warning",
+          `Removed all ${removed} binding${removed === 1 ? "" : "s"} to removed devices. Other bindings on the same clusters were removed with them, and these aren't back yet: ${notBack.join("; ")}. Scan again to check, or add them again.`,
+          0
+        );
+      else this._setStatus("success", `Removed all ${removed} binding${removed === 1 ? "" : "s"} to removed devices.`);
     } else {
       const unreadable = sources.filter((s) => this._scanFailures.has(normIeee(s))).length;
       this._setStatus(
@@ -8575,7 +8614,7 @@ export class ZhaBindingMapCard extends HTMLElement {
         `Removed ${removed} of ${dead.length}. ${stillThere.length} still present${
           unreadable ? ` (${unreadable} device${unreadable === 1 ? "" : "s"} didn't respond to the check, probably asleep)` : ""
         }. ${
-          explainUnbindFailure({ errors, targetRemoved: true }) ||
+          explainUnbindFailure({ errors, targetRemoved: true, targetIeee: stillThere[0].targetIeee }) ||
           'Wake those devices and click "Unbind all" again.'
         }`,
         0
@@ -9236,7 +9275,7 @@ export class ZhaBindingMapCard extends HTMLElement {
         for (const op of plan) {
           if (op.method === "skip") continue;
           try {
-            if (op.method === "remove") errors.get(op.sourceIeee).push(...(await this._removeReportingBinding(op)));
+            if (op.method === "remove" && !this._api.directUnbind) errors.get(op.sourceIeee).push(...(await this._removeReportingBinding(op)));
             else await this._api.unbindGroup(op.sourceIeee, gid, [op.clusterId], { endpoint: op.endpoint });
           } catch (err) {
             errors.get(op.sourceIeee).push(toolkitErrorText(err).replace(/^unbind_group failed:\s*/i, ""));

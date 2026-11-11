@@ -38,7 +38,7 @@ import {
   extractErrorMessage,
 } from "./utils.js";
 import { bindingMatches, bindingMatchesLoose, bindingKey, isIeee, sanitizeStoredBindings } from "./parser.js";
-import { activityRows, clusterLabel, interestingCounters, timesTypical, TOP_ROWS } from "./activity.js";
+import { activityRows, clusterLabel, coordinatorOwnMessages, interestingCounters, timesTypical, TOP_ROWS } from "./activity.js";
 import { ZhaApi } from "./api-client.js";
 import {
   detectDeviceType,
@@ -6186,10 +6186,16 @@ export class ZhaBindingMapCard extends HTMLElement {
     const since = snap.since ? new Date(snap.since) : null;
     const clusterText = (r, n = 2) => r.clusters.slice(0, n).map(([id, c]) => `${clusterLabel(Number(id))} ${c}`).join(", ");
     const alerts = [];
+    const ownMessages = coordinatorOwnMessages(snap);
     if (fromCoordinator) {
-      alerts.push(`<li class="mesh-tip-error"><strong>${fromCoordinator.hour} messages in the last hour claimed to come from the coordinator itself</strong> (0x0000).
-        The coordinator doesn't send to itself, so a device is probably using its network address. That can confuse or flood the whole network.
-        If the Network scan flags a device using 0x0000, unplug it, then reset and pair it again.</li>`);
+      const what = fromCoordinator.clusters.length ? `, mostly ${escapeHtml(clusterText(fromCoordinator, 3))}` : "";
+      const older =
+        ownMessages == null
+          ? ` Integration versions before 1.10.7 also count the coordinator's replies to its own requests here (for example to ZHA's network scan), which are harmless: update the integration first and see if this warning goes away.`
+          : "";
+      alerts.push(`<li class="mesh-tip-error"><strong>${fromCoordinator.hour} messages in the last hour came from address 0x0000</strong>${what}.
+        0x0000 is always the coordinator's own address, and the coordinator doesn't send messages like these to Home Assistant, so a device is probably using its address. That can confuse or flood the whole network.
+        If the Network scan flags a device using 0x0000, unplug it, then reset and pair it again.${older}</li>`);
     }
     for (const r of chatty) {
       const x = timesTypical(r);
@@ -6216,7 +6222,9 @@ export class ZhaBindingMapCard extends HTMLElement {
         <summary class="activity-summary-line"><strong>Messages to Home Assistant:</strong> ${summary} ${refresh}</summary>
         <p class="hint">Messages ZHA received from each device. Only traffic that reaches the coordinator is counted, and counts restart with Home Assistant${
           since ? ` (counting since ${escapeHtml(since.toLocaleString())})` : ""
-        }. "Usual" is the typical rate since then, shown after 10 minutes.</p>
+        }. "Usual" is the typical rate since then, shown after 10 minutes.${
+          ownMessages ? ` The coordinator's own network-management messages (${ownMessages} in the last hour, for example answering ZHA's network scan of itself) aren't counted.` : ""
+        }</p>
         ${alerts.length ? `<ul class="mesh-tips">${alerts.join("")}</ul>` : ""}
         ${
           rows.length

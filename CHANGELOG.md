@@ -3,6 +3,15 @@
 All notable changes to ZHA Bindings Manager are documented here.
 
 
+## [1.10.7]
+
+### Fixed
+
+- **"Messages from the coordinator" warning (Experimental):** with integration 1.10.7 it no longer counts the
+  coordinator's own network-management messages, such as its answers to ZHA's network scan of itself. These are
+  harmless and could set off the warning on some adapters. The warning now says which clusters the messages were on,
+  and that 0x0000 is always the coordinator's own address. With an older integration it suggests updating first.
+
 ## [1.10.6]
 
 ### Fixed

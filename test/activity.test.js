@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { activityRows, median, timesTypical, interestingCounters, countedMinutes, clusterLabel } from "../src/activity.js";
+import { activityRows, median, timesTypical, interestingCounters, countedMinutes, clusterLabel, coordinatorOwnMessages } from "../src/activity.js";
 
 const flat = (n, len = 60) => Array(len).fill(n);
 const spike = (base, last5) => [...flat(base, 55), ...flat(last5, 5)];
@@ -29,6 +29,12 @@ describe("activityRows (1.7.0)", () => {
     const r = activityRows(snap);
     expect(r.fromCoordinator.hour).toBe(60);
     expect(r.rows.map((x) => x.ieee)).toEqual(["a"]);
+  });
+  it("counts the coordinator's own network-management messages apart (1.10.7)", () => {
+    expect(coordinatorOwnMessages({ coordinator_zdo: { per_minute: [0, 2, 3], clusters: {} } })).toBe(5);
+    expect(coordinatorOwnMessages({ coordinator_zdo: { per_minute: [0, 0], clusters: {} } })).toBe(0);
+    expect(coordinatorOwnMessages({ by_device: {} })).toBe(null); // integration before 1.10.7
+    expect(coordinatorOwnMessages(null)).toBe(null);
   });
   it("helpers", () => {
     expect(median([3, 1, 2])).toBe(2);

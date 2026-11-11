@@ -92,32 +92,50 @@ export function buildMesh(snapshot, devices = []) {
  * entries, LQI 0, are left out).
  * Returns [{nwk, ieees:[...], coordinator: bool}], coordinator address first.
  */
+/** Placeholder addresses some routers put in a neighbour entry they don't
+ *  know the address of: never a real device (1.10.5). */
+const PLACEHOLDER_IEEES = new Set(["00:00:00:00:00:00:00:00", "ff:ff:ff:ff:ff:ff:ff:ff"]);
+
+/**
+ * Network addresses claimed by more than one IEEE, from ZHA's device list and
+ * routers' neighbour entries (LQI 0 stale entries and placeholder addresses
+ * left out). [{nwk, ieees, coordinator, seenBy: {ieee: [router ieees]},
+ * notInZha: [ieees]}]: seenBy says which routers list each address, so a
+ * device ZHA doesn't know can still be tracked down (1.10.5).
+ */
 export function addressConflicts(snapshot, devices = []) {
-  const claims = new Map(); // nwk -> Set(ieee)
-  const claim = (nwk, ieee) => {
-    if (nwk == null || !ieee) return;
-    if (!claims.has(nwk)) claims.set(nwk, new Set());
-    claims.get(nwk).add(ieee);
+  const claims = new Map(); // nwk -> Map(ieee -> Set(reporter or "zha"))
+  const claim = (nwk, ieee, by) => {
+    if (nwk == null || !ieee || PLACEHOLDER_IEEES.has(ieee)) return;
+    if (!claims.has(nwk)) claims.set(nwk, new Map());
+    const m = claims.get(nwk);
+    if (!m.has(ieee)) m.set(ieee, new Set());
+    m.get(ieee).add(by);
   };
   let coord = null;
+  const known = new Set();
   for (const d of devices) {
     const ieee = normIeee(d.ieee);
+    known.add(ieee);
     if (d.device_type === "Coordinator") coord = ieee;
-    claim(nwkNumber(d.nwk), ieee);
+    claim(nwkNumber(d.nwk), ieee, "zha");
   }
   for (const [rawReporter, entry] of Object.entries(snapshot || {})) {
     const reporter = normIeee(rawReporter);
     for (const n of (entry && entry.neighbours) || []) {
       const ieee = normIeee(n.ieee);
       if (!ieee || ieee === reporter || !(typeof n.lqi === "number" && n.lqi > 0)) continue;
-      claim(nwkNumber(n.nwk), ieee);
+      claim(nwkNumber(n.nwk), ieee, reporter);
     }
   }
   const out = [];
-  for (const [nwk, set] of claims.entries()) {
-    if (set.size < 2) continue;
-    const ieees = [...set].sort((a, b) => (a === coord ? -1 : b === coord ? 1 : a.localeCompare(b)));
-    out.push({ nwk, ieees, coordinator: nwk === 0 });
+  for (const [nwk, m] of claims.entries()) {
+    if (m.size < 2) continue;
+    const ieees = [...m.keys()].sort((a, b) => (a === coord ? -1 : b === coord ? 1 : a.localeCompare(b)));
+    const seenBy = {};
+    for (const i of ieees) seenBy[i] = [...m.get(i)].filter((x) => x !== "zha").sort();
+    const notInZha = ieees.filter((i) => !known.has(i));
+    out.push({ nwk, ieees, coordinator: nwk === 0, seenBy, notInZha });
   }
   return out.sort((a, b) => a.nwk - b.nwk);
 }
@@ -262,6 +280,27 @@ export function weakestLinks(mesh, limit = 10) {
     .slice(0, limit);
 }
 
+/** Where an address conflict was seen (1.10.5): devices ZHA doesn't know are
+ *  only in routers' neighbour lists, so say which routers, and flag a claim
+ *  that only one router makes as possibly stale. */
+export function conflictSourceText(c, suspects, nameOf = (i) => i) {
+  const parts = [];
+  const seenBy = c.seenBy || {};
+  const unknown = (suspects || []).filter((i) => (c.notInZha || []).includes(i));
+  for (const i of unknown) {
+    const by = seenBy[i] || [];
+    parts.push(
+      ` ${nameOf(i)} isn't a device in ZHA: it's in the neighbour list of ${by.map(nameOf).join(", ") || "a router"}, so it's near ${
+        by.length === 1 ? "that router" : "those routers"
+      }. The first six digits of its address identify the manufacturer.`
+    );
+  }
+  if (unknown.length && unknown.every((i) => (seenBy[i] || []).length <= 1)) {
+    parts.push(" Only one router lists it, so it may be an old entry: scan again to confirm before you unplug anything.");
+  }
+  return parts.join("");
+}
+
 /** Plain suggestions. areaOf(ieee) → area name or "" ; nameOf(ieee) → label. */
 export function meshSuggestions(mesh, { thr = LQI_RECOMMENDED, areaOf = () => "", nameOf = (i) => i, routers = [] } = {}) {
   const out = [];
@@ -273,9 +312,12 @@ export function meshSuggestions(mesh, { thr = LQI_RECOMMENDED, areaOf = () => ""
       kind: c.coordinator ? "coordinator_address" : "address_conflict",
       level: "error",
       ieees: c.ieees,
-      text: c.coordinator
-        ? `${others.map(nameOf).join(", ")} ${others.length === 1 ? "is" : "are"} using the coordinator's network address (${hex}). A device doing this can flood or confuse the whole network: lights responding late or not at all, timeouts. Unplug it (or remove its battery), check whether the network recovers, then reset and pair it again.`
-        : `${c.ieees.map(nameOf).join(" and ")} are using the same network address (${hex}). Messages for one may go to the other. Scan again to confirm; if it stays, reset and pair one of them again.`,
+      seenBy: c.seenBy,
+      text:
+        (c.coordinator
+          ? `${others.map(nameOf).join(", ")} ${others.length === 1 ? "is" : "are"} using the coordinator's network address (${hex}). A device doing this can flood or confuse the whole network: lights responding late or not at all, timeouts. Unplug it (or remove its battery), check whether the network recovers, then reset and pair it again.`
+          : `${c.ieees.map(nameOf).join(" and ")} are using the same network address (${hex}). Messages for one may go to the other. Scan again to confirm; if it stays, reset and pair one of them again.`) +
+        conflictSourceText(c, others, nameOf),
     });
   }
   const routerSet = new Set(routers.map(normIeee));

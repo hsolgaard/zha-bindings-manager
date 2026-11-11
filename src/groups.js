@@ -58,8 +58,7 @@ export function deviceOnlyGroups({ groups, bindings, classify, coordinatorIeee }
 }
 
 /**
- * The unbinds that clean up every binding pointing at a group before it's
- * deleted: [{sourceIeee, endpoint, clusterId, method}], one per binding.
+ * How to remove one binding to a group (1.10.5; was inside groupUnbindPlan).
  *
  * zha-toolkit's unbind_group only unbinds clusters the source *sends*
  * (checked in its binds.py: it looks for the cluster in the endpoint's
@@ -67,38 +66,50 @@ export function deviceOnlyGroups({ groups, bindings, classify, coordinatorIeee }
  * state to the group is bound on a cluster it *receives*, so that binding
  * needs binds_remove_all filtered to the endpoint and cluster instead. That
  * filter also removes every other binding on the same endpoint and cluster
- * (to other groups, or to the coordinator), so it's only used when the last
- * scan shows nothing else there.
+ * (to other groups, or to the coordinator), so those are listed in `restore`
+ * to be bound again straight afterwards.
  * - method "group": unbind_group.
- * - method "remove": binds_remove_all on that endpoint and cluster.
- * - method "skip": can't be removed without removing other bindings too.
+ * - method "remove": binds_remove_all on that endpoint and cluster, then bind
+ *   each of `restore` ([{isGroup, groupId} | {isGroup: false, ieee, endpoint}]) again.
+ * clusters: ZHA cluster list [{id, endpoint_id, type}] of the source, or undefined.
+ */
+export function groupBindingOp(binding, bindings, clusters) {
+  const op = { sourceIeee: normIeee(binding.sourceIeee), endpoint: Number(binding.sourceEndpoint), clusterId: Number(binding.clusterId) };
+  const sends = (clusters || []).some((c) => c.type === "out" && Number(c.id) === op.clusterId && Number(c.endpoint_id) === op.endpoint);
+  if (sends || !clusters) return { ...op, method: "group" };
+  const gid = Number(binding.groupId);
+  const seen = new Set();
+  const restore = [];
+  for (const x of bindings || []) {
+    if (!x || normIeee(x.sourceIeee) !== op.sourceIeee || Number(x.sourceEndpoint) !== op.endpoint || Number(x.clusterId) !== op.clusterId) continue;
+    if (x.isGroup && Number(x.groupId) === gid) continue;
+    const t = x.isGroup
+      ? { isGroup: true, groupId: Number(x.groupId) }
+      : { isGroup: false, ieee: normIeee(x.targetIeee), endpoint: x.targetEndpoint != null ? Number(x.targetEndpoint) : 1 };
+    const key = t.isGroup ? `g:${t.groupId}` : `d:${t.ieee}:${t.endpoint}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    restore.push(t);
+  }
+  return { ...op, method: "remove", restore };
+}
+
+/**
+ * The unbinds that clean up every binding pointing at a group before it's
+ * deleted: [{sourceIeee, endpoint, clusterId, method, restore?}], one per
+ * source endpoint and cluster (see groupBindingOp).
  * clustersFor(ieee) -> ZHA cluster list [{id, endpoint_id, type}] or undefined.
  */
 export function groupUnbindPlan(groupId, bindings, { clustersFor = () => undefined } = {}) {
   const seen = new Set();
   const out = [];
-  const all = bindings || [];
-  for (const b of all) {
+  for (const b of bindings || []) {
     if (!b || !b.isGroup || Number(b.groupId) !== Number(groupId)) continue;
-    const op = { sourceIeee: normIeee(b.sourceIeee), endpoint: Number(b.sourceEndpoint), clusterId: Number(b.clusterId) };
-    const key = `${op.sourceIeee}:${op.endpoint}:${op.clusterId}`;
+    const key = `${normIeee(b.sourceIeee)}:${Number(b.sourceEndpoint)}:${Number(b.clusterId)}`;
     if (seen.has(key)) continue;
     seen.add(key);
-    const clusters = clustersFor(op.sourceIeee);
-    const sends = (clusters || []).some((c) => c.type === "out" && Number(c.id) === op.clusterId && Number(c.endpoint_id) === op.endpoint);
-    if (sends || !clusters) {
-      op.method = "group";
-    } else {
-      const others = all.some(
-        (x) =>
-          x &&
-          normIeee(x.sourceIeee) === op.sourceIeee &&
-          Number(x.sourceEndpoint) === op.endpoint &&
-          Number(x.clusterId) === op.clusterId &&
-          !(x.isGroup && Number(x.groupId) === Number(groupId))
-      );
-      op.method = others ? "skip" : "remove";
-    }
+    const op = groupBindingOp(b, bindings, clustersFor(normIeee(b.sourceIeee)));
+    if (op.method === "remove" && !op.restore.length) delete op.restore;
     out.push(op);
   }
   return out;

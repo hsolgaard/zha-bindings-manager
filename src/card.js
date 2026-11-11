@@ -103,8 +103,8 @@ import { COMMAND_CHECK_LIMIT_MS, formatElapsed, shouldApplyResult } from "./comm
 import { bindOutcome, unbindOutcome, OUTCOME_LEVEL, pendingKey, reconcilePending } from "./action-verify.js";
 import { STYLE } from "./styles.js";
 import { explainUnbindFailure, toolkitErrorText } from "./unbind-errors.js";
-import { groupRows, groupUnbindPlan, groupIdHex, groupDeleteReasons, deviceOnlyGroups } from "./groups.js";
-import { LQI_RECOMMENDED, buildMesh, routePath, pathVerdict, rateLqi, groupCheck, weakestLinks, meshSuggestions, isRouterLike, visibleRouterLinks } from "./mesh.js";
+import { groupRows, groupUnbindPlan, groupBindingOp, groupIdHex, groupDeleteReasons, deviceOnlyGroups } from "./groups.js";
+import { LQI_RECOMMENDED, buildMesh, routePath, pathVerdict, rateLqi, groupCheck, weakestLinks, meshSuggestions, conflictSourceText, isRouterLike, visibleRouterLinks } from "./mesh.js";
 import {
   DIRECTION_ALL,
   DIRECTION_OUTBOUND,
@@ -174,7 +174,7 @@ const TUYA_MANUFACTURER_PATTERN = /^_T[A-Z0-9]+_/i;
 // Zigbee cluster does (and what Input/Output specifically means for it)
 // lives only on the public website, not duplicated inside this card — this
 // links out to it rather than rebuilding the same reference here.
-const CAPEXP_CLUSTERS_URL = "https://hsolgaard.github.io/zigbee-capabilities/clusters.html";
+const CAPEXP_CLUSTERS_URL = "https://zigbee.solgaard.uk/clusters.html";
 function isGenericTuyaManufacturer(m) {
   return TUYA_MANUFACTURER_PATTERN.test(String(m || ""));
 }
@@ -6663,7 +6663,11 @@ export class ZhaBindingMapCard extends HTMLElement {
       c.coordinator && d.device_type !== "Coordinator"
         ? `This device is using the coordinator's network address (${hex}). That can flood or confuse the whole network. Unplug it, check whether the network recovers, then reset and pair it again.`
         : c.coordinator
-        ? `Another device (${others.join(", ")}) is using this coordinator's network address (${hex}).`
+        ? `Another device (${others.join(", ")}) is using this coordinator's network address (${hex}).${conflictSourceText(
+            c,
+            c.ieees.filter((i) => i !== id),
+            (i) => this._ieeeLabel(i, { plain: true })
+          )}`
         : `Shares its network address (${hex}) with ${others.join(", ")}.`;
     return html.replace('<div class="drawer-section-title">Network</div>', `<div class="drawer-section-title">Network</div><p class="mesh-tip-error">${escapeHtml(text)}</p>`);
   }
@@ -8025,11 +8029,22 @@ export class ZhaBindingMapCard extends HTMLElement {
         : { isGroup: false, ieee: binding.targetIeee, endpoint: binding.targetEndpoint };
       const before = this._bindingPresent(binding.sourceIeee, binding.sourceEndpoint, binding.clusterId, bindTarget);
       let unbindError = null;
+      let reportingOp = null;
       const rescanTargets = binding.isGroup
         ? [binding.sourceIeee]
         : this._impactedIeees(binding.sourceIeee, binding.targetIeee);
       try {
         if (binding.isGroup) {
+          // 1.10.5: a light's own (reporting) binding to a group can't be
+          // removed with unbind_group; see groupBindingOp.
+          const clusters = await this._ensureClusters(normIeee(binding.sourceIeee)).catch(() => undefined);
+          const op = groupBindingOp(binding, this._rawBindings(), clusters);
+          if (op.method === "remove") reportingOp = op;
+        }
+        if (reportingOp) {
+          const errs = await this._removeReportingBinding(reportingOp);
+          if (errs.length) unbindError = errs.join("; ");
+        } else if (binding.isGroup) {
           // Real zha_toolkit unbind_group service — confirmed working both
           // here and via the Advanced tab. Previously called native HA's
           // zha/groups/unbind websocket command instead (unbindDeviceFromGroup),
@@ -8064,6 +8079,14 @@ export class ZhaBindingMapCard extends HTMLElement {
           before
         );
         let message = res.message;
+        let level = res.level;
+        const notBack = reportingOp && scan && scan.read && scan.read.has(normIeee(binding.sourceIeee)) ? this._restoresMissing(reportingOp) : [];
+        if (reportingOp && reportingOp.restore.length) {
+          message += notBack.length
+            ? ` Its other bindings on this cluster were removed with it, and ${notBack.map((t) => this._describeRestore(t)).join(" and ")} ${notBack.length === 1 ? "isn't" : "aren't"} back yet: scan again to check, or add ${notBack.length === 1 ? "it" : "them"} again.`
+            : ` Its other binding${reportingOp.restore.length === 1 ? "" : "s"} on this cluster ${reportingOp.restore.length === 1 ? "was" : "were"} removed with it and put back.`;
+          if (notBack.length && level === "success") level = "warning";
+        }
         if (res.level !== "success") {
           const why = explainUnbindFailure({
             errors: unbindError ? [unbindError] : [],
@@ -8071,7 +8094,7 @@ export class ZhaBindingMapCard extends HTMLElement {
           });
           if (why) message = `${message} ${why}`;
         }
-        this._setStatus(res.level, message, res.level === "success" ? undefined : 0, res.action);
+        this._setStatus(level, message, level === "success" ? undefined : 0, res.action);
       }
     });
   }
@@ -8964,6 +8987,39 @@ export class ZhaBindingMapCard extends HTMLElement {
     </div>`;
   }
 
+  /** A light's own binding to a group (it reports to the group on a cluster
+   *  it receives): zha-toolkit's unbind_group can't remove it, so remove
+   *  every binding on that endpoint and cluster and bind the others again
+   *  (1.10.5). Returns the error texts. */
+  async _removeReportingBinding(op) {
+    const errors = [];
+    try {
+      await this._api.removeBindingsOnCluster(op.sourceIeee, op.endpoint, op.clusterId);
+    } catch (err) {
+      errors.push(toolkitErrorText(err));
+    }
+    for (const t of op.restore || []) {
+      try {
+        if (t.isGroup) await this._api.bindGroup(op.sourceIeee, t.groupId, [op.clusterId], { endpoint: op.endpoint });
+        else await this._api.bindIeee(op.sourceIeee, t.ieee, [op.clusterId], { endpoint: op.endpoint, dstEndpoint: t.endpoint });
+      } catch (err) {
+        errors.push(`putting back ${this._describeRestore(t)}: ${toolkitErrorText(err)}`);
+      }
+    }
+    return errors;
+  }
+
+  _describeRestore(t) {
+    return t.isGroup ? `the binding to ${this._groupName(t.groupId)}` : `the binding to ${this._ieeeLabel(t.ieee, { plain: true })}`;
+  }
+
+  /** Bindings an op put back that the last read doesn't show. */
+  _restoresMissing(op) {
+    return (op.restore || []).filter(
+      (t) => !this._bindingPresent(op.sourceIeee, op.endpoint, op.clusterId, t.isGroup ? t : { isGroup: false, ieee: t.ieee, endpoint: t.endpoint })
+    );
+  }
+
   _groupsDeletePlan(gid) {
     return groupUnbindPlan(gid, this._rawBindings(), { clustersFor: (ieee) => this._clusterCache.get(ieee) });
   }
@@ -9180,7 +9236,7 @@ export class ZhaBindingMapCard extends HTMLElement {
         for (const op of plan) {
           if (op.method === "skip") continue;
           try {
-            if (op.method === "remove") await this._api.removeBindingsOnCluster(op.sourceIeee, op.endpoint, op.clusterId);
+            if (op.method === "remove") errors.get(op.sourceIeee).push(...(await this._removeReportingBinding(op)));
             else await this._api.unbindGroup(op.sourceIeee, gid, [op.clusterId], { endpoint: op.endpoint });
           } catch (err) {
             errors.get(op.sourceIeee).push(toolkitErrorText(err).replace(/^unbind_group failed:\s*/i, ""));
@@ -9188,6 +9244,8 @@ export class ZhaBindingMapCard extends HTMLElement {
         }
         const scan = await this._scanBindings(sources, { tries: this._retryCount });
         const read = (scan && scan.read) || new Set();
+        const notBack = plan.flatMap((op) => (read.has(op.sourceIeee) ? this._restoresMissing(op).map((t) => `${this._ieeeLabel(op.sourceIeee, { plain: true })}: ${this._describeRestore(t)}`) : []));
+        this._groupsNotBack = notBack;
         const left = groupUnbindPlan(gid, this._rawBindings());
         if (left.length) {
           const leftSources = [...new Set(left.map((p) => p.sourceIeee))];
@@ -9218,7 +9276,15 @@ export class ZhaBindingMapCard extends HTMLElement {
       this._groupsDeleteResult = null;
       await this._groupsRefresh();
       const gone = !this._groups.some((x) => Number(x.group_id) === gid);
-      this._setStatus(gone ? "success" : "error", gone ? `Deleted ${name}.` : `ZHA still lists ${name} after deleting it. Try again.`, gone ? undefined : 0);
+      const notBack = this._groupsNotBack || [];
+      this._groupsNotBack = null;
+      if (gone && notBack.length)
+        this._setStatus(
+          "warning",
+          `Deleted ${name}. Removing a light's own binding to it also removed its other bindings on that cluster, and these aren't back yet: ${notBack.join("; ")}. Scan bindings to check, or add them again.`,
+          0
+        );
+      else this._setStatus(gone ? "success" : "error", gone ? `Deleted ${name}.` : `ZHA still lists ${name} after deleting it. Try again.`, gone ? undefined : 0);
     } catch (err) {
       this._setStatus("error", `Couldn't delete ${name}: ${toolkitErrorText(err)}`, 0);
     } finally {
@@ -10137,7 +10203,7 @@ export class ZhaBindingMapCard extends HTMLElement {
     const params = new URLSearchParams();
     if (manufacturer) params.set("manufacturer", manufacturer);
     if (model) params.set("model", model);
-    return `https://hsolgaard.github.io/zigbee-capabilities/?${params.toString()}`;
+    return `https://zigbee.solgaard.uk/?${params.toString()}`;
   }
 
   // Plain-language pill for the device-overview paragraph — mirrors

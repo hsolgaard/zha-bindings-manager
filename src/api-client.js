@@ -91,6 +91,12 @@ export class ZhaApi {
     }
   }
 
+  /** A device left a group (removed from it, or the group deleted): its own
+   *  bindings to that group go with it, on purpose (1.10.4). */
+  async reportLeftGroup(ieee, groupId) {
+    await this._reportRemoved({ sourceIeee: ieee, isGroup: true, groupId: Number(groupId) });
+  }
+
   async fetchDevices() {
     return this.hass.callWS({ type: "zha/devices" });
   }

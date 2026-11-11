@@ -1253,8 +1253,8 @@ export class ZhaBindingMapCard extends HTMLElement {
     el.innerHTML = `
       <div class="stale-row">
         <span><strong>${sum.total} lost binding${sum.total === 1 ? "" : "s"}</strong> on ${nDev} device${nDev === 1 ? "" : "s"}:
-          ${nDev === 1 ? "it" : "they"} had ${sum.total === 1 ? "this binding" : "these bindings"} before and don't any more, so a button may no longer
-          control what it used to.${
+          ${nDev === 1 ? "it" : "they"} had ${sum.total === 1 ? "this binding" : "these bindings"} before and ${nDev === 1 ? "doesn't" : "don't"} any more,
+          and ${sum.total === 1 ? "it wasn't" : "they weren't"} removed in ZHA Bindings Manager, so a button may no longer control what it used to.${
             sum.queued
               ? ` ${sum.queued} ${sum.queued === 1 ? "is" : "are"} asleep: ${sum.queued === 1 ? "it'll" : "they'll"} be put back the next time you press one of ${
                   sum.queued === 1 ? "its" : "their"
@@ -5134,7 +5134,9 @@ export class ZhaBindingMapCard extends HTMLElement {
       // would leave a binding to a group that no longer exists.
       if (outcomes.every((o) => o === "confirmed" || o === "absent")) {
         try {
+          const leaving = this._groupMembers(f.groupId).map((m) => m.ieee);
           await this._api.removeGroups([f.groupId]);
+          for (const ieee of new Set(leaving)) await this._api.reportLeftGroup(ieee, f.groupId);
           await this._reloadDevices({ quiet: true });
           groupDeleted = !this._groups.some((g) => Number(g.group_id) === Number(f.groupId));
         } catch (err) {
@@ -9146,6 +9148,9 @@ export class ZhaBindingMapCard extends HTMLElement {
     this._setStatus("info", `Removing ${who} from ${name}…`, 0);
     try {
       await this._api.removeGroupMembers(gid, [{ ieee, endpoint }]);
+      // A light drops its own binding to a group it leaves: tell the
+      // lost-bindings watch that's on purpose (1.10.4).
+      await this._api.reportLeftGroup(ieee, gid);
       await this._groupsRefresh();
       this._setStatus("success", `Removed ${who} from ${name}. Remotes bound to ${name} no longer control it.`);
     } catch (err) {
@@ -9206,7 +9211,9 @@ export class ZhaBindingMapCard extends HTMLElement {
         }
       }
       this._setStatus("info", `Deleting ${name}…`, 0);
+      const leaving = this._groupMembers(gid).map((m) => m.ieee);
       await this._api.removeGroups([gid]);
+      for (const ieee of new Set(leaving)) await this._api.reportLeftGroup(ieee, gid);
       this._groupsDeleteOpen = null;
       this._groupsDeleteResult = null;
       await this._groupsRefresh();

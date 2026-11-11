@@ -21,7 +21,7 @@
  * zha_toolkit MUST be installed (via HACS) and working for bind/unbind/scan
  * to function. See README.md for details.
  *
- * Version: 1.10.3
+ * Version: 1.10.4
  */
 (() => {
   // src/capexplorer-constants.js
@@ -78,7 +78,7 @@
 
   // src/constants.js
   var ZTK_DOMAIN = "zha_toolkit";
-  var CARD_VERSION = "1.10.3";
+  var CARD_VERSION = "1.10.4";
   var CHANGELOG_URL = "https://github.com/hsolgaard/zha-bindings-manager/blob/main/CHANGELOG.md";
   var DEFAULT_BINDABLE_OUT_CLUSTERS = [5, 6, 8, 258, 768];
   var MEMBERSHIP_EDGE_COLOR = "#8e24aa";
@@ -803,6 +803,11 @@
         await this.hass.callWS({ type: "zha_bindings_manager/watch_removed", bindings: [clean] });
       } catch (e) {
       }
+    }
+    /** A device left a group (removed from it, or the group deleted): its own
+     *  bindings to that group go with it, on purpose (1.10.4). */
+    async reportLeftGroup(ieee, groupId) {
+      await this._reportRemoved({ sourceIeee: ieee, isGroup: true, groupId: Number(groupId) });
     }
     async fetchDevices() {
       return this.hass.callWS({ type: "zha/devices" });
@@ -5563,8 +5568,8 @@ a.health-chip-lost { text-decoration:none; cursor:pointer; }
       el.innerHTML = `
       <div class="stale-row">
         <span><strong>${sum.total} lost binding${sum.total === 1 ? "" : "s"}</strong> on ${nDev} device${nDev === 1 ? "" : "s"}:
-          ${nDev === 1 ? "it" : "they"} had ${sum.total === 1 ? "this binding" : "these bindings"} before and don't any more, so a button may no longer
-          control what it used to.${sum.queued ? ` ${sum.queued} ${sum.queued === 1 ? "is" : "are"} asleep: ${sum.queued === 1 ? "it'll" : "they'll"} be put back the next time you press one of ${sum.queued === 1 ? "its" : "their"} buttons.` : ""}</span>
+          ${nDev === 1 ? "it" : "they"} had ${sum.total === 1 ? "this binding" : "these bindings"} before and ${nDev === 1 ? "doesn't" : "don't"} any more,
+          and ${sum.total === 1 ? "it wasn't" : "they weren't"} removed in ZHA Bindings Manager, so a button may no longer control what it used to.${sum.queued ? ` ${sum.queued} ${sum.queued === 1 ? "is" : "are"} asleep: ${sum.queued === 1 ? "it'll" : "they'll"} be put back the next time you press one of ${sum.queued === 1 ? "its" : "their"} buttons.` : ""}</span>
         <button class="btn btn-small" id="btn-lost-show">${this._lostOpen ? "Hide" : "Show"}</button>
         <button class="btn btn-small" id="btn-lost-check" ${busy ? "disabled" : ""} title="Read every watched device's binding table now">${busy === "Check for lost bindings" ? "Checking\u2026" : "Check again"}</button>
         <button class="btn btn-small btn-primary" id="btn-lost-put-back-all" ${busy ? "disabled" : ""}>${busy === "Put all back" ? "Putting back\u2026" : "Put all back"}</button>
@@ -8845,7 +8850,9 @@ a.health-chip-lost { text-decoration:none; cursor:pointer; }
       if (f.undo.deleteGroup) {
         if (outcomes.every((o) => o === "confirmed" || o === "absent")) {
           try {
+            const leaving = this._groupMembers(f.groupId).map((m) => m.ieee);
             await this._api.removeGroups([f.groupId]);
+            for (const ieee of new Set(leaving)) await this._api.reportLeftGroup(ieee, f.groupId);
             await this._reloadDevices({ quiet: true });
             groupDeleted = !this._groups.some((g) => Number(g.group_id) === Number(f.groupId));
           } catch (err) {
@@ -12202,6 +12209,7 @@ Used by: ${h.uses.join("; ")}`;
       this._setStatus("info", `Removing ${who} from ${name}\u2026`, 0);
       try {
         await this._api.removeGroupMembers(gid, [{ ieee, endpoint }]);
+        await this._api.reportLeftGroup(ieee, gid);
         await this._groupsRefresh();
         this._setStatus("success", `Removed ${who} from ${name}. Remotes bound to ${name} no longer control it.`);
       } catch (err) {
@@ -12262,7 +12270,9 @@ Used by: ${h.uses.join("; ")}`;
           }
         }
         this._setStatus("info", `Deleting ${name}\u2026`, 0);
+        const leaving = this._groupMembers(gid).map((m) => m.ieee);
         await this._api.removeGroups([gid]);
+        for (const ieee of new Set(leaving)) await this._api.reportLeftGroup(ieee, gid);
         this._groupsDeleteOpen = null;
         this._groupsDeleteResult = null;
         await this._groupsRefresh();

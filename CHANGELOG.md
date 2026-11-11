@@ -3,6 +3,20 @@
 All notable changes to ZHA Bindings Manager are documented here.
 
 
+## [1.10.4]
+
+### Fixed
+
+- **Removing a light from a group no longer shows up as a lost binding.** A light keeps its own binding to a group it's
+  a member of (for example Basic or On/Off reporting) and drops it when it leaves the group. Removing a light on the
+  Groups tab, deleting a group, or deleting the group a failed setup created now tells the lost-bindings watch that
+  this is on purpose (needs the integration 1.10.4).
+
+### Changed
+
+- The lost-bindings notice now says that it's about bindings that disappeared without being removed in ZHA Bindings
+  Manager.
+
 ## [1.10.3]
 
 ### Added

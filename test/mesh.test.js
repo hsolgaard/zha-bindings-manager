@@ -158,7 +158,7 @@ describe("address conflicts (1.5.2)", () => {
   it("finds a device using the coordinator's address", () => {
     const snap = { [R1]: { ok: true, routes: [], neighbours: [nb(C, 0), nb(P, 0)] } };
     const mesh = buildMesh(snap, devices);
-    expect(mesh.conflicts).toEqual([{ nwk: 0, ieees: [C, P], coordinator: true }]);
+    expect(mesh.conflicts).toEqual([{ nwk: 0, ieees: [C, P], coordinator: true, seenBy: { [C]: [R1], [P]: [R1] }, notInZha: [] }]);
     const tips = meshSuggestions(mesh, { nameOf: (i) => (i === P ? "Plug" : i), routers: [C, R1, P, L] });
     expect(tips[0].kind).toBe("coordinator_address");
     expect(tips[0].level).toBe("error");
@@ -167,7 +167,23 @@ describe("address conflicts (1.5.2)", () => {
   it("finds two devices sharing an address, and ignores stale entries", () => {
     const snap = { [R1]: { ok: true, routes: [], neighbours: [nb(L, 0x5555), nb(P, 0x7777, 0)] } };
     const mesh = buildMesh(snap, devices);
-    expect(mesh.conflicts).toEqual([{ nwk: 0x5555, ieees: [P, L].sort(), coordinator: false }]);
+    expect(mesh.conflicts.map(({ nwk, ieees, coordinator }) => ({ nwk, ieees, coordinator }))).toEqual([{ nwk: 0x5555, ieees: [P, L].sort(), coordinator: false }]);
+  });
+  it("says which routers list a device ZHA doesn't know, and that one router alone may be stale (1.10.5)", () => {
+    const X = "00:15:8d:00:00:00:00:99";
+    const snap = { [R1]: { ok: true, routes: [], neighbours: [nb(X, 0)] } };
+    const mesh = buildMesh(snap, devices);
+    expect(mesh.conflicts[0].notInZha).toEqual([X]);
+    const names = { [R1]: "Hall plug" };
+    const tip = meshSuggestions(mesh, { nameOf: (i) => names[i] || i, routers: [C, R1, P, L] })[0];
+    expect(tip.text).toMatch(/00:15:8d:00:00:00:00:99 isn't a device in ZHA: it's in the neighbour list of Hall plug, so it's near that router\./);
+    expect(tip.text).toMatch(/Only one router lists it, so it may be an old entry/);
+    const two = buildMesh({ ...snap, [P]: { ok: true, routes: [], neighbours: [nb(X, 0)] } }, devices);
+    expect(meshSuggestions(two, { routers: [C, R1, P, L] })[0].text).not.toMatch(/Only one router/);
+  });
+  it("ignores placeholder addresses some routers use for unknown neighbours", () => {
+    const snap = { [R1]: { ok: true, routes: [], neighbours: [nb("00:00:00:00:00:00:00:00", 0), nb("ff:ff:ff:ff:ff:ff:ff:ff", 0)] } };
+    expect(buildMesh(snap, devices).conflicts).toEqual([]);
   });
   it("no conflicts on a healthy network", () => {
     const snap = { [R1]: { ok: true, routes: [], neighbours: [nb(C, 0), nb(P, 0x5555), nb(L, 0x7777)] } };

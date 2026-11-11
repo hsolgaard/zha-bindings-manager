@@ -3,6 +3,24 @@
 All notable changes to ZHA Bindings Manager are documented here.
 
 
+## [1.10.5]
+
+### Fixed
+
+- **A light's own binding to a group can now be removed from the Bindings tab.** A light that reports its state to a
+  group (for example to a group that has since been deleted) is bound on a cluster it receives, and zha-toolkit's group
+  unbind can't remove that kind of binding, so Unbind failed. It now removes the bindings on that endpoint and cluster
+  and puts back the others it had there (usually its binding to the coordinator), then checks both. Deleting a group on
+  the Groups tab does the same instead of leaving such a binding behind. Reported by Mayhem_SWE on the forum.
+
+### Changed
+
+- **Coordinator-address warning (Network tab, beta):** when the device using the coordinator's address isn't one ZHA
+  knows, the warning now says which router's neighbour list it's in, so you know where to look, and that an entry only
+  one router lists may be an old one. Placeholder addresses some routers use for unknown neighbours (all zeros or all
+  `ff`) no longer count. Asked by allard77 on the forum.
+- Links to the Zigbee Capabilities website now use its new address, https://zigbee.solgaard.uk.
+
 ## [1.10.4]
 
 ### Fixed

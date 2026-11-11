@@ -43,9 +43,15 @@ describe("groupUnbindPlan", () => {
     ]);
     expect(groupUnbindPlan(9, bindings, { clustersFor })).toEqual([]);
   });
-  it("skips a reporting binding that shares its endpoint and cluster with another binding", () => {
-    const more = [...bindings, { sourceIeee: L1, sourceEndpoint: 1, clusterId: 0, isGroup: false, targetIeee: C, targetEndpoint: 1 }];
-    expect(groupUnbindPlan(5, more, { clustersFor }).find((o) => o.sourceIeee === L1).method).toBe("skip");
+  it("removes a reporting binding that shares its endpoint and cluster, and puts the others back (1.10.5)", () => {
+    const more = [...bindings, { sourceIeee: L1, sourceEndpoint: 1, clusterId: 0, isGroup: false, targetIeee: C, targetEndpoint: 1 }, gb(L1, 1, 0, 7)];
+    expect(groupUnbindPlan(5, more, { clustersFor }).find((o) => o.sourceIeee === L1)).toEqual({
+      sourceIeee: L1,
+      endpoint: 1,
+      clusterId: 0,
+      method: "remove",
+      restore: [{ isGroup: false, ieee: C, endpoint: 1 }, { isGroup: true, groupId: 7 }],
+    });
   });
   it("falls back to unbind_group when the clusters aren't known", () => {
     expect(groupUnbindPlan(5, [gb(L1, 1, 0, 5)]).map((o) => o.method)).toEqual(["group"]);

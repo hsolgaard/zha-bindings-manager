@@ -21,7 +21,7 @@
  * zha_toolkit MUST be installed (via HACS) and working for bind/unbind/scan
  * to function. See README.md for details.
  *
- * Version: 1.10.4
+ * Version: 1.10.5
  */
 (() => {
   // src/capexplorer-constants.js
@@ -78,7 +78,7 @@
 
   // src/constants.js
   var ZTK_DOMAIN = "zha_toolkit";
-  var CARD_VERSION = "1.10.4";
+  var CARD_VERSION = "1.10.5";
   var CHANGELOG_URL = "https://github.com/hsolgaard/zha-bindings-manager/blob/main/CHANGELOG.md";
   var DEFAULT_BINDABLE_OUT_CLUSTERS = [5, 6, 8, 258, 768];
   var MEMBERSHIP_EDGE_COLOR = "#8e24aa";
@@ -4244,26 +4244,34 @@ a.health-chip-lost { text-decoration:none; cursor:pointer; }
     const fake = [...ids2].map((id) => ({ group_id: id, name: `Group ${groupIdHex(id)}`, members: [] }));
     return groupRows({ groups: fake, bindings, classify, coordinatorIeee }).map(({ groupId, controllers, others }) => ({ groupId, controllers, others })).sort((a, b) => a.groupId - b.groupId);
   }
+  function groupBindingOp(binding, bindings, clusters) {
+    const op = { sourceIeee: normIeee(binding.sourceIeee), endpoint: Number(binding.sourceEndpoint), clusterId: Number(binding.clusterId) };
+    const sends = (clusters || []).some((c) => c.type === "out" && Number(c.id) === op.clusterId && Number(c.endpoint_id) === op.endpoint);
+    if (sends || !clusters) return { ...op, method: "group" };
+    const gid = Number(binding.groupId);
+    const seen = /* @__PURE__ */ new Set();
+    const restore = [];
+    for (const x of bindings || []) {
+      if (!x || normIeee(x.sourceIeee) !== op.sourceIeee || Number(x.sourceEndpoint) !== op.endpoint || Number(x.clusterId) !== op.clusterId) continue;
+      if (x.isGroup && Number(x.groupId) === gid) continue;
+      const t = x.isGroup ? { isGroup: true, groupId: Number(x.groupId) } : { isGroup: false, ieee: normIeee(x.targetIeee), endpoint: x.targetEndpoint != null ? Number(x.targetEndpoint) : 1 };
+      const key = t.isGroup ? `g:${t.groupId}` : `d:${t.ieee}:${t.endpoint}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      restore.push(t);
+    }
+    return { ...op, method: "remove", restore };
+  }
   function groupUnbindPlan(groupId, bindings, { clustersFor = () => void 0 } = {}) {
     const seen = /* @__PURE__ */ new Set();
     const out = [];
-    const all = bindings || [];
-    for (const b of all) {
+    for (const b of bindings || []) {
       if (!b || !b.isGroup || Number(b.groupId) !== Number(groupId)) continue;
-      const op = { sourceIeee: normIeee(b.sourceIeee), endpoint: Number(b.sourceEndpoint), clusterId: Number(b.clusterId) };
-      const key = `${op.sourceIeee}:${op.endpoint}:${op.clusterId}`;
+      const key = `${normIeee(b.sourceIeee)}:${Number(b.sourceEndpoint)}:${Number(b.clusterId)}`;
       if (seen.has(key)) continue;
       seen.add(key);
-      const clusters = clustersFor(op.sourceIeee);
-      const sends = (clusters || []).some((c) => c.type === "out" && Number(c.id) === op.clusterId && Number(c.endpoint_id) === op.endpoint);
-      if (sends || !clusters) {
-        op.method = "group";
-      } else {
-        const others = all.some(
-          (x) => x && normIeee(x.sourceIeee) === op.sourceIeee && Number(x.sourceEndpoint) === op.endpoint && Number(x.clusterId) === op.clusterId && !(x.isGroup && Number(x.groupId) === Number(groupId))
-        );
-        op.method = others ? "skip" : "remove";
-      }
+      const op = groupBindingOp(b, bindings, clustersFor(normIeee(b.sourceIeee)));
+      if (op.method === "remove" && !op.restore.length) delete op.restore;
       out.push(op);
     }
     return out;
@@ -4346,32 +4354,40 @@ a.health-chip-lost { text-decoration:none; cursor:pointer; }
     const conflicts = addressConflicts(snap, devices);
     return { snapshot: snap, nwkToIeee, typeOf, links, parentOf, children, staleEntries, conflicts };
   }
+  var PLACEHOLDER_IEEES = /* @__PURE__ */ new Set(["00:00:00:00:00:00:00:00", "ff:ff:ff:ff:ff:ff:ff:ff"]);
   function addressConflicts(snapshot, devices = []) {
     const claims = /* @__PURE__ */ new Map();
-    const claim = (nwk, ieee) => {
-      if (nwk == null || !ieee) return;
-      if (!claims.has(nwk)) claims.set(nwk, /* @__PURE__ */ new Set());
-      claims.get(nwk).add(ieee);
+    const claim = (nwk, ieee, by) => {
+      if (nwk == null || !ieee || PLACEHOLDER_IEEES.has(ieee)) return;
+      if (!claims.has(nwk)) claims.set(nwk, /* @__PURE__ */ new Map());
+      const m = claims.get(nwk);
+      if (!m.has(ieee)) m.set(ieee, /* @__PURE__ */ new Set());
+      m.get(ieee).add(by);
     };
     let coord = null;
+    const known = /* @__PURE__ */ new Set();
     for (const d of devices) {
       const ieee = normIeee(d.ieee);
+      known.add(ieee);
       if (d.device_type === "Coordinator") coord = ieee;
-      claim(nwkNumber(d.nwk), ieee);
+      claim(nwkNumber(d.nwk), ieee, "zha");
     }
     for (const [rawReporter, entry] of Object.entries(snapshot || {})) {
       const reporter = normIeee(rawReporter);
       for (const n of entry && entry.neighbours || []) {
         const ieee = normIeee(n.ieee);
         if (!ieee || ieee === reporter || !(typeof n.lqi === "number" && n.lqi > 0)) continue;
-        claim(nwkNumber(n.nwk), ieee);
+        claim(nwkNumber(n.nwk), ieee, reporter);
       }
     }
     const out = [];
-    for (const [nwk, set] of claims.entries()) {
-      if (set.size < 2) continue;
-      const ieees = [...set].sort((a, b) => a === coord ? -1 : b === coord ? 1 : a.localeCompare(b));
-      out.push({ nwk, ieees, coordinator: nwk === 0 });
+    for (const [nwk, m] of claims.entries()) {
+      if (m.size < 2) continue;
+      const ieees = [...m.keys()].sort((a, b) => a === coord ? -1 : b === coord ? 1 : a.localeCompare(b));
+      const seenBy = {};
+      for (const i of ieees) seenBy[i] = [...m.get(i)].filter((x) => x !== "zha").sort();
+      const notInZha = ieees.filter((i) => !known.has(i));
+      out.push({ nwk, ieees, coordinator: nwk === 0, seenBy, notInZha });
     }
     return out.sort((a, b) => a.nwk - b.nwk);
   }
@@ -4491,6 +4507,21 @@ a.health-chip-lost { text-decoration:none; cursor:pointer; }
   function weakestLinks(mesh, limit = 10) {
     return [...mesh.links.values()].filter((l) => typeof l.lqi === "number").sort((x, y) => x.lqi - y.lqi).slice(0, limit);
   }
+  function conflictSourceText(c, suspects, nameOf = (i) => i) {
+    const parts = [];
+    const seenBy = c.seenBy || {};
+    const unknown = (suspects || []).filter((i) => (c.notInZha || []).includes(i));
+    for (const i of unknown) {
+      const by = seenBy[i] || [];
+      parts.push(
+        ` ${nameOf(i)} isn't a device in ZHA: it's in the neighbour list of ${by.map(nameOf).join(", ") || "a router"}, so it's near ${by.length === 1 ? "that router" : "those routers"}. The first six digits of its address identify the manufacturer.`
+      );
+    }
+    if (unknown.length && unknown.every((i) => (seenBy[i] || []).length <= 1)) {
+      parts.push(" Only one router lists it, so it may be an old entry: scan again to confirm before you unplug anything.");
+    }
+    return parts.join("");
+  }
   function meshSuggestions(mesh, { thr = LQI_RECOMMENDED, areaOf = () => "", nameOf = (i) => i, routers = [] } = {}) {
     const out = [];
     for (const c of mesh.conflicts || []) {
@@ -4500,7 +4531,8 @@ a.health-chip-lost { text-decoration:none; cursor:pointer; }
         kind: c.coordinator ? "coordinator_address" : "address_conflict",
         level: "error",
         ieees: c.ieees,
-        text: c.coordinator ? `${others.map(nameOf).join(", ")} ${others.length === 1 ? "is" : "are"} using the coordinator's network address (${hex2}). A device doing this can flood or confuse the whole network: lights responding late or not at all, timeouts. Unplug it (or remove its battery), check whether the network recovers, then reset and pair it again.` : `${c.ieees.map(nameOf).join(" and ")} are using the same network address (${hex2}). Messages for one may go to the other. Scan again to confirm; if it stays, reset and pair one of them again.`
+        seenBy: c.seenBy,
+        text: (c.coordinator ? `${others.map(nameOf).join(", ")} ${others.length === 1 ? "is" : "are"} using the coordinator's network address (${hex2}). A device doing this can flood or confuse the whole network: lights responding late or not at all, timeouts. Unplug it (or remove its battery), check whether the network recovers, then reset and pair it again.` : `${c.ieees.map(nameOf).join(" and ")} are using the same network address (${hex2}). Messages for one may go to the other. Scan again to confirm; if it stays, reset and pair one of them again.`) + conflictSourceText(c, others, nameOf)
       });
     }
     const routerSet = new Set(routers.map(normIeee));
@@ -4677,7 +4709,7 @@ a.health-chip-lost { text-decoration:none; cursor:pointer; }
   ];
   var GENERIC_TUYA_LABEL = "Generic Tuya";
   var TUYA_MANUFACTURER_PATTERN = /^_T[A-Z0-9]+_/i;
-  var CAPEXP_CLUSTERS_URL = "https://hsolgaard.github.io/zigbee-capabilities/clusters.html";
+  var CAPEXP_CLUSTERS_URL = "https://zigbee.solgaard.uk/clusters.html";
   function isGenericTuyaManufacturer(m) {
     return TUYA_MANUFACTURER_PATTERN.test(String(m || ""));
   }
@@ -10184,7 +10216,11 @@ Used by: ${h.uses.join("; ")}`;
       if (!c) return html;
       const hex2 = `0x${c.nwk.toString(16).padStart(4, "0")}`;
       const others = c.ieees.filter((i) => i !== id).map((i) => this._ieeeLabel(i, { plain: true }));
-      const text = c.coordinator && d.device_type !== "Coordinator" ? `This device is using the coordinator's network address (${hex2}). That can flood or confuse the whole network. Unplug it, check whether the network recovers, then reset and pair it again.` : c.coordinator ? `Another device (${others.join(", ")}) is using this coordinator's network address (${hex2}).` : `Shares its network address (${hex2}) with ${others.join(", ")}.`;
+      const text = c.coordinator && d.device_type !== "Coordinator" ? `This device is using the coordinator's network address (${hex2}). That can flood or confuse the whole network. Unplug it, check whether the network recovers, then reset and pair it again.` : c.coordinator ? `Another device (${others.join(", ")}) is using this coordinator's network address (${hex2}).${conflictSourceText(
+        c,
+        c.ieees.filter((i) => i !== id),
+        (i) => this._ieeeLabel(i, { plain: true })
+      )}` : `Shares its network address (${hex2}) with ${others.join(", ")}.`;
       return html.replace('<div class="drawer-section-title">Network</div>', `<div class="drawer-section-title">Network</div><p class="mesh-tip-error">${escapeHtml(text)}</p>`);
     }
     _drawerMeshInnerHtml(d) {
@@ -11283,9 +11319,18 @@ Used by: ${h.uses.join("; ")}`;
         const bindTarget = binding.isGroup ? { isGroup: true, groupId: binding.groupId } : { isGroup: false, ieee: binding.targetIeee, endpoint: binding.targetEndpoint };
         const before = this._bindingPresent(binding.sourceIeee, binding.sourceEndpoint, binding.clusterId, bindTarget);
         let unbindError = null;
+        let reportingOp = null;
         const rescanTargets = binding.isGroup ? [binding.sourceIeee] : this._impactedIeees(binding.sourceIeee, binding.targetIeee);
         try {
           if (binding.isGroup) {
+            const clusters = await this._ensureClusters(normIeee(binding.sourceIeee)).catch(() => void 0);
+            const op = groupBindingOp(binding, this._rawBindings(), clusters);
+            if (op.method === "remove") reportingOp = op;
+          }
+          if (reportingOp) {
+            const errs = await this._removeReportingBinding(reportingOp);
+            if (errs.length) unbindError = errs.join("; ");
+          } else if (binding.isGroup) {
             await this._api.unbindGroup(binding.sourceIeee, binding.groupId, [binding.clusterId], {
               endpoint: binding.sourceEndpoint
             });
@@ -11312,6 +11357,12 @@ Used by: ${h.uses.join("; ")}`;
             before
           );
           let message = res.message;
+          let level = res.level;
+          const notBack = reportingOp && scan && scan.read && scan.read.has(normIeee(binding.sourceIeee)) ? this._restoresMissing(reportingOp) : [];
+          if (reportingOp && reportingOp.restore.length) {
+            message += notBack.length ? ` Its other bindings on this cluster were removed with it, and ${notBack.map((t) => this._describeRestore(t)).join(" and ")} ${notBack.length === 1 ? "isn't" : "aren't"} back yet: scan again to check, or add ${notBack.length === 1 ? "it" : "them"} again.` : ` Its other binding${reportingOp.restore.length === 1 ? "" : "s"} on this cluster ${reportingOp.restore.length === 1 ? "was" : "were"} removed with it and put back.`;
+            if (notBack.length && level === "success") level = "warning";
+          }
           if (res.level !== "success") {
             const why = explainUnbindFailure({
               errors: unbindError ? [unbindError] : [],
@@ -11319,7 +11370,7 @@ Used by: ${h.uses.join("; ")}`;
             });
             if (why) message = `${message} ${why}`;
           }
-          this._setStatus(res.level, message, res.level === "success" ? void 0 : 0, res.action);
+          this._setStatus(level, message, level === "success" ? void 0 : 0, res.action);
         }
       });
     }
@@ -12035,6 +12086,36 @@ Used by: ${h.uses.join("; ")}`;
       <div class="dialog-actions"><button class="btn btn-primary btn-small" id="groups-add-go" disabled>Add</button><button class="btn btn-small" id="groups-add-cancel">Cancel</button></div>
     </div>`;
     }
+    /** A light's own binding to a group (it reports to the group on a cluster
+     *  it receives): zha-toolkit's unbind_group can't remove it, so remove
+     *  every binding on that endpoint and cluster and bind the others again
+     *  (1.10.5). Returns the error texts. */
+    async _removeReportingBinding(op) {
+      const errors = [];
+      try {
+        await this._api.removeBindingsOnCluster(op.sourceIeee, op.endpoint, op.clusterId);
+      } catch (err) {
+        errors.push(toolkitErrorText(err));
+      }
+      for (const t of op.restore || []) {
+        try {
+          if (t.isGroup) await this._api.bindGroup(op.sourceIeee, t.groupId, [op.clusterId], { endpoint: op.endpoint });
+          else await this._api.bindIeee(op.sourceIeee, t.ieee, [op.clusterId], { endpoint: op.endpoint, dstEndpoint: t.endpoint });
+        } catch (err) {
+          errors.push(`putting back ${this._describeRestore(t)}: ${toolkitErrorText(err)}`);
+        }
+      }
+      return errors;
+    }
+    _describeRestore(t) {
+      return t.isGroup ? `the binding to ${this._groupName(t.groupId)}` : `the binding to ${this._ieeeLabel(t.ieee, { plain: true })}`;
+    }
+    /** Bindings an op put back that the last read doesn't show. */
+    _restoresMissing(op) {
+      return (op.restore || []).filter(
+        (t) => !this._bindingPresent(op.sourceIeee, op.endpoint, op.clusterId, t.isGroup ? t : { isGroup: false, ieee: t.ieee, endpoint: t.endpoint })
+      );
+    }
     _groupsDeletePlan(gid) {
       return groupUnbindPlan(gid, this._rawBindings(), { clustersFor: (ieee) => this._clusterCache.get(ieee) });
     }
@@ -12239,7 +12320,7 @@ Used by: ${h.uses.join("; ")}`;
           for (const op of plan) {
             if (op.method === "skip") continue;
             try {
-              if (op.method === "remove") await this._api.removeBindingsOnCluster(op.sourceIeee, op.endpoint, op.clusterId);
+              if (op.method === "remove") errors.get(op.sourceIeee).push(...await this._removeReportingBinding(op));
               else await this._api.unbindGroup(op.sourceIeee, gid, [op.clusterId], { endpoint: op.endpoint });
             } catch (err) {
               errors.get(op.sourceIeee).push(toolkitErrorText(err).replace(/^unbind_group failed:\s*/i, ""));
@@ -12247,6 +12328,8 @@ Used by: ${h.uses.join("; ")}`;
           }
           const scan = await this._scanBindings(sources, { tries: this._retryCount });
           const read = scan && scan.read || /* @__PURE__ */ new Set();
+          const notBack2 = plan.flatMap((op) => read.has(op.sourceIeee) ? this._restoresMissing(op).map((t) => `${this._ieeeLabel(op.sourceIeee, { plain: true })}: ${this._describeRestore(t)}`) : []);
+          this._groupsNotBack = notBack2;
           const left = groupUnbindPlan(gid, this._rawBindings());
           if (left.length) {
             const leftSources = [...new Set(left.map((p) => p.sourceIeee))];
@@ -12277,7 +12360,15 @@ Used by: ${h.uses.join("; ")}`;
         this._groupsDeleteResult = null;
         await this._groupsRefresh();
         const gone = !this._groups.some((x) => Number(x.group_id) === gid);
-        this._setStatus(gone ? "success" : "error", gone ? `Deleted ${name}.` : `ZHA still lists ${name} after deleting it. Try again.`, gone ? void 0 : 0);
+        const notBack = this._groupsNotBack || [];
+        this._groupsNotBack = null;
+        if (gone && notBack.length)
+          this._setStatus(
+            "warning",
+            `Deleted ${name}. Removing a light's own binding to it also removed its other bindings on that cluster, and these aren't back yet: ${notBack.join("; ")}. Scan bindings to check, or add them again.`,
+            0
+          );
+        else this._setStatus(gone ? "success" : "error", gone ? `Deleted ${name}.` : `ZHA still lists ${name} after deleting it. Try again.`, gone ? void 0 : 0);
       } catch (err) {
         this._setStatus("error", `Couldn't delete ${name}: ${toolkitErrorText(err)}`, 0);
       } finally {
@@ -13066,7 +13157,7 @@ Used by: ${h.uses.join("; ")}`;
       const params = new URLSearchParams();
       if (manufacturer) params.set("manufacturer", manufacturer);
       if (model) params.set("model", model);
-      return `https://hsolgaard.github.io/zigbee-capabilities/?${params.toString()}`;
+      return `https://zigbee.solgaard.uk/?${params.toString()}`;
     }
     // Plain-language pill for the device-overview paragraph — mirrors
     // docs/app.js's overviewControlBadgeHtml in the zigbee-capabilities

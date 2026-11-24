@@ -104,7 +104,9 @@ import { bindOutcome, unbindOutcome, OUTCOME_LEVEL, pendingKey, reconcilePending
 import { STYLE } from "./styles.js";
 import { explainUnbindFailure, toolkitErrorText } from "./unbind-errors.js";
 import { groupRows, groupUnbindPlan, groupBindingOp, removeAndRestoreOp, groupIdHex, groupDeleteReasons, deviceOnlyGroups } from "./groups.js";
-import { LQI_RECOMMENDED, buildMesh, routePath, pathVerdict, rateLqi, groupCheck, weakestLinks, meshSuggestions, conflictSourceText, isRouterLike, visibleRouterLinks } from "./mesh.js";
+import { LQI_RECOMMENDED, buildMesh, routePath, pathVerdict, rateLqi, groupCheck, weakestLinks, meshSuggestions, conflictSourceText, isRouterLike, visibleRouterLinks, routeToCoordinator, routersOnPath, oldestHopRead } from "./mesh.js";
+import { allFloorsGeometry, allFloorsPos } from "./mesh-floors.js";
+import { isSvgUrl, svgIntrinsicSize } from "./svg-size.js";
 import {
   DIRECTION_ALL,
   DIRECTION_OUTBOUND,
@@ -5954,6 +5956,22 @@ export class ZhaBindingMapCard extends HTMLElement {
       this._drawerRouteOpen = !this._drawerRouteOpen;
       this._renderDrawer();
     });
+    on("#drawer-coordroute", () => {
+      this._drawerCoordOpen = this._drawerCoordOpen === normIeee(d.ieee) ? null : normIeee(d.ieee);
+      this._renderDrawer();
+    });
+    this._qa("#drawer-body [data-coordroute-read]").forEach((b) => b.addEventListener("click", () => this._meshReadPath(b.dataset.coordrouteRead.split(","))));
+    this._qa("#drawer-body [data-coordroute-show]").forEach((b) =>
+      b.addEventListener("click", () => {
+        this._meshCoordRoute = b.dataset.coordrouteShow;
+        // Show it across floors when the house has more than one plan.
+        const all = this._meshLayout().options.find((o) => o.value === "all");
+        if (all && this._meshLayout().mode === "plan") this._meshLayoutChoice = "all";
+        this._closeDrawer();
+        if (this._view !== "mesh") this._switchView("mesh");
+        else this._renderMesh();
+      })
+    );
     this._qa("#drawer-body [data-route-map]").forEach((b) =>
       b.addEventListener("click", () => {
         this._mapRoute = { sourceIeee: d.ieee, targetIeee: b.dataset.routeMap };
@@ -6065,8 +6083,11 @@ export class ZhaBindingMapCard extends HTMLElement {
   }
 
   _meshAgeText() {
-    const times = Object.values(this._meshSnapshot || {})
-      .map((e) => (e && typeof e.at === "string" ? Date.parse(e.at) : NaN))
+    // 1.11.0: only routers that are still in the network count.
+    const current = new Set(this._meshRouters().map((d) => normIeee(d.ieee)));
+    const times = Object.entries(this._meshSnapshot || {})
+      .filter(([i]) => !current.size || current.has(normIeee(i)))
+      .map(([, e]) => (e && typeof e.at === "string" ? Date.parse(e.at) : NaN))
       .filter((t) => !Number.isNaN(t));
     if (!times.length) return null;
     return relTime(new Date(Math.min(...times)).toISOString());
@@ -6099,18 +6120,56 @@ export class ZhaBindingMapCard extends HTMLElement {
       const n = routers.filter((i) => plan.positions && plan.positions[i]).length;
       if (plan.imageUrl && n >= 2) options.push({ value: "plan:", label: "Floor plan", floor: null });
     }
+    // 1.11.0: every floor's plan in one picture (integration issue #49).
+    const floorOptions = options.filter((o) => o.floor);
+    if (floorOptions.length >= 2) options.push({ value: "all", label: "All floors", floor: null, floorIds: floorOptions.map((o) => o.floor) });
     options.push({ value: "map", label: "Map layout", floor: null });
     const chosen = options.find((o) => o.value === this._meshLayoutChoice) || options[0];
-    return { mode: chosen.value === "map" ? "map" : "plan", floor: chosen.floor, value: chosen.value, options, floors };
+    const mode = chosen.value === "map" ? "map" : chosen.value === "all" ? "all" : "plan";
+    return { mode, floor: chosen.floor, value: chosen.value, options, floors, floorIds: chosen.floorIds || [] };
+  }
+
+  /** 1.11.0: panels of the All floors picture, or null while images load. */
+  _meshAllGeometry(layout) {
+    const sized = [];
+    let loading = false;
+    for (const fid of layout.floorIds) {
+      const plan = this._fpPlanFor(fid);
+      const size = this._imgSize(plan.imageUrl, () => this._view === "mesh" && this._renderMesh());
+      if (!size) {
+        if (this._imgSizes && this._imgSizes[plan.imageUrl] === "loading") loading = true;
+        continue;
+      }
+      sized.push({ id: fid, name: this._floorName(fid), w: size.w, h: size.h, url: plan.imageUrl });
+    }
+    if (loading) return null;
+    const host = this._q("#view-mesh");
+    const stacked = !!(host && host.clientWidth && host.clientWidth < 700);
+    const g = allFloorsGeometry(sized, { stacked });
+    for (const f of sized) if (g.panels[f.id]) g.panels[f.id].url = f.url;
+    g.stacked = stacked;
+    return g;
   }
 
   _meshPlanSize(layout) {
+    if (layout.mode === "all") {
+      const g = this._meshAllGeometry(layout);
+      return g ? { w: g.w, h: g.h } : null;
+    }
     const plan = this._fpPlanFor(layout.floor);
     if (plan.imageUrl === this._fpImageUrl && this._fpImageSize) return this._fpImageSize;
     return this._imgSize(plan.imageUrl, () => this._view === "mesh" && this._renderMesh());
   }
 
   _meshPos(ieee, layout) {
+    if (layout.mode === "all") {
+      const g = this._meshAllGeometryCache;
+      if (!g) return null;
+      const fid = this._deviceFloor(ieee);
+      if (!fid || !g.panels[fid]) return null;
+      const plan = this._fpPlanFor(fid);
+      return allFloorsPos(g, fid, plan.positions && plan.positions[normIeee(ieee)]);
+    }
     if (layout.mode === "plan") {
       const size = this._meshPlanSize(layout);
       if (!size) return null;
@@ -6300,7 +6359,10 @@ export class ZhaBindingMapCard extends HTMLElement {
     const mesh = this._meshModel();
     const thr = this._lqiThr;
     const routers = this._meshRouters();
-    const read = Object.keys(this._meshSnapshot).length;
+    // 1.11.0: count current routers only; the stored snapshot can still hold
+    // devices that were removed or are no longer routers ("32 of 30").
+    const routerSet = new Set(routers.map((d) => normIeee(d.ieee)));
+    const read = Object.keys(this._meshSnapshot).filter((i) => routerSet.has(normIeee(i))).length;
     const age = this._meshAgeText();
     const scanning = !!this._meshScanning;
     const intro = `<div class="mesh-intro">
@@ -6345,7 +6407,7 @@ export class ZhaBindingMapCard extends HTMLElement {
       return d && d.area_id ? this._areaName(d.area_id) : "";
     };
     const tips = meshSuggestions(mesh, { thr, nameOf, areaOf, routers: routers.map((d) => normIeee(d.ieee)) });
-    const failed = Object.entries(this._meshSnapshot).filter(([, e]) => e && !e.ok);
+    const failed = Object.entries(this._meshSnapshot).filter(([i, e]) => e && !e.ok && routerSet.has(normIeee(i)));
     el.innerHTML = `${intro}
       <div id="activity-section" class="activity-section"></div>
       <div class="mesh-layout">
@@ -6359,6 +6421,7 @@ export class ZhaBindingMapCard extends HTMLElement {
             }</span></div>
         </div>
         <div class="mesh-side">
+          ${this._meshCoordRouteSectionHtml()}
           ${this._meshShowMode() === "routes" ? this._meshRoutesListHtml(mesh, nameOf) : ""}
           <div class="drawer-section-title">Suggestions</div>
           ${
@@ -6393,10 +6456,20 @@ export class ZhaBindingMapCard extends HTMLElement {
   _meshSvg(mesh) {
     const layout = this._meshLayout();
     const { mode } = layout;
-    const size = mode === "plan" ? this._meshPlanSize(layout) : { w: 1200, h: 840 };
-    if (!size) return `<p class="muted">Loading the floor plan image…</p>`;
+    const allGeom = mode === "all" ? this._meshAllGeometry(layout) : null;
+    this._meshAllGeometryCache = allGeom;
+    const size = mode === "plan" ? this._meshPlanSize(layout) : mode === "all" ? allGeom && { w: allGeom.w, h: allGeom.h } : { w: 1200, h: 840 };
+    if (!size) return `<p class="muted">Loading the floor plan image${mode === "all" ? "s" : ""}…</p>`;
     const W = size.w;
     const H = size.h;
+    // 1.11.0: sizes are in screen pixels, whatever the plan's own size or
+    // shape: k = plan units per screen pixel when the whole plan is shown
+    // (measured after drawing; estimated until then). Before, sizes were a
+    // fixed share of the plan's width, so tall or small plans got tiny labels.
+    const vk = `${layout.value}|${W}x${H}`;
+    this._meshUnits = this._meshUnits || {};
+    const k = this._meshUnits[vk] || this._meshEstimateUnits(W, H);
+    this._meshUnitsUsed = k;
     const thr = this._lqiThr;
     const routerIeees = this._meshRouters().map((d) => normIeee(d.ieee));
     const pos = (i) => this._meshPos(i, layout);
@@ -6422,7 +6495,8 @@ export class ZhaBindingMapCard extends HTMLElement {
       lq.sort((a, b) => b - a);
       // Coverage = the router's second-best link (best alone can hide an isolated corner).
       const cov = lq.length ? lq[Math.min(1, lq.length - 1)] : null;
-      if (cov != null) heat.push(`<circle cx="${p.x}" cy="${p.y}" r="${W * 0.11}" fill="url(#mesh-heat-${rateLqi(cov, thr)})"/>`);
+      const heatR = allGeom ? (allGeom.stacked ? allGeom.w : allGeom.h) * 0.11 : W * 0.11;
+      if (cov != null) heat.push(`<circle cx="${p.x}" cy="${p.y}" r="${heatR}" fill="url(#mesh-heat-${rateLqi(cov, thr)})"/>`);
     }
     const showMode = this._meshShowMode();
     const drawn = showMode === "all" ? [...mesh.links.values()] : showMode === "strongest" ? visibleRouterLinks(mesh, thr, 3) : [];
@@ -6439,11 +6513,10 @@ export class ZhaBindingMapCard extends HTMLElement {
       const hi = this._meshHighlight === `${l.a}|${l.b}`;
       // 1.5.0b5: a wide invisible line on top makes thin links easy to tap.
       lines.push(
-        `<g class="mesh-link" data-link="${escapeHtml(l.a)}|${escapeHtml(l.b)}"><line x1="${pa.x}" y1="${pa.y}" x2="${pb.x}" y2="${pb.y}" stroke="${this._lqiColor(level)}" style="--sw:${(hi ? 3 : 1) * (1 + (l.lqi / 255) * 3) * (W / 1200)}" stroke-opacity="${hi ? 1 : level === "weak" ? 0.9 : 0.55}" ${level === "weak" ? `stroke-dasharray="${6 * (W / 1200)} ${4 * (W / 1200)}"` : ""}/><line class="mesh-link-hit" x1="${pa.x}" y1="${pa.y}" x2="${pb.x}" y2="${pb.y}" style="--sw:${16 * (W / 1200)}"><title>${escapeHtml(this._meshLinkTitle(l, nameOf))}</title></line></g>`
+        `<g class="mesh-link" data-link="${escapeHtml(l.a)}|${escapeHtml(l.b)}"><line x1="${pa.x}" y1="${pa.y}" x2="${pb.x}" y2="${pb.y}" stroke="${this._lqiColor(level)}" style="--sw:${(hi ? 3 : 1) * (1 + (l.lqi / 255) * 3) * k}" stroke-opacity="${hi ? 1 : level === "weak" ? 0.9 : 0.55}" ${level === "weak" ? `stroke-dasharray="${6 * k} ${4 * k}"` : ""}/><line class="mesh-link-hit" x1="${pa.x}" y1="${pa.y}" x2="${pb.x}" y2="${pb.y}" style="--sw:${16 * k}"><title>${escapeHtml(this._meshLinkTitle(l, nameOf))}</title></line></g>`
       );
     }
-    const r0 = 11 * (W / 1200);
-    const k = W / 1200;
+    const r0 = 11 * k;
     // 1.5.0b6: "Routes my bindings use" draws each binding's predicted hops
     // (deduplicated), with an arrow in the direction of travel.
     if (showMode === "routes") {
@@ -6464,6 +6537,23 @@ export class ZhaBindingMapCard extends HTMLElement {
         const title = `${nameOf(h.from)} → ${nameOf(h.to)}: ${level}${typeof h.lqi === "number" ? ` ${h.lqi}` : ""}\nUsed by: ${h.uses.join("; ")}`;
         lines.push(
           `<g class="mesh-link mesh-route" data-link="${escapeHtml(linkKey)}"><line x1="${pa.x}" y1="${pa.y}" x2="${pb.x}" y2="${pb.y}" stroke="${this._lqiColor(level)}" style="--sw:${(2 + Math.min(3, h.uses.length)) * k}" stroke-opacity="0.9" marker-end="url(#mesh-arrow-${level})" ${level === "weak" ? `stroke-dasharray="${6 * k} ${4 * k}"` : ""}/><line class="mesh-link-hit" x1="${pa.x}" y1="${pa.y}" x2="${pb.x}" y2="${pb.y}" style="--sw:${16 * k}"><title>${escapeHtml(title)}</title></line></g>`
+        );
+      }
+    }
+    // 1.11.0: the route a chosen device's messages take to the coordinator.
+    const coordRoute = this._meshCoordRouteModel(mesh);
+    const onRoute = new Set();
+    if (coordRoute) {
+      for (const h of coordRoute.path.hops) {
+        onRoute.add(h.from);
+        onRoute.add(h.to);
+        const pa = pos(h.from);
+        const pb = pos(h.to);
+        if (!pa || !pb) continue;
+        const level = rateLqi(h.lqi, thr);
+        const title = `${nameOf(h.from)} → ${nameOf(h.to)}: ${level}${typeof h.lqi === "number" ? ` ${h.lqi}` : ""}${h.readAt ? `\nFrom ${nameOf(this._meshSnapshot[h.from] ? h.from : h.to)}'s tables, read ${relTime(h.readAt)}` : ""}`;
+        lines.push(
+          `<g class="mesh-link mesh-coordroute"><line x1="${pa.x}" y1="${pa.y}" x2="${pb.x}" y2="${pb.y}" stroke="${this._lqiColor(level)}" style="--sw:${5 * k}" stroke-opacity="0.95" marker-end="url(#mesh-arrow-${level})" ${level === "weak" ? `stroke-dasharray="${8 * k} ${5 * k}"` : ""}/><line class="mesh-link-hit" x1="${pa.x}" y1="${pa.y}" x2="${pb.x}" y2="${pb.y}" style="--sw:${16 * k}"><title>${escapeHtml(title)}</title></line></g>`
         );
       }
     }
@@ -6490,9 +6580,9 @@ export class ZhaBindingMapCard extends HTMLElement {
         const tip = parent
           ? `${nameOf(i)} (battery): parent ${nameOf(parent.parent)}, ${level}${typeof parent.lqi === "number" ? ` ${parent.lqi}` : ""}`
           : `${nameOf(i)} (battery): parent unknown. No router listed it as a child in the last scan; it may have been asleep or moved.`;
-        batteryNodes.push(`<g class="mesh-node mesh-battery ${parent ? "" : "orphan"}" data-ieee="${escapeHtml(i)}" transform="translate(${p.x},${p.y})"><g class="mesh-zs">
+        batteryNodes.push(`<g class="mesh-node mesh-battery ${parent ? "" : "orphan"}${onRoute.has(i) ? " on-route" : ""}" data-ieee="${escapeHtml(i)}" transform="translate(${p.x},${p.y})"><g class="mesh-zs">${onRoute.has(i) ? `<circle r="${r0 * 1.2}" class="route-ring"/>` : ""}
           <circle r="${r0 * 0.5}" style="stroke:${this._lqiColor(level)}"/><title>${escapeHtml(tip)}</title>
-          <text class="mesh-label mesh-battery-label" y="${r0 * 0.5 + 10 * k}" font-size="${9 * k}" text-anchor="middle">${escapeHtml(nameOf(i))}</text>
+          <text class="mesh-label mesh-battery-label" y="${r0 * 0.5 + 11 * k}" font-size="${10 * k}" text-anchor="middle">${escapeHtml(nameOf(i))}</text>
         </g></g>`);
       }
     }
@@ -6531,15 +6621,16 @@ export class ZhaBindingMapCard extends HTMLElement {
       const viaCeiling = mode === "plan" && layout.floor && !sameFloorOk && up.length + down.length > 0;
       const floorBadge =
         up.length || down.length
-          ? `<text class="mesh-floor-badge" x="${-r0 * 1.15}" y="${-r0 * 0.6}" text-anchor="end" font-size="${15 * (W / 1200)}">${up.length ? `↑${up.length}` : ""}${down.length ? `↓${down.length}` : ""}<title>${escapeHtml(
+          ? `<text class="mesh-floor-badge" x="${-r0 * 1.15}" y="${-r0 * 0.6}" text-anchor="end" font-size="${15 * k}">${up.length ? `↑${up.length}` : ""}${down.length ? `↓${down.length}` : ""}<title>${escapeHtml(
               [...up, ...down].join("\n")
             )}</title></text>`
           : "";
-      nodes.push(`<g class="mesh-node" data-ieee="${escapeHtml(i)}" transform="translate(${p.x},${p.y})"><g class="mesh-zs">
+      nodes.push(`<g class="mesh-node${onRoute.has(i) ? " on-route" : ""}" data-ieee="${escapeHtml(i)}" transform="translate(${p.x},${p.y})"><g class="mesh-zs">
+        ${onRoute.has(i) ? `<circle r="${r0 * 1.7}" class="route-ring"/>` : ""}
         ${viaCeiling ? `<circle r="${r0 * 1.6}" class="via-ceiling"><title>${escapeHtml(`${nameOf(i)}: no usable link on this floor, only to other floors`)}</title></circle>` : ""}
         ${isCoord ? `<rect x="${-r0}" y="${-r0}" width="${2 * r0}" height="${2 * r0}" rx="${r0 / 3}"/>` : `<circle r="${r0}" class="${unread ? "unread" : ""}"/>`}
         ${floorBadge}
-        ${kids && this._meshShowBattery === false ? `<text class="mesh-kids" x="${r0 * 1.1}" y="${-r0 * 0.9}" font-size="${10 * (W / 1200)}">+${kids}</text>` : ""}
+        ${kids && this._meshShowBattery === false ? `<text class="mesh-kids" x="${r0 * 1.1}" y="${-r0 * 0.9}" font-size="${10 * k}">+${kids}</text>` : ""}
         ${
           unread
             ? `<title>${escapeHtml(
@@ -6547,10 +6638,20 @@ export class ZhaBindingMapCard extends HTMLElement {
               )}</title>`
             : ""
         }
-        <text class="mesh-label" y="${labelY(p)}" font-size="${11 * (W / 1200)}" text-anchor="middle">${escapeHtml(d ? this._deviceLabel(d) : i)}${unread ? " (not read)" : ""}</text>
+        <text class="mesh-label" y="${labelY(p)}" font-size="${12 * k}" text-anchor="middle">${escapeHtml(d ? this._deviceLabel(d) : i)}${unread ? " (not read)" : ""}</text>
       </g></g>`);
     }
-    const img = mode === "plan" ? `<image href="${escapeHtml(this._fpPlanFor(layout.floor).imageUrl)}" x="0" y="0" width="${W}" height="${H}" opacity="0.55"/>` : "";
+    const img =
+      mode === "plan"
+        ? `<image href="${escapeHtml(this._fpPlanFor(layout.floor).imageUrl)}" x="0" y="0" width="${W}" height="${H}" opacity="0.55"/>`
+        : mode === "all"
+        ? Object.values(allGeom.panels)
+            .map(
+              (pn) =>
+                `<image href="${escapeHtml(pn.url)}" x="${pn.x}" y="${pn.y}" width="${pn.w}" height="${pn.h}" opacity="0.55" preserveAspectRatio="none"/><rect class="mesh-floor-panel" x="${pn.x}" y="${pn.y}" width="${pn.w}" height="${pn.h}" style="--sw:${1 * k}"/><text class="mesh-floor-title" x="${pn.x}" y="${pn.titleY}" font-size="${15 * k}">${escapeHtml(pn.name)}</text>`
+            )
+            .join("")
+        : "";
     const grad = (lvl) => `<radialGradient id="mesh-heat-${lvl}"><stop offset="0" stop-color="${this._lqiColor(lvl)}" stop-opacity="0.32"/><stop offset="1" stop-color="${this._lqiColor(lvl)}" stop-opacity="0"/></radialGradient>`;
     const missingIeees = routerIeees.filter((i) => !pos(i) && (!layout.floor || floorOf(i) === layout.floor || !floorOf(i)));
     const missing = missingIeees.length;
@@ -6560,18 +6661,17 @@ export class ZhaBindingMapCard extends HTMLElement {
     });
     // 1.5.0b5: zoom/pan state per layout, kept across re-renders.
     this._meshViews = this._meshViews || {};
-    const vk = `${layout.value}|${W}x${H}`;
     if (!this._meshViews[vk]) this._meshViews[vk] = { x: 0, y: 0, w: W, h: H, full: { w: W, h: H } };
     this._meshViewKey = vk;
     const vb = this._meshViews[vk];
     return `<div class="mesh-zoom"><button class="btn btn-small" id="mesh-zoom-out" title="Zoom out">－</button><button class="btn btn-small" id="mesh-zoom-fit" title="Show the whole plan">Fit</button><button class="btn btn-small" id="mesh-zoom-in" title="Zoom in">＋</button></div>
-      <svg class="mesh-svg" style="--mz:${vb.w / vb.full.w}" viewBox="${vb.x} ${vb.y} ${vb.w} ${vb.h}" preserveAspectRatio="xMidYMid meet"><defs>${grad("good")}${grad("fair")}${grad("weak")}${["good", "fair", "weak", "unknown"]
+      <svg class="mesh-svg" style="--mz:${this._meshGrowth(vb)}" viewBox="${vb.x} ${vb.y} ${vb.w} ${vb.h}" preserveAspectRatio="xMidYMid meet"><defs>${grad("good")}${grad("fair")}${grad("weak")}${["good", "fair", "weak", "unknown"]
         .map((lvl) => `<marker id="mesh-arrow-${lvl}" viewBox="0 0 10 10" refX="16" refY="5" markerWidth="5" markerHeight="5" orient="auto"><path d="M0 0L10 5L0 10z" fill="${this._lqiColor(lvl)}"/></marker>`)
         .join("")}</defs>${img}<g>${heat.join("")}</g><g>${lines.join("")}</g><g>${batteryNodes.join("")}</g><g>${nodes.join("")}</g></svg>
       ${
         missing
           ? `<details class="mesh-unplaced muted"><summary>${missing} router${missing === 1 ? "" : "s"} not on this layout</summary>${escapeHtml(missingNames.join(", "))}. ${
-              mode === "plan" ? `Place them on the Floor Plan tab${layout.floor ? ` (${escapeHtml(this._floorName(layout.floor))})` : ""} to include them.` : "Open the Map tab once to lay them out."
+              mode === "plan" ? `Place them on the Floor Plan tab${layout.floor ? ` (${escapeHtml(this._floorName(layout.floor))})` : ""} to include them.` : mode === "all" ? "Place them on their floor's plan on the Floor Plan tab to include them." : "Open the Map tab once to lay them out."
             } They're still part of the suggestions and route checks.</details>`
           : ""
       }`;
@@ -6663,7 +6763,7 @@ export class ZhaBindingMapCard extends HTMLElement {
 
   /** Network section of the side panel (experimental). */
   _drawerMeshHtml(d) {
-    const html = this._drawerMeshInnerHtml(d);
+    const html = this._drawerCoordRouteAppend(d, this._drawerMeshInnerHtml(d));
     if (!html || !this._meshSnapshot) return html;
     // 1.5.2: say so when this device shares its network address.
     const id = normIeee(d.ieee);
@@ -6683,6 +6783,19 @@ export class ZhaBindingMapCard extends HTMLElement {
           )}`
         : `Shares its network address (${hex}) with ${others.join(", ")}.`;
     return html.replace('<div class="drawer-section-title">Network</div>', `<div class="drawer-section-title">Network</div><p class="mesh-tip-error">${escapeHtml(text)}</p>`);
+  }
+
+  /** 1.11.0: "Route to the coordinator…" at the end of the side panel's
+   *  Network section (not for the coordinator itself). */
+  _drawerCoordRouteAppend(d, html) {
+    if (!html || !this._meshSnapshot || !Object.keys(this._meshSnapshot).length) return html;
+    if (d.device_type === "Coordinator" || normIeee(d.ieee) === normIeee(this._coordinatorIeee() || "")) return html;
+    const open = this._drawerCoordOpen === normIeee(d.ieee);
+    const extra = `<button class="btn btn-small" id="drawer-coordroute" title="Experimental: the hops this device's messages take to Home Assistant, and the weakest one">${open ? "Hide route to the coordinator" : "Route to the coordinator…"}</button>${
+      open ? this._coordRouteHtml(d.ieee, "drawer") : ""
+    }`;
+    const end = html.lastIndexOf("</div>");
+    return end < 0 ? html + extra : html.slice(0, end) + extra + html.slice(end);
   }
 
   _drawerMeshInnerHtml(d) {
@@ -6714,6 +6827,121 @@ export class ZhaBindingMapCard extends HTMLElement {
       <p class="hint">${escapeHtml(state)} A battery device keeps no tables of its own: what we know comes from its parent's table. Press a button on it to wake it, then read its parent again.</p>
       ${p ? `<button class="btn btn-small" id="drawer-mesh-read-parent" data-parent="${escapeHtml(p.parent)}" ${this._meshReading || this._meshScanning ? "disabled" : ""}>${this._meshReading === p.parent ? "Reading…" : "Read its parent again"}</button>` : `<button class="btn btn-small" id="drawer-mesh-scan">Scan network</button>`}
     </div>`;
+  }
+
+  // ---- 1.11.0: route to the coordinator (integration issue #49) ----
+
+  /** The chosen device's route to the coordinator, or null. */
+  _meshCoordRouteModel(mesh) {
+    if (!this._meshCoordRoute || !mesh) return null;
+    const coord = this._coordinatorIeee();
+    const path = routeToCoordinator(mesh, this._meshCoordRoute, coord);
+    return { source: normIeee(this._meshCoordRoute), coordinator: normIeee(coord || ""), path, verdict: pathVerdict(path, this._lqiThr) };
+  }
+
+  /** Path notes name devices by IEEE; show their names instead. */
+  _meshNoteText(note) {
+    return String(note || "").replace(/\b([0-9a-f]{2}(?::[0-9a-f]{2}){7})\b/gi, (m) => this._ieeeLabel(m, { plain: true }));
+  }
+
+  /** Route to the coordinator: the chain, verdict, how fresh the tables
+   *  are and what to do next. where = "drawer" | "mesh". */
+  _coordRouteHtml(ieee, where) {
+    const mesh = this._meshModel();
+    if (!mesh) return "";
+    const coord = this._coordinatorIeee();
+    const nameOf = (i) => this._ieeeLabel(i, { plain: true });
+    const path = routeToCoordinator(mesh, ieee, coord);
+    const v = pathVerdict(path, this._lqiThr);
+    const dev = this._devices.find((x) => normIeee(x.ieee) === normIeee(ieee));
+    const isBattery = !!(dev && dev.device_type === "EndDevice");
+    const chain = path.hops.length
+      ? `<div class="route-chain">${escapeHtml(nameOf(path.hops[0].from))}${path.hops
+          .map((h) => ` <span class="route-arrow">→</span> ${this._lqiChip(h.lqi)} ${escapeHtml(nameOf(h.to))}`)
+          .join("")}</div>`
+      : "";
+    const verdict =
+      v.level === "good"
+        ? `<div class="route-verdict route-good">Likely route looks good: every hop is fair or better.</div>`
+        : v.level === "weak"
+        ? `<div class="route-verdict route-weak">Weakest hop: ${escapeHtml(nameOf(v.weakest.from))} to ${escapeHtml(nameOf(v.weakest.to))} (LQI ${v.weakest.lqi}). Messages on this hop may need retries or get lost; a router between them, or moving one of them, would help.</div>`
+        : v.level === "none"
+        ? `<div class="route-verdict route-none">No route found. ${escapeHtml(this._meshNoteText(path.note))}</div>`
+        : `<div class="route-verdict route-unknown">Partly known. ${escapeHtml(this._meshNoteText(path.note) || "Some link qualities weren't reported.")}</div>`;
+    const oldest = oldestHopRead(path);
+    const stale = oldest && Date.now() - Date.parse(oldest) > 7 * 24 * 3600 * 1000;
+    const fresh = oldest
+      ? `<p class="${stale ? "mesh-tip-warning" : "muted"}">Tables read ${escapeHtml(relTime(oldest))} at the oldest.${stale ? " Routes change; read these routers again for an up-to-date route." : ""}</p>`
+      : "";
+    const routers = routersOnPath(mesh, path);
+    const reading = !!(this._meshReadingPath || this._meshReading || this._meshScanning);
+    let layoutNote = "";
+    if (where === "mesh" && path.hops.length) {
+      const layout = this._meshLayout();
+      const pos = (i) => this._meshPos(i, layout);
+      const missing = [...new Set(path.hops.flatMap((h) => [h.from, h.to]).filter((i) => !pos(i)))];
+      if (missing.length) {
+        const coordMissing = coord && missing.includes(normIeee(coord));
+        layoutNote = `<p class="muted">Not on this layout, so ${missing.length === 1 ? "its hops aren't" : "their hops aren't"} drawn: ${escapeHtml(missing.map(nameOf).join(", "))}.${
+          coordMissing ? " Place the coordinator on its floor's plan (Floor Plan tab) to see the last hop." : ""
+        }${layout.mode === "plan" && this._haFloors().length > 1 ? " <strong>All floors</strong> under Layout shows routes between floors." : ""}</p>`;
+      }
+    }
+    return `<div class="route-check coord-route">
+      <p class="muted">How ${escapeHtml(nameOf(ieee))}'s messages (${
+        isBattery ? "button presses and reports" : "state reports"
+      }) reach Home Assistant, predicted from the routers' routing tables. Commands from Home Assistant to it can come back another way: the coordinator chooses that path itself.</p>
+      ${chain}${verdict}${fresh}${layoutNote}
+      <div class="dialog-actions">
+        ${routers.length ? `<button class="btn btn-small" data-coordroute-read="${escapeHtml(routers.join(","))}" ${reading ? "disabled" : ""}>${this._meshReadingPath ? "Reading…" : `Read ${routers.length === 1 ? "this router" : `these ${routers.length} routers`} again`}</button>` : ""}
+        ${where === "drawer" && path.hops.length ? `<button class="btn btn-small" data-coordroute-show="${escapeHtml(normIeee(ieee))}">Show on the Network tab</button>` : ""}
+        ${where === "mesh" ? `<button class="btn btn-small" id="mesh-coordroute-clear">Clear</button>` : ""}
+      </div>
+    </div>`;
+  }
+
+  /** Network tab side section: pick a device, see its route. */
+  _meshCoordRouteSectionHtml() {
+    const coord = normIeee(this._coordinatorIeee() || "");
+    const devices = this._devices
+      .filter((d) => normIeee(d.ieee) !== coord)
+      .map((d) => ({ ieee: normIeee(d.ieee), label: this._deviceLabel(d), battery: d.device_type === "EndDevice" }))
+      .sort((a, b) => a.label.localeCompare(b.label));
+    const chosen = this._meshCoordRoute ? normIeee(this._meshCoordRoute) : "";
+    return `<div class="drawer-section-title">Route to the coordinator</div>
+      <select id="mesh-coordroute" class="mesh-coordroute-select"><option value="">Choose a device…</option>${devices
+        .map((d) => `<option value="${escapeHtml(d.ieee)}" ${d.ieee === chosen ? "selected" : ""}>${escapeHtml(d.label)}${d.battery ? " (battery)" : ""}</option>`)
+        .join("")}</select>
+      ${chosen ? this._coordRouteHtml(chosen, "mesh") : `<p class="muted">See the hops a device's messages take to Home Assistant, and the weakest one.</p>`}`;
+  }
+
+  /** Reads the routers on a route again, one at a time. */
+  async _meshReadPath(ieees) {
+    if (this._meshReadingPath || this._meshScanning) return;
+    this._meshReadingPath = true;
+    try {
+      for (const i of ieees) await this._meshReadOne(i);
+    } finally {
+      this._meshReadingPath = false;
+      if (this._view === "mesh") this._renderMesh();
+      this._refreshDrawer();
+    }
+  }
+
+  _wireMeshCoordRoute() {
+    const sel = this._q("#mesh-coordroute");
+    if (sel)
+      sel.addEventListener("change", (e) => {
+        this._meshCoordRoute = e.target.value || null;
+        this._renderMesh();
+      });
+    const clear = this._q("#mesh-coordroute-clear");
+    if (clear)
+      clear.addEventListener("click", () => {
+        this._meshCoordRoute = null;
+        this._renderMesh();
+      });
+    this._qa("#view-mesh [data-coordroute-read]").forEach((b) => b.addEventListener("click", () => this._meshReadPath(b.dataset.coordrouteRead.split(","))));
   }
 
   _meshSelectedLinkHtml(mesh, nameOf) {
@@ -6752,9 +6980,42 @@ export class ZhaBindingMapCard extends HTMLElement {
     const vb = this._meshViews && this._meshViews[this._meshViewKey];
     if (svg && vb) {
       svg.setAttribute("viewBox", `${vb.x} ${vb.y} ${vb.w} ${vb.h}`);
-      // 1.5.0b8: devices, labels and line widths keep their on-screen size
-      // when zooming; only the distances between them grow.
-      svg.style.setProperty("--mz", String(vb.w / vb.full.w));
+      // 1.5.0b8 kept devices, labels and lines the same size on screen when
+      // zooming. 1.11.0: they grow gently instead (square root of the zoom),
+      // so they become readable without getting huge (issue #49).
+      svg.style.setProperty("--mz", String(this._meshGrowth(vb)));
+    }
+  }
+
+  /** Scale for devices and labels at the current zoom (1 when the whole plan shows). */
+  _meshGrowth(vb) {
+    return Math.sqrt(vb.w / vb.full.w);
+  }
+
+  /** Plan units per screen pixel before the picture has been measured. */
+  _meshEstimateUnits(W, H) {
+    const host = this._q("#view-mesh");
+    const width = Math.max(320, ((host && host.clientWidth) || 900) - (host && host.clientWidth > 700 ? 316 : 0));
+    const height = Math.max(240, (typeof window !== "undefined" && window.innerHeight ? window.innerHeight : 900) * 0.7);
+    return Math.max(W / width, H / height);
+  }
+
+  /** Measures how big the picture is drawn and redraws once if the sizes
+   *  were based on a wrong guess (1.11.0). */
+  _meshMeasure() {
+    const svg = this._q("#view-mesh .mesh-svg");
+    const vb = this._meshViews && this._meshViews[this._meshViewKey];
+    if (!svg || !vb) return;
+    const rect = svg.getBoundingClientRect();
+    if (!rect.width || !rect.height) return;
+    const units = Math.max(vb.full.w / rect.width, vb.full.h / rect.height);
+    this._meshUnits = this._meshUnits || {};
+    this._meshUnits[this._meshViewKey] = units;
+    if (this._meshUnitsUsed && Math.abs(units / this._meshUnitsUsed - 1) > 0.05) {
+      if (this._meshRemeasured) return;
+      this._meshRemeasured = true;
+      this._renderMesh();
+      this._meshRemeasured = false;
     }
   }
 
@@ -6943,6 +7204,16 @@ export class ZhaBindingMapCard extends HTMLElement {
         this._renderMesh();
       });
     this._wireMeshZoom();
+    this._wireMeshCoordRoute();
+    if (typeof requestAnimationFrame === "function") requestAnimationFrame(() => this._meshMeasure());
+    if (!this._meshResizeBound && typeof window !== "undefined") {
+      this._meshResizeBound = true;
+      let t = null;
+      window.addEventListener("resize", () => {
+        clearTimeout(t);
+        t = setTimeout(() => this._view === "mesh" && this._meshMeasure(), 250);
+      });
+    }
     this._qa("#view-mesh tr[data-link]").forEach((tr) =>
       tr.addEventListener("click", () => {
         this._meshHighlight = this._meshHighlight === tr.dataset.link ? null : tr.dataset.link;
@@ -9546,15 +9817,31 @@ export class ZhaBindingMapCard extends HTMLElement {
     if (this._imgSizes[url]) return this._imgSizes[url] === "loading" || this._imgSizes[url] === "error" ? null : this._imgSizes[url];
     this._imgSizes[url] = "loading";
     const img = new Image();
-    img.onload = () => {
-      this._imgSizes[url] = { w: img.naturalWidth, h: img.naturalHeight };
-      if (onLoad) onLoad();
-    };
+    img.onload = () =>
+      this._naturalSize(url, img, (size) => {
+        this._imgSizes[url] = size;
+        if (onLoad) onLoad();
+      });
     img.onerror = () => {
       this._imgSizes[url] = "error";
     };
     img.src = url;
     return null;
+  }
+
+  /** 1.11.0: an image's own size; for an SVG with only a viewBox (which
+   *  browsers size as 300×150-style defaults, or 0×0 in Firefox), the size
+   *  read from the file itself. */
+  _naturalSize(url, img, done) {
+    const size = { w: img.naturalWidth, h: img.naturalHeight };
+    if (!isSvgUrl(url) || typeof fetch !== "function") return done(size);
+    fetch(url, { credentials: "same-origin" })
+      .then((r) => (r.ok ? r.text() : null))
+      .then((text) => {
+        const s = svgIntrinsicSize(text);
+        done(s && (!s.explicit || !(size.w && size.h)) ? { w: s.w, h: s.h } : size);
+      })
+      .catch(() => done(size));
   }
 
   _loadFpImage(url) {
@@ -9564,11 +9851,13 @@ export class ZhaBindingMapCard extends HTMLElement {
       return;
     }
     const img = new Image();
-    img.onload = () => {
-      this._fpImageSize = { w: img.naturalWidth, h: img.naturalHeight };
-      this._fpViewbox = { x: 0, y: 0, w: img.naturalWidth, h: img.naturalHeight };
-      this._renderFloorplan();
-    };
+    img.onload = () =>
+      this._naturalSize(url, img, (size) => {
+        if (url !== this._fpImageUrl) return;
+        this._fpImageSize = size;
+        this._fpViewbox = { x: 0, y: 0, w: size.w, h: size.h };
+        this._renderFloorplan();
+      });
     img.onerror = () => {
       this._fpImageSize = null;
       this._setStatus("error", `Could not load floor plan image: ${url}`, 0);

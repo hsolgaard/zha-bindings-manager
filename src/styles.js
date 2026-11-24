@@ -366,6 +366,12 @@ a.health-chip-lost { text-decoration:none; cursor:pointer; }
 .fp-floor-help { margin: 0 0 6px; }
 .mesh-unplaced summary { cursor:pointer; }
 .mesh-node circle, .mesh-node rect { fill: var(--card-background-color, #fff); stroke: var(--primary-text-color); stroke-width:1.5; }
+.mesh-node circle.route-ring { fill: none; stroke: var(--primary-color, #03a9f4); stroke-width: 3; stroke-opacity: 0.6; }
+.mesh-floor-panel { fill: none; stroke: var(--divider-color, rgba(0,0,0,0.2)); }
+.mesh-floor-title { fill: var(--secondary-text-color); font-weight: 600; }
+.mesh-coordroute-select { width: 100%; margin: 4px 0 6px; }
+.coord-route { margin-bottom: 12px; }
+.coord-route p { margin: 4px 0; font-size: 0.9em; }
 .mesh-node circle.unread { stroke-dasharray: 3 3; stroke: var(--secondary-text-color); }
 .mesh-node rect { fill: var(--primary-color); }
 .mesh-label { fill: var(--primary-text-color); paint-order: stroke; stroke: var(--card-background-color, #fff); stroke-width:3px; }

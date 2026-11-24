@@ -413,3 +413,43 @@ export function meshSuggestions(mesh, { thr = LQI_RECOMMENDED, areaOf = () => ""
   const order = { error: 0, warning: 1, info: 2 };
   return out.sort((x, y) => order[x.level] - order[y.level]);
 }
+
+/**
+ * 1.11.0: likely path from a device to the coordinator, from the routers'
+ * routing tables (each router keeps a route to the coordinator, 0x0000).
+ * This is the direction a device's reports travel to Home Assistant;
+ * commands from Home Assistant can come back another way (the coordinator
+ * picks that path itself, and its choice isn't in the tables we read).
+ * Adds, per hop, when the router that chose it was last read (`readAt`),
+ * so stale hops can be pointed out. A battery source starts at its parent.
+ */
+export function routeToCoordinator(mesh, sourceIeee, coordinatorIeee) {
+  const coord = normIeee(coordinatorIeee || "");
+  const src = normIeee(sourceIeee || "");
+  if (!coord) return { status: "none", hops: [], note: "The coordinator isn't in the device list." };
+  if (src === coord) return { status: "ok", hops: [], note: null };
+  const path = routePath(mesh, src, coord);
+  const hops = path.hops.map((h) => {
+    // A battery device keeps no tables: its hop is known from its parent's.
+    const e = mesh.snapshot[h.from] || mesh.snapshot[h.to];
+    return { ...h, readAt: e && typeof e.at === "string" ? e.at : null };
+  });
+  return { ...path, hops };
+}
+
+/** Routers on a path that can be read again (the battery source can't). */
+export function routersOnPath(mesh, path) {
+  const out = [];
+  for (const h of (path && path.hops) || []) {
+    for (const i of [h.from, h.to]) {
+      if (isRouterLike(mesh, i) && mesh.typeOf.get(i) !== "Coordinator" && !out.includes(i)) out.push(i);
+    }
+  }
+  return out;
+}
+
+/** Oldest read time among the routers that chose a path's hops, or null. */
+export function oldestHopRead(path) {
+  const times = ((path && path.hops) || []).map((h) => (h.readAt ? Date.parse(h.readAt) : NaN)).filter((t) => !Number.isNaN(t));
+  return times.length ? new Date(Math.min(...times)).toISOString() : null;
+}

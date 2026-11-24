@@ -3,6 +3,32 @@
 All notable changes to ZHA Bindings Manager are documented here.
 
 
+## [1.11.0]
+
+### Added
+
+- **Route to the coordinator (Network tab, beta):** choose any device in the new list beside the map, or open its side
+  panel and choose **Route to the coordinator…**, to see the hops its messages take to Home Assistant, each in its
+  link-quality colour, with the weakest hop named. It says when the routers on the route were last read (and warns if
+  that's more than a week ago), with **Read these routers again**. It's the direction a device's reports and button
+  presses travel; commands from Home Assistant can come back another way. Requested by AllardKatan in integration
+  issue #49, to find out why some devices react slowly.
+- **All floors (Network tab, beta):** with Home Assistant floors, **Layout** has **All floors**: every floor's plan in
+  one picture, side by side on a wide screen and stacked on a phone, in floor-level order, so links and routes between
+  floors are drawn as lines. Also from issue #49.
+
+### Changed
+
+- **Network tab labels and devices** are now a fixed size on screen whatever the plan's own size or shape (tall or
+  small plans used to get tiny labels), and grow gently as you zoom in instead of staying the same size (issue #49).
+
+### Fixed
+
+- **SVG floor plans exported with only a viewBox** are sized from the file itself. Browsers report such SVGs as
+  300×150-style defaults (or 0×0 in Firefox), which made devices and labels on them tiny or broke the Network tab.
+- The Network tab's "Snapshot of N of M routers" and "oldest read" count only routers that are still in the network;
+  devices removed since an older scan could make it read "32 of 30". They're also left out of **Didn't answer**.
+
 ## [1.10.7]
 
 ### Fixed

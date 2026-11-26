@@ -113,3 +113,28 @@ describe("firmware update servers (1.12.0)", () => {
     expect(isClaimant(list, COORD)).toBe(null);
   });
 });
+
+import { updateServerCell, devicesWithWrongServer } from "../src/settings.js";
+
+describe("update servers on the Devices tab (1.12.0)", () => {
+  const nameOf = (i) => (i === SW ? "ZB-LoungeBIG-Switch-Wall2" : null);
+  it("shows each device's update server, problems first", () => {
+    const wrong = updateServerCell({ status: "ok", server: SW, is_coordinator: false, not_set: false }, nameOf);
+    expect(wrong).toMatchObject({ text: "ZB-LoungeBIG-Switch-Wall2", level: "warning", rank: 0 });
+    expect(updateServerCell({ status: "ok", server: COORD, is_coordinator: true }).text).toBe("Coordinator");
+    expect(updateServerCell({ status: "ok", not_set: true }).text).toBe("Not set");
+    expect(updateServerCell(null, nameOf, { battery: true }).text).toBe("Not checked (battery)");
+    expect(updateServerCell(null, nameOf, { hasOta: false }).text).toBe("—");
+    expect(updateServerCell({ status: "no_answer" }).text).toBe("Didn't answer");
+  });
+
+  it("counts devices getting updates from somewhere other than the coordinator", () => {
+    expect(
+      devicesWithWrongServer({
+        a: { status: "ok", is_coordinator: false, not_set: false },
+        b: { status: "ok", is_coordinator: true },
+        c: { status: "ok", not_set: true },
+      })
+    ).toBe(1);
+  });
+});

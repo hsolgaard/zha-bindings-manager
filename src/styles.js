@@ -193,6 +193,8 @@ tr.lost-row s { color: var(--error-color, #db4437); }
 .drawer-ota-claim { color: #b26a00; background: rgba(255,179,0,0.14); padding: 6px 8px; border-radius: 6px; }
 .ota-warning { color: #b26a00; font-weight: 500; }
 .ota-ok { color: var(--success-color, #43a047); }
+td.ota-cell.ota-warning { color: #b26a00; font-weight: 500; }
+td.ota-cell.ota-unknown, td.ota-cell.ota-none, td.ota-cell.ota-info { color: var(--secondary-text-color, #727272); }
 .settings-pickers { display: flex; flex-wrap: wrap; gap: 12px; margin: 4px 0 10px; }
 .settings-pick { display: flex; gap: 6px; align-items: center; }
 .settings-pick { flex-wrap: wrap; min-width: 0; max-width: 100%; }

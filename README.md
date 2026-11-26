@@ -221,6 +221,8 @@ from the last backup before the removal.
 **Check** in a device's side panel shows where it sends its firmware update requests. It should be the coordinator: if
 it's another device, its updates time out. A device that claims to be an update server is flagged on the Devices tab
 and in its side panel; the SONOFF ZBM5-3C-80/86 on firmware 1.0.6 does this and blocks updates for devices around it.
+The Devices tab's **Updates from** column shows every device's update server; **Check update servers** reads them all
+(mains devices, one at a time).
 
 ### How does it behave? (device questions)
 

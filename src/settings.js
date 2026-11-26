@@ -198,3 +198,25 @@ export function isClaimant(claimants, ieee) {
   const key = String(ieee || "").toLowerCase();
   return (claimants || []).find((c) => String(c.ieee).toLowerCase() === key) || null;
 }
+
+/** Devices tab cell for a device's update server (1.12.0).
+ *  {text, level, rank}: rank sorts problems first. */
+export function updateServerCell(res, nameOf = () => null, { battery = false, hasOta = true } = {}) {
+  if (!hasOta) return { text: "—", level: "none", rank: 5, title: "It doesn't support firmware updates over Zigbee." };
+  if (!res) return { text: battery ? "Not checked (battery)" : "Not checked", level: "unknown", rank: 4, title: "" };
+  if (res.status === "no_ota") return { text: "—", level: "none", rank: 5, title: "It doesn't support firmware updates over Zigbee." };
+  if (res.status !== "ok") return { text: "Didn't answer", level: "unknown", rank: 3, title: "A battery device has to be awake." };
+  if (res.is_coordinator) return { text: "Coordinator", level: "ok", rank: 2, title: "As it should be." };
+  if (res.not_set) return { text: "Not set", level: "info", rank: 1, title: "It hasn't found an update server yet." };
+  return {
+    text: nameOf(res.server) || res.server,
+    level: "warning",
+    rank: 0,
+    title: "Not the coordinator: its update requests go to this device, so firmware updates for it time out.",
+  };
+}
+
+/** How many checked devices get their updates from a device other than the coordinator. */
+export function devicesWithWrongServer(results) {
+  return Object.values(results || {}).filter((r) => r && r.status === "ok" && !r.is_coordinator && !r.not_set).length;
+}

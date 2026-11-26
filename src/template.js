@@ -158,6 +158,7 @@ export const SHELL_HTML = `
         <th data-sort="power">Power</th>
         <th data-sort="count">Bindings</th>
         <th data-sort="scanRank">Last scan</th>
+        <th data-sort="otaRank" id="th-ota" style="display:none" title="Where each device gets its firmware updates from. It should be the coordinator.">Updates from</th>
       </tr></thead>
       <tbody id="devices-table-body"></tbody>
     </table>

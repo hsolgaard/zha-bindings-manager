@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { lostSummary, lostFor, putBackMessage, sinceText } from "../src/lost.js";
+import { lostSummary, lostFor, putBackMessage, putBackDone, putBackStatus, sinceText } from "../src/lost.js";
 
 const R = "aa:aa:aa:aa:aa:aa:aa:01";
 const S = "aa:aa:aa:aa:aa:aa:aa:02";
@@ -36,6 +36,22 @@ describe("lost bindings (1.8.0)", () => {
     expect(m.text).toContain("Rocker didn't answer");
     expect(m.text).toContain("Alpha answered but still doesn't");
     expect(putBackMessage({}).text).toBe("Nothing to put back.");
+  });
+
+  it("reads the integration's real Put back result (1.11.1)", () => {
+    // Exactly what watch_put_back sends: {results: {ieee: {status, count, still}}}.
+    const results = {
+      [R]: { status: "put_back", count: 3, still: [] },
+      [S]: { status: "waiting", count: 1, still: [{ key: "k2" }] },
+    };
+    expect(putBackStatus(results[R])).toBe("put_back");
+    expect(putBackStatus("still_missing")).toBe("still_missing");
+    expect(putBackStatus(null)).toBe("nothing");
+    expect(putBackDone(results)).toEqual([R]);
+    const m = putBackMessage(results, (i) => (i === R ? "Rocker" : "Alpha"));
+    expect(m.text).toContain("Put back on Rocker.");
+    expect(m.text).toContain("Alpha didn't answer");
+    expect(m.text).not.toContain("Nothing to put back");
   });
 
   it("says when it was noticed", () => {

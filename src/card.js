@@ -59,7 +59,7 @@ const LOST_EDGE_COLOR = "#db4437";
 import { replacementCandidates, commandGaps, VERDICT, RESULT_LABEL, defaultSelection, runSummary } from "./replace.js";
 import BUNDLED_QUESTIONS from "./questions.json";
 import { changedDevices, historyLines, addressFact, noticeSummary, buildNetworkReport, reportIssue } from "./evidence.js";
-import { lostSummary, lostFor, putBackMessage, sinceText, NOTICED_BY, POLICIES, POLICY_LABELS, POLICY_HINTS } from "./lost.js";
+import { lostSummary, lostFor, putBackMessage, putBackDone, sinceText, NOTICED_BY, POLICIES, POLICY_LABELS, POLICY_HINTS } from "./lost.js";
 import { SHELL_HTML } from "./template.js";
 import { LocalStorageProvider } from "./storage/local-storage-provider.js";
 import { HaStorageProvider } from "./storage/ha-storage-provider.js";
@@ -1201,7 +1201,7 @@ export class ZhaBindingMapCard extends HTMLElement {
     const m = putBackMessage(res.results, nameOf);
     this._setStatus(m.level, m.text, 0);
     // The card's own copy of the binding table is now out of date.
-    const done = Object.entries(res.results || {}).filter(([, st]) => st === "put_back").map(([i]) => i);
+    const done = putBackDone(res.results);
     if (done.length) this._scanBindings(done, { tries: 1 });
   }
 
@@ -1215,6 +1215,12 @@ export class ZhaBindingMapCard extends HTMLElement {
     const vals = Object.values((res && res.results) || res || {});
     const asleep = vals.filter((v) => v === "no_answer").length;
     const lost = lostSummary(this._lost).total;
+    // Devices that turned out to have lost bindings: the card's copy of
+    // their table is out of date, so read them again (1.11.1).
+    const changed = Object.entries((res && res.results) || {})
+      .filter(([, v]) => v === "lost")
+      .map(([i]) => i);
+    if (changed.length) this._scanBindings(changed, { tries: 1 });
     this._setStatus(
       lost ? "warning" : "success",
       `Checked ${vals.length} device${vals.length === 1 ? "" : "s"}: ${lost ? `${lost} lost binding${lost === 1 ? "" : "s"}` : "nothing lost"}.${

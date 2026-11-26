@@ -21,7 +21,7 @@
  * zha_toolkit MUST be installed (via HACS) and working for bind/unbind/scan
  * to function. See README.md for details.
  *
- * Version: 1.11.0
+ * Version: 1.11.1
  */
 (() => {
   // src/capexplorer-constants.js
@@ -78,7 +78,7 @@
 
   // src/constants.js
   var ZTK_DOMAIN = "zha_toolkit";
-  var CARD_VERSION = "1.11.0";
+  var CARD_VERSION = "1.11.1";
   var CHANGELOG_URL = "https://github.com/hsolgaard/zha-bindings-manager/blob/main/CHANGELOG.md";
   var DEFAULT_BINDABLE_OUT_CLUSTERS = [5, 6, 8, 258, 768];
   var MEMBERSHIP_EDGE_COLOR = "#8e24aa";
@@ -2511,9 +2511,16 @@
     }
     return { policy: "notify", lost: [], queued: false, autoPaused: false, lastCheck: null, expected: 0, fallback: false };
   }
+  function putBackStatus(result) {
+    if (typeof result === "string") return result;
+    return result && typeof result.status === "string" && result.status || "nothing";
+  }
+  function putBackDone(results) {
+    return Object.entries(results || {}).filter(([, r]) => putBackStatus(r) === "put_back").map(([ieee]) => ieee);
+  }
   function putBackMessage(results, nameOf = (i) => i) {
     const by = { put_back: [], still_missing: [], waiting: [], nothing: [] };
-    for (const [ieee, st] of Object.entries(results || {})) (by[st] || by.nothing).push(nameOf(ieee));
+    for (const [ieee, r] of Object.entries(results || {})) (by[putBackStatus(r)] || by.nothing).push(nameOf(ieee));
     const parts = [];
     if (by.put_back.length) parts.push(`Put back on ${by.put_back.join(", ")}.`);
     if (by.waiting.length)
@@ -5706,7 +5713,7 @@ a.health-chip-lost { text-decoration:none; cursor:pointer; }
       };
       const m = putBackMessage(res.results, nameOf);
       this._setStatus(m.level, m.text, 0);
-      const done = Object.entries(res.results || {}).filter(([, st]) => st === "put_back").map(([i]) => i);
+      const done = putBackDone(res.results);
       if (done.length) this._scanBindings(done, { tries: 1 });
     }
     async _lostForget(ieee, key) {
@@ -5718,6 +5725,8 @@ a.health-chip-lost { text-decoration:none; cursor:pointer; }
       const vals = Object.values(res && res.results || res || {});
       const asleep = vals.filter((v) => v === "no_answer").length;
       const lost = lostSummary(this._lost).total;
+      const changed = Object.entries(res && res.results || {}).filter(([, v]) => v === "lost").map(([i]) => i);
+      if (changed.length) this._scanBindings(changed, { tries: 1 });
       this._setStatus(
         lost ? "warning" : "success",
         `Checked ${vals.length} device${vals.length === 1 ? "" : "s"}: ${lost ? `${lost} lost binding${lost === 1 ? "" : "s"}` : "nothing lost"}.${asleep ? ` ${asleep} didn't answer (asleep or off); they're checked again when they next wake up.` : ""}`,

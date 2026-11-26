@@ -63,10 +63,27 @@ export function lostFor(res, ieee) {
   return { policy: "notify", lost: [], queued: false, autoPaused: false, lastCheck: null, expected: 0, fallback: false };
 }
 
-/** Status line after Put back. results: {ieee: "put_back"|"still_missing"|"waiting"|"nothing"}. */
+/** One device's Put back result. The integration sends
+ *  {status: "put_back"|"still_missing"|"waiting"|"nothing", count, still};
+ *  a plain status string is accepted too. (1.11.1: the card used to compare
+ *  the whole object with a string, so nothing ever matched.) */
+export function putBackStatus(result) {
+  if (typeof result === "string") return result;
+  return (result && typeof result.status === "string" && result.status) || "nothing";
+}
+
+/** Devices whose binding table Put back changed: the card's own copy of
+ *  them is out of date and needs a rescan. */
+export function putBackDone(results) {
+  return Object.entries(results || {})
+    .filter(([, r]) => putBackStatus(r) === "put_back")
+    .map(([ieee]) => ieee);
+}
+
+/** Status line after Put back. results: {ieee: {status, count, still}} (or a status string). */
 export function putBackMessage(results, nameOf = (i) => i) {
   const by = { put_back: [], still_missing: [], waiting: [], nothing: [] };
-  for (const [ieee, st] of Object.entries(results || {})) (by[st] || by.nothing).push(nameOf(ieee));
+  for (const [ieee, r] of Object.entries(results || {})) (by[putBackStatus(r)] || by.nothing).push(nameOf(ieee));
   const parts = [];
   if (by.put_back.length) parts.push(`Put back on ${by.put_back.join(", ")}.`);
   if (by.waiting.length)

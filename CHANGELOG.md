@@ -3,6 +3,17 @@
 All notable changes to ZHA Bindings Manager are documented here.
 
 
+## [1.11.1]
+
+### Fixed
+
+- **Put back / Put all back:** after putting lost bindings back, the side panel, Map and table weren't updated (a
+  device could still say it controls nothing until you rescanned it), and the message could say "Nothing to put back"
+  even though it worked. The card misread the integration's answer; it now reads each device's result and rescans the
+  devices that changed.
+- **Check again** (lost bindings) also rescans the devices it found with lost bindings, so the rest of the card shows
+  what they have now.
+
 ## [1.11.0]
 
 ### Added

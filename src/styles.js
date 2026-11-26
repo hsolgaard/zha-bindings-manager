@@ -181,6 +181,31 @@ a.btn { display:inline-block; text-decoration:none; }
 .stale-row { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
 .stale-row > span { flex: 1 1 260px; }
 .lost-banner { background: rgba(219,68,55,0.10); }
+/* 1.12.0: re-paired devices, lost rows, configuration backups, update servers */
+.repaired-row { border-bottom: 1px solid var(--divider-color, #e0e0e0); padding-bottom: 6px; margin-bottom: 6px; }
+.ota-banner { background: rgba(255,152,0,0.14); }
+tr.lost-row td { background: rgba(219,68,55,0.05); }
+tr.lost-row s { color: var(--error-color, #db4437); }
+.lost-since { font-size: 0.8em; margin-top: 2px; }
+.drawer-repaired p { margin: 0 0 8px; }
+.drawer-settings-actions { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.drawer-ota p { margin: 4px 0 8px; }
+.drawer-ota-claim { color: #b26a00; background: rgba(255,179,0,0.14); padding: 6px 8px; border-radius: 6px; }
+.ota-warning { color: #b26a00; font-weight: 500; }
+.ota-ok { color: var(--success-color, #43a047); }
+td.ota-cell.ota-warning { color: #b26a00; font-weight: 500; }
+td.ota-cell.ota-unknown, td.ota-cell.ota-none, td.ota-cell.ota-info { color: var(--secondary-text-color, #727272); }
+td.ota-cell .ota-cell-link { color: inherit; text-decoration: underline dotted; text-underline-offset: 3px; cursor: pointer; }
+td.ota-cell.ota-unknown .ota-cell-link { color: var(--primary-color, #03a9f4); text-decoration: none; }
+td.ota-cell .ota-cell-link:hover { text-decoration: underline; }
+.settings-pickers { display: flex; flex-wrap: wrap; gap: 12px; margin: 4px 0 10px; }
+.settings-pick { display: flex; gap: 6px; align-items: center; }
+.settings-pick { flex-wrap: wrap; min-width: 0; max-width: 100%; }
+.settings-pick select { max-width: 100%; min-width: 0; }
+.settings-table tr.settings-ep td { font-weight: 600; background: var(--secondary-background-color, #f5f5f5); }
+.settings-table tr.settings-cluster td { font-style: italic; padding-left: 12px; }
+.settings-table tr.settings-same td, .settings-table tr.settings-not_on_device td, .settings-table tr.settings-not_read td { color: var(--secondary-text-color, #727272); }
+.settings-table tr.settings-differs td:nth-child(3) { font-weight: 600; }
 .lost-list { margin-top:8px; display:flex; flex-direction:column; gap:8px; }
 .lost-device { padding:6px 8px; border-radius:6px; background: var(--card-background-color, rgba(255,255,255,0.6)); }
 .lost-device-head { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
@@ -375,6 +400,10 @@ a.health-chip-lost { text-decoration:none; cursor:pointer; }
 .mesh-node circle.unread { stroke-dasharray: 3 3; stroke: var(--secondary-text-color); }
 .mesh-node rect { fill: var(--primary-color); }
 .mesh-label { fill: var(--primary-text-color); paint-order: stroke; stroke: var(--card-background-color, #fff); stroke-width:3px; }
+/* 1.12.0: names that would overlap a more important one; shown when pointed at. */
+.mesh-label.mesh-label-hidden { visibility: hidden; }
+.mesh-node:hover .mesh-label.mesh-label-hidden { visibility: visible; }
+.mesh-node:hover { position: relative; }
 .mesh-kids { fill: var(--secondary-text-color); font-weight:600; }
 .mesh-legend { display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-top:6px; font-size:0.85em; }
 .mesh-tips { padding-left:18px; margin:0 0 12px; }

@@ -195,7 +195,34 @@ devices no longer in ZHA) moves everything to a new device, after checking it ca
 4. Clean up: remove the bindings still pointing at the old device, take it out of its groups, and optionally remove
    it from ZHA. Until then both stay bound, so nothing goes dark.
 
-Settings such as power-on behaviour aren't copied. Needs the integration.
+Settings such as power-on behaviour aren't bindings: with integration 1.12.0, **Copy settings…** at the end compares
+the old device's last settings backup with the new device. Needs the integration.
+
+### Device settings backups (needs the integration)
+
+A device's side panel has a **Configuration** section. **Back up now** saves every setting ZHA knows on each endpoint:
+power-on behaviour, dimming levels and speeds, and maker-specific settings its quirk defines (for example SONOFF's
+detach-relay mode and network LED), with its groups and bindings. Mains devices are backed up automatically after a
+scan, once a week.
+
+- **View and restore…**: the saved settings next to what the device has now. The ones that differ are ticked; **Write**
+  sends them and reads each one back.
+- **Apply to another device…**: compare a backup with another device and copy what it has too (same model first).
+- **Export** / **Import…**: keep a backup as a file.
+
+Settings ZHA has no definition for aren't saved, because there's no safe way to write them back.
+
+**Removed and paired again:** removing a device from ZHA resets it. When it's paired again, **Restore everything…** (above
+the Bindings table and in its side panel) puts its bindings back, adds it back to its groups and offers its settings
+from the last backup before the removal.
+
+### Firmware updates (needs the integration)
+
+**Check** in a device's side panel shows where it sends its firmware update requests. It should be the coordinator: if
+it's another device, its updates time out. A device that claims to be an update server is flagged on the Devices tab
+and in its side panel; the SONOFF ZBM5-3C-80/86 on firmware 1.0.6 does this and blocks updates for devices around it.
+The Devices tab's **OTA server** column shows every device's update server (click a cell to check that device); **Check update servers** reads them all
+(mains devices, one at a time).
 
 ### How does it behave? (device questions)
 

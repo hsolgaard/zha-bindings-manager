@@ -21,7 +21,7 @@
  * zha_toolkit MUST be installed (via HACS) and working for bind/unbind/scan
  * to function. See README.md for details.
  *
- * Version: 1.11.0
+ * Version: 1.12.0
  */
 (() => {
   // src/capexplorer-constants.js
@@ -78,7 +78,7 @@
 
   // src/constants.js
   var ZTK_DOMAIN = "zha_toolkit";
-  var CARD_VERSION = "1.11.0";
+  var CARD_VERSION = "1.12.0";
   var CHANGELOG_URL = "https://github.com/hsolgaard/zha-bindings-manager/blob/main/CHANGELOG.md";
   var DEFAULT_BINDABLE_OUT_CLUSTERS = [5, 6, 8, 258, 768];
   var MEMBERSHIP_EDGE_COLOR = "#8e24aa";
@@ -769,6 +769,38 @@
     /** Removes a device from ZHA (ZHA's own zha.remove action). */
     async removeZhaDevice(ieee) {
       return this.hass.callService("zha", "remove", { ieee });
+    }
+    // --- Device configuration backups and update servers (integration 1.12.0) --
+    async settingsGet(ieee) {
+      return this.hass.callWS({ type: "zha_bindings_manager/settings_get", ieee });
+    }
+    async settingsBackup(ieee) {
+      return this.hass.callWS({ type: "zha_bindings_manager/settings_backup", ieee });
+    }
+    /** Compares a backup of `sourceIeee` with what `targetIeee` has now.
+     *  snapshotId: a backup's id or "after_reset"; before: newest backup
+     *  taken before this time (a re-paired device's removal). */
+    async settingsPlan(sourceIeee, targetIeee, { snapshotId, before, endpointMap } = {}) {
+      const msg = { type: "zha_bindings_manager/settings_plan", source_ieee: sourceIeee, target_ieee: targetIeee };
+      if (snapshotId) msg.snapshot_id = snapshotId;
+      if (before) msg.before = before;
+      if (endpointMap && Object.keys(endpointMap).length) msg.endpoint_map = endpointMap;
+      return this.hass.callWS(msg);
+    }
+    async settingsApply(targetIeee, items) {
+      return this.hass.callWS({ type: "zha_bindings_manager/settings_apply", target_ieee: targetIeee, items });
+    }
+    async settingsImport(ieee, snapshot) {
+      return this.hass.callWS({ type: "zha_bindings_manager/settings_import", ieee, snapshot });
+    }
+    async otaClaimants() {
+      return this.hass.callWS({ type: "zha_bindings_manager/ota_claimants" });
+    }
+    async otaServer(ieee) {
+      return this.hass.callWS({ type: "zha_bindings_manager/ota_server", ieee });
+    }
+    async watchRepairedDismiss(ieee) {
+      return this.hass.callWS({ type: "zha_bindings_manager/watch_repaired_dismiss", ieee });
     }
     // --- Lost bindings (integration 1.8.0) -------------------------------------
     async watchGet() {
@@ -2505,15 +2537,53 @@
           autoPaused: !!d.auto_paused,
           lastCheck: d.last_check || null,
           expected: d.expected || 0,
-          fallback: !!d.fallback
+          fallback: !!d.fallback,
+          repaired: d.repaired || null
         };
       }
     }
-    return { policy: "notify", lost: [], queued: false, autoPaused: false, lastCheck: null, expected: 0, fallback: false };
+    return { policy: "notify", lost: [], queued: false, autoPaused: false, lastCheck: null, expected: 0, fallback: false, repaired: null };
+  }
+  function lostBindings(res) {
+    const out = [];
+    for (const d of lostSummary(res).devices)
+      for (const b of d.lost)
+        out.push({
+          ...b,
+          sourceIeee: normIeee(b.sourceIeee || d.ieee),
+          targetIeee: b.targetIeee ? normIeee(b.targetIeee) : b.targetIeee,
+          id: `lost:${d.ieee}:${b.key}`,
+          lost: true,
+          ownerIeee: d.ieee,
+          ownerName: d.name
+        });
+    return out;
+  }
+  function repairedDevices(res) {
+    const out = [];
+    for (const [ieee, d] of Object.entries(res && res.devices || {})) {
+      if (!d || !d.repaired) continue;
+      out.push({
+        ieee: normIeee(ieee),
+        name: d.name || ieee,
+        at: d.repaired.at || null,
+        removedAt: d.repaired.removed_at || null,
+        missingGroups: d.repaired.missing_groups || [],
+        lost: d.policy === "off" ? 0 : (d.lost || []).length
+      });
+    }
+    return out.sort((a, b) => String(a.name).localeCompare(String(b.name)));
+  }
+  function putBackStatus(result) {
+    if (typeof result === "string") return result;
+    return result && typeof result.status === "string" && result.status || "nothing";
+  }
+  function putBackDone(results) {
+    return Object.entries(results || {}).filter(([, r]) => putBackStatus(r) === "put_back").map(([ieee]) => ieee);
   }
   function putBackMessage(results, nameOf = (i) => i) {
     const by = { put_back: [], still_missing: [], waiting: [], nothing: [] };
-    for (const [ieee, st] of Object.entries(results || {})) (by[st] || by.nothing).push(nameOf(ieee));
+    for (const [ieee, r] of Object.entries(results || {})) (by[putBackStatus(r)] || by.nothing).push(nameOf(ieee));
     const parts = [];
     if (by.put_back.length) parts.push(`Put back on ${by.put_back.join(", ")}.`);
     if (by.waiting.length)
@@ -2549,8 +2619,190 @@
     press: "noticed after a button press",
     check: "noticed by Check for lost bindings",
     put_back: "still missing after Put back",
-    replace: "copied from a replaced device, waiting for it to wake up"
+    replace: "copied from a replaced device, waiting for it to wake up",
+    repaired: "noticed when it was paired again"
   };
+
+  // src/settings.js
+  var EXPORT_FORMAT = "zha-bindings-manager/settings";
+  var REASONS = {
+    manual: "backed up by hand",
+    auto: "backed up automatically",
+    after_reset: "read after a reset (its factory settings)",
+    import: "imported from a file"
+  };
+  function shortDate(iso) {
+    const d = new Date(iso);
+    if (Number.isNaN(d.getTime())) return "";
+    const day = d.toLocaleDateString(void 0, { day: "numeric", month: "short", year: "numeric" });
+    const time = d.toLocaleTimeString(void 0, { hour: "2-digit", minute: "2-digit" });
+    return `${day} ${time}`;
+  }
+  function snapshotLabel(snap) {
+    if (!snap) return "";
+    return [shortDate(snap.taken_at), REASONS[snap.reason] || ""].filter(Boolean).join(" \xB7 ");
+  }
+  function snapshotChoices(saved) {
+    const list2 = [...saved && saved.snapshots || []];
+    if (saved && saved.after_reset) list2.push(saved.after_reset);
+    return list2.map((s) => ({ id: s.reason === "after_reset" ? "after_reset" : s.id, label: snapshotLabel(s), snap: s }));
+  }
+  function settingsCount(snap) {
+    let n = 0;
+    for (const clusters of Object.values(snap && snap.endpoints || {}))
+      for (const c of Object.values(clusters || {})) n += Object.keys(c && c.attributes || {}).length;
+    return n;
+  }
+  function settingName(name) {
+    const s = String(name || "").replace(/_/g, " ").trim();
+    return s ? s[0].toUpperCase() + s.slice(1) : "";
+  }
+  function formatValue(value, label) {
+    if (value === void 0) return "\u2014";
+    if (label === "true" || label === "True") return "Yes";
+    if (label === "false" || label === "False") return "No";
+    if (label && label !== "None") return `${label} (${value})`;
+    if (value === true) return "On";
+    if (value === false) return "Off";
+    if (Array.isArray(value)) return `[${value.join(", ")}]`;
+    if (value === null) return "\u2014";
+    return String(value);
+  }
+  var rowKey = (r) => `${r.endpoint}|${r.cluster}|${r.attribute}`;
+  function defaultSelection2(rows) {
+    return new Set((rows || []).filter((r) => r.state === "differs").map(rowKey));
+  }
+  function groupRows(rows) {
+    const eps = /* @__PURE__ */ new Map();
+    for (const r of rows || []) {
+      if (!eps.has(r.endpoint)) eps.set(r.endpoint, /* @__PURE__ */ new Map());
+      const cl = eps.get(r.endpoint);
+      if (!cl.has(r.cluster)) cl.set(r.cluster, { cluster: r.cluster, name: r.cluster_name || `0x${Number(r.cluster).toString(16).padStart(4, "0")}`, rows: [] });
+      cl.get(r.cluster).rows.push(r);
+    }
+    return [...eps.entries()].sort((a, b) => a[0] - b[0]).map(([endpoint, cl]) => ({ endpoint, clusters: [...cl.values()].sort((a, b) => a.cluster - b.cluster) }));
+  }
+  function applyItems(rows, selected) {
+    return (rows || []).filter((r) => r.state === "differs" && selected.has(rowKey(r))).map((r) => ({ endpoint: r.endpoint, cluster: r.cluster, attribute: r.attribute, value: r.saved }));
+  }
+  function planCounts(rows) {
+    const c = { differs: 0, same: 0, not_on_device: 0, not_read: 0 };
+    for (const r of rows || []) c[r.state] = (c[r.state] || 0) + 1;
+    return c;
+  }
+  var RESULT_TEXT = {
+    restored: "done",
+    refused: "refused by the device",
+    didnt_stick: "accepted, but it reads back differently",
+    no_answer: "no answer",
+    not_on_device: "not on this device"
+  };
+  function resultText(r) {
+    const base = RESULT_TEXT[r.result] || r.result;
+    if (r.result === "refused" && r.status) return `${base} (${r.status})`;
+    if (r.result === "didnt_stick") return `${base}: ${formatValue(r.now, r.now_label)}`;
+    return base;
+  }
+  function applySummary(res, deviceName) {
+    const results = res && res.results || [];
+    const done = results.filter((r) => r.result === "restored").length;
+    const bad = results.length - done;
+    if (!results.length) return { level: "info", text: "Nothing to write." };
+    if (!bad) return { level: "success", text: `${deviceName}: ${done} setting${done === 1 ? "" : "s"} written and checked.` };
+    return {
+      level: done ? "warning" : "error",
+      text: `${deviceName}: ${done} of ${results.length} settings written; ${bad} didn't go through (see the list).`
+    };
+  }
+  function exportFile(snap, device) {
+    return {
+      format: EXPORT_FORMAT,
+      version: 1,
+      exported_at: (/* @__PURE__ */ new Date()).toISOString(),
+      device: device ? { ieee: device.ieee, name: device.name, manufacturer: device.manufacturer, model: device.model } : null,
+      snapshot: snap
+    };
+  }
+  function parseImport(text) {
+    let data;
+    try {
+      data = JSON.parse(text);
+    } catch (e) {
+      throw new Error("That file isn't JSON.");
+    }
+    const snap = data && data.format === EXPORT_FORMAT ? data.snapshot : data;
+    if (!snap || typeof snap !== "object" || !snap.endpoints || typeof snap.endpoints !== "object")
+      throw new Error("That file isn't a ZHA Bindings Manager settings backup.");
+    return { snapshot: snap, device: data && data.device || null };
+  }
+  function exportFileName(device, snap) {
+    const name = String(device && (device.name || device.ieee) || "device").replace(/[^A-Za-z0-9._-]+/g, "-");
+    const day = String(snap && snap.taken_at || "").slice(0, 10);
+    return `zbm-settings-${name}${day ? `-${day}` : ""}.json`;
+  }
+  function updateServerText(res, nameOf = () => null) {
+    if (!res) return { level: "info", text: "" };
+    switch (res.status) {
+      case "ok":
+        if (res.is_coordinator) return { level: "ok", text: "the coordinator (as it should)" };
+        if (res.not_set)
+          return {
+            level: "info",
+            text: "not set: it hasn't found an update server yet. It looks for one when it starts up, or when it's told an update is ready."
+          };
+        return {
+          level: "warning",
+          text: `${nameOf(res.server) || res.server}, not the coordinator. Its update requests go there, so firmware updates for it time out.`,
+          server: res.server
+        };
+      case "no_answer":
+        return { level: "info", text: "it didn't answer. A battery device has to be awake: press one of its buttons, then check again." };
+      case "no_ota":
+        return { level: "info", text: "it doesn't support firmware updates over Zigbee." };
+      case "not_in_zha":
+        return { level: "info", text: "it's not in ZHA." };
+      default:
+        return { level: "info", text: "ZHA isn't available." };
+    }
+  }
+  function claimantsText(claimants, nameOf = (i) => i) {
+    const list2 = claimants || [];
+    if (!list2.length) return "";
+    const names = list2.map((c) => nameOf(c.ieee) || c.ieee);
+    const n = list2.length;
+    return `${n} device${n === 1 ? " claims" : "s claim"} to be a firmware update server (${names.join(", ")}). Other devices can pick ${n === 1 ? "it" : "one of them"} instead of the coordinator, and their firmware updates then time out.`;
+  }
+  function isClaimant(claimants, ieee) {
+    const key = String(ieee || "").toLowerCase();
+    return (claimants || []).find((c) => String(c.ieee).toLowerCase() === key) || null;
+  }
+  function updateServerCell(res, nameOf = () => null, { battery = false, hasOta = true } = {}) {
+    const again = " Click to check again.";
+    if (!hasOta) return { text: "\u2014", level: "none", rank: 5, title: "It doesn't support firmware updates over Zigbee.", check: false };
+    if (!res)
+      return battery ? { text: "Check (battery)", level: "unknown", rank: 4, title: "Press a button on it to wake it, then click to read its OTA server.", check: true } : { text: "Check", level: "unknown", rank: 4, title: "Click to read which device it asks for firmware updates.", check: true };
+    if (res.status === "no_ota") return { text: "\u2014", level: "none", rank: 5, title: "It doesn't support firmware updates over Zigbee.", check: false };
+    if (res.status !== "ok")
+      return {
+        text: "Didn't answer",
+        level: "unknown",
+        rank: 3,
+        title: (battery ? "Press a button on it to wake it, then click to try again." : "It didn't answer.") + (battery ? "" : again),
+        check: true
+      };
+    if (res.is_coordinator) return { text: "Coordinator", level: "ok", rank: 2, title: "As it should be." + again, check: true };
+    if (res.not_set) return { text: "Not set", level: "info", rank: 1, title: "It hasn't found an OTA server yet." + again, check: true };
+    return {
+      text: nameOf(res.server) || res.server,
+      level: "warning",
+      rank: 0,
+      title: "Not the coordinator: its firmware update requests go to this device, so its updates time out." + again,
+      check: true
+    };
+  }
+  function devicesWithWrongServer(results) {
+    return Object.values(results || {}).filter((r) => r && r.status === "ok" && !r.is_coordinator && !r.not_set).length;
+  }
 
   // src/template.js
   var SHELL_HTML = `
@@ -2699,6 +2951,7 @@
 
   <div id="view-groups" class="view"></div>
   <div id="view-devices" class="view">
+    <div id="ota-banner" class="stale-banner ota-banner" style="display:none"></div>
     <div class="table-scroll">
     <table class="bindings-table">
       <thead><tr>
@@ -2710,6 +2963,7 @@
         <th data-sort="power">Power</th>
         <th data-sort="count">Bindings</th>
         <th data-sort="scanRank">Last scan</th>
+        <th data-sort="otaRank" id="th-ota" style="display:none" title="The device each device asks for firmware updates (its OTA upgrade server). It should be the coordinator. Click a cell to check it.">OTA server</th>
       </tr></thead>
       <tbody id="devices-table-body"></tbody>
     </table>
@@ -2908,7 +3162,7 @@
      *  - bundledCardVersion: the card version the integration ships (1.0.0+).
      *  Unknown values are null. */
     static async probe(hass) {
-      const none = { installed: false, available: false, version: null, bundledCardVersion: null, experimental: false, watch: false, replace: false, evidence: false, directUnbind: false, lqi: null };
+      const none = { installed: false, available: false, version: null, bundledCardVersion: null, experimental: false, watch: false, replace: false, evidence: false, directUnbind: false, settingsBackup: false, otaServer: false, lqi: null };
       try {
         const res = await hass.connection.sendMessagePromise({ type: WS_GET_CAPABILITIES });
         if (!res || !res.available) return none;
@@ -2929,6 +3183,9 @@
           evidence: !!(res.features && res.features.evidence === true),
           // 1.10.6: the integration sends unbinds itself.
           directUnbind: !!(res.features && res.features.direct_unbind === true),
+          // 1.12.0: device configuration backups and update-server reads.
+          settingsBackup: !!(res.features && res.features.settings_backup === true),
+          otaServer: !!(res.features && res.features.ota_server === true),
           lqi: res.lqi_thresholds && Number.isInteger(res.lqi_thresholds.good) && Number.isInteger(res.lqi_thresholds.weak) ? { good: res.lqi_thresholds.good, weak: res.lqi_thresholds.weak } : null
         };
       } catch (e) {
@@ -3491,7 +3748,7 @@
     }
     return out;
   }
-  var RESULT_TEXT = {
+  var RESULT_TEXT2 = {
     works: "works",
     partial: "works for some lights",
     stored_ignored: "stored but ignored",
@@ -3519,7 +3776,7 @@
     const good = (counts.works || 0) + (counts.partial || 0);
     const bad = (counts.stored_ignored || 0) + (counts.rejected || 0);
     const state = !total ? "unknown" : bad === 0 ? "works" : good === 0 ? "problems" : "mixed";
-    const parts = RESULTS.filter((r) => counts[r]).map((r) => `${counts[r]} ${RESULT_TEXT[r]}`);
+    const parts = RESULTS.filter((r) => counts[r]).map((r) => `${counts[r]} ${RESULT_TEXT2[r]}`);
     const scope = fwCounts ? fwKey === "unknown" ? "" : ` on firmware ${fwKey}` : ` (on other firmware than yours${fwKey === "unknown" ? "" : `, ${fwKey}`})`;
     const lead = state === "works" ? "Reported to work" : state === "problems" ? "Other users found this doesn't work" : "Reports are mixed";
     return {
@@ -3788,6 +4045,31 @@ a.btn { display:inline-block; text-decoration:none; }
 .stale-row { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
 .stale-row > span { flex: 1 1 260px; }
 .lost-banner { background: rgba(219,68,55,0.10); }
+/* 1.12.0: re-paired devices, lost rows, configuration backups, update servers */
+.repaired-row { border-bottom: 1px solid var(--divider-color, #e0e0e0); padding-bottom: 6px; margin-bottom: 6px; }
+.ota-banner { background: rgba(255,152,0,0.14); }
+tr.lost-row td { background: rgba(219,68,55,0.05); }
+tr.lost-row s { color: var(--error-color, #db4437); }
+.lost-since { font-size: 0.8em; margin-top: 2px; }
+.drawer-repaired p { margin: 0 0 8px; }
+.drawer-settings-actions { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.drawer-ota p { margin: 4px 0 8px; }
+.drawer-ota-claim { color: #b26a00; background: rgba(255,179,0,0.14); padding: 6px 8px; border-radius: 6px; }
+.ota-warning { color: #b26a00; font-weight: 500; }
+.ota-ok { color: var(--success-color, #43a047); }
+td.ota-cell.ota-warning { color: #b26a00; font-weight: 500; }
+td.ota-cell.ota-unknown, td.ota-cell.ota-none, td.ota-cell.ota-info { color: var(--secondary-text-color, #727272); }
+td.ota-cell .ota-cell-link { color: inherit; text-decoration: underline dotted; text-underline-offset: 3px; cursor: pointer; }
+td.ota-cell.ota-unknown .ota-cell-link { color: var(--primary-color, #03a9f4); text-decoration: none; }
+td.ota-cell .ota-cell-link:hover { text-decoration: underline; }
+.settings-pickers { display: flex; flex-wrap: wrap; gap: 12px; margin: 4px 0 10px; }
+.settings-pick { display: flex; gap: 6px; align-items: center; }
+.settings-pick { flex-wrap: wrap; min-width: 0; max-width: 100%; }
+.settings-pick select { max-width: 100%; min-width: 0; }
+.settings-table tr.settings-ep td { font-weight: 600; background: var(--secondary-background-color, #f5f5f5); }
+.settings-table tr.settings-cluster td { font-style: italic; padding-left: 12px; }
+.settings-table tr.settings-same td, .settings-table tr.settings-not_on_device td, .settings-table tr.settings-not_read td { color: var(--secondary-text-color, #727272); }
+.settings-table tr.settings-differs td:nth-child(3) { font-weight: 600; }
 .lost-list { margin-top:8px; display:flex; flex-direction:column; gap:8px; }
 .lost-device { padding:6px 8px; border-radius:6px; background: var(--card-background-color, rgba(255,255,255,0.6)); }
 .lost-device-head { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
@@ -3982,6 +4264,10 @@ a.health-chip-lost { text-decoration:none; cursor:pointer; }
 .mesh-node circle.unread { stroke-dasharray: 3 3; stroke: var(--secondary-text-color); }
 .mesh-node rect { fill: var(--primary-color); }
 .mesh-label { fill: var(--primary-text-color); paint-order: stroke; stroke: var(--card-background-color, #fff); stroke-width:3px; }
+/* 1.12.0: names that would overlap a more important one; shown when pointed at. */
+.mesh-label.mesh-label-hidden { visibility: hidden; }
+.mesh-node:hover .mesh-label.mesh-label-hidden { visibility: visible; }
+.mesh-node:hover { position: relative; }
 .mesh-kids { fill: var(--secondary-text-color); font-weight:600; }
 .mesh-legend { display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-top:6px; font-size:0.85em; }
 .mesh-tips { padding-left:18px; margin:0 0 12px; }
@@ -4267,7 +4553,7 @@ a.health-chip-lost { text-decoration:none; cursor:pointer; }
   }
 
   // src/groups.js
-  function groupRows({ groups, bindings, classify, coordinatorIeee }) {
+  function groupRows2({ groups, bindings, classify, coordinatorIeee }) {
     const coord = coordinatorIeee ? normIeee(coordinatorIeee) : null;
     return (groups || []).map((g) => {
       const groupId = Number(g.group_id);
@@ -4296,7 +4582,7 @@ a.health-chip-lost { text-decoration:none; cursor:pointer; }
       if (b && b.isGroup && Number.isFinite(Number(b.groupId)) && !known.has(Number(b.groupId))) ids2.add(Number(b.groupId));
     }
     const fake = [...ids2].map((id) => ({ group_id: id, name: `Group ${groupIdHex(id)}`, members: [] }));
-    return groupRows({ groups: fake, bindings, classify, coordinatorIeee }).map(({ groupId, controllers, others }) => ({ groupId, controllers, others })).sort((a, b) => a.groupId - b.groupId);
+    return groupRows2({ groups: fake, bindings, classify, coordinatorIeee }).map(({ groupId, controllers, others }) => ({ groupId, controllers, others })).sort((a, b) => a.groupId - b.groupId);
   }
   function groupBindingOp(binding, bindings, clusters) {
     const op = { sourceIeee: normIeee(binding.sourceIeee), endpoint: Number(binding.sourceEndpoint), clusterId: Number(binding.clusterId) };
@@ -5234,6 +5520,8 @@ a.health-chip-lost { text-decoration:none; cursor:pointer; }
       this._replaceEnabled = !!probe.replace;
       this._evidenceEnabled = !!probe.evidence;
       this._directUnbind = !!probe.directUnbind;
+      this._settingsEnabled = !!probe.settingsBackup;
+      this._otaEnabled = !!probe.otaServer;
       if (this._api) {
         this._api.watchEnabled = this._watchEnabled;
         this._api.directUnbind = this._directUnbind;
@@ -5670,7 +5958,12 @@ a.health-chip-lost { text-decoration:none; cursor:pointer; }
       } catch (e) {
         this._lost = null;
       }
+      if (this._otaEnabled && !this._otaLoaded) {
+        this._otaLoaded = true;
+        this._otaLoad();
+      }
       this._renderLostBanner();
+      if (this._view === "table") this._renderTable();
       this._renderHealthSummary(this._computeHealthMap());
       if (this._edgesLayer) this._renderGraphEdges();
       if (this._drawerIeee) this._renderDrawer();
@@ -5706,7 +5999,7 @@ a.health-chip-lost { text-decoration:none; cursor:pointer; }
       };
       const m = putBackMessage(res.results, nameOf);
       this._setStatus(m.level, m.text, 0);
-      const done = Object.entries(res.results || {}).filter(([, st]) => st === "put_back").map(([i]) => i);
+      const done = putBackDone(res.results);
       if (done.length) this._scanBindings(done, { tries: 1 });
     }
     async _lostForget(ieee, key) {
@@ -5718,6 +6011,8 @@ a.health-chip-lost { text-decoration:none; cursor:pointer; }
       const vals = Object.values(res && res.results || res || {});
       const asleep = vals.filter((v) => v === "no_answer").length;
       const lost = lostSummary(this._lost).total;
+      const changed = Object.entries(res && res.results || {}).filter(([, v]) => v === "lost").map(([i]) => i);
+      if (changed.length) this._scanBindings(changed, { tries: 1 });
       this._setStatus(
         lost ? "warning" : "success",
         `Checked ${vals.length} device${vals.length === 1 ? "" : "s"}: ${lost ? `${lost} lost binding${lost === 1 ? "" : "s"}` : "nothing lost"}.${asleep ? ` ${asleep} didn't answer (asleep or off); they're checked again when they next wake up.` : ""}`,
@@ -5728,9 +6023,25 @@ a.health-chip-lost { text-decoration:none; cursor:pointer; }
       const el = this._q("#lost-banner");
       if (!el) return;
       const sum = lostSummary(this._lost);
-      if (!this._watchEnabled || !sum.total) {
+      const repaired = this._watchEnabled ? repairedDevices(this._lost) : [];
+      if (!this._watchEnabled || !sum.total && !repaired.length) {
         el.style.display = "none";
         el.innerHTML = "";
+        return;
+      }
+      const repairedHtml = repaired.map(
+        (r) => `<div class="stale-row repaired-row">
+          <span><strong>${escapeHtml(this._ieeeLabel(r.ieee, { plain: true }) || r.name)}</strong> was paired again ${escapeHtml(
+          sinceText(r.at)
+        )}. Removing it from ZHA reset it: ${escapeHtml(this._repairedWhatText(r))}.</span>
+          <button class="btn btn-small btn-primary" data-restore-all="${escapeHtml(r.ieee)}" ${this._restoreBusy ? "disabled" : ""}>Restore everything\u2026</button>
+          <button class="btn btn-small" data-repaired-dismiss="${escapeHtml(r.ieee)}">Dismiss</button>
+        </div>`
+      ).join("");
+      if (!sum.total) {
+        el.innerHTML = repairedHtml;
+        el.style.display = "";
+        this._wireRepairedButtons("#lost-banner");
         return;
       }
       const busy = this._lostBusy;
@@ -5751,7 +6062,7 @@ a.health-chip-lost { text-decoration:none; cursor:pointer; }
         ).join("")}</ul>
             </div>`
       ).join("")}</div>` : "";
-      el.innerHTML = `
+      el.innerHTML = `${repairedHtml}
       <div class="stale-row">
         <span><strong>${sum.total} lost binding${sum.total === 1 ? "" : "s"}</strong> on ${nDev} device${nDev === 1 ? "" : "s"}:
           ${nDev === 1 ? "it" : "they"} had ${sum.total === 1 ? "this binding" : "these bindings"} before and ${nDev === 1 ? "doesn't" : "don't"} any more,
@@ -5785,6 +6096,552 @@ a.health-chip-lost { text-decoration:none; cursor:pointer; }
           if (d) this._openDeviceDrawer(d);
         })
       );
+      this._wireRepairedButtons("#lost-banner");
+    }
+    // -------------------------------------------------------------------
+    // Re-paired devices, configuration backups, update servers (1.12.0)
+    // -------------------------------------------------------------------
+    /** "2 lost bindings, 1 group membership (Lounge) and its settings". */
+    _repairedWhatText(r) {
+      const parts = [];
+      if (r.lost) parts.push(`${r.lost} lost binding${r.lost === 1 ? "" : "s"}`);
+      if (r.missingGroups.length)
+        parts.push(
+          `${r.missingGroups.length} group membership${r.missingGroups.length === 1 ? "" : "s"} (${r.missingGroups.map((g) => g.name).join(", ")})`
+        );
+      if (this._settingsEnabled) parts.push("its settings");
+      if (!parts.length) return "nothing that ZHA Bindings Manager knew about";
+      return parts.length === 1 ? parts[0] : `${parts.slice(0, -1).join(", ")} and ${parts[parts.length - 1]}`;
+    }
+    _wireRepairedButtons(scope) {
+      this._qa(`${scope} [data-restore-all]`).forEach((b) => b.addEventListener("click", () => this._restoreEverything(b.dataset.restoreAll)));
+      this._qa(`${scope} [data-repaired-dismiss]`).forEach(
+        (b) => b.addEventListener("click", (e) => {
+          e.preventDefault();
+          this._lostAction("Dismiss", () => this._api.watchRepairedDismiss(b.dataset.repairedDismiss));
+        })
+      );
+    }
+    /** A device was removed and paired again. Restore in this order:
+     *  1. its groups, 2. its settings (shown first, from the last backup
+     *  before the removal), 3. its bindings, put back and read back last, so
+     *  they go onto a device that's already set up again (detach-relay mode
+     *  and so on). Without settings backups it goes straight to 3. */
+    async _restoreEverything(ieee) {
+      const key = normIeee(ieee);
+      const rep = repairedDevices(this._lost).find((r) => r.ieee === key);
+      if (!rep || this._restoreBusy) return;
+      this._restoreBusy = key;
+      this._renderLostBanner();
+      if (this._drawerIeee) this._renderDrawer();
+      const done = [];
+      try {
+        if (rep.missingGroups.length) {
+          const ok = [];
+          const failed = [];
+          for (const g of rep.missingGroups) {
+            try {
+              await this._api.addGroupMembers(g.group_id, [{ ieee: key, endpoint: g.endpoint_id }]);
+              ok.push(g.name);
+            } catch (err) {
+              failed.push(`${g.name} (${extractErrorMessage(err)})`);
+            }
+          }
+          if (ok.length) done.push(`Groups: added back to ${ok.join(", ")}.`);
+          if (failed.length) done.push(`Groups: couldn't add it back to ${failed.join(", ")}.`);
+          await this._reloadDevices({ quiet: true });
+        }
+      } finally {
+        this._restoreBusy = null;
+      }
+      if (!this._settingsEnabled) {
+        const res = await this._restoreBindings(key);
+        this._setStatus(res.level, [...done, res.text].join(" "), 0);
+        return;
+      }
+      this._openSettings({
+        sourceIeee: key,
+        targetIeee: key,
+        mode: "restore",
+        before: rep.removedAt || null,
+        intro: done,
+        repaired: true
+      });
+    }
+    /** Step 3 of Restore everything: put the lost bindings back, read the
+     *  device back, and say what it has now. {level, text}. */
+    async _restoreBindings(ieee) {
+      const key = normIeee(ieee);
+      const name = this._ieeeLabel(key, { plain: true });
+      let text = "";
+      try {
+        if (lostFor(this._lost, key).lost.length) {
+          const res = await this._api.watchPutBack(key);
+          text = putBackMessage(res.results, () => name).text;
+        }
+        await this._scanBindings([key], { tries: 1 });
+      } catch (err) {
+        return { level: "error", text: `Bindings: ${extractErrorMessage(err)}` };
+      }
+      await this._lostLoad();
+      const still = lostFor(this._lost, key).lost.length;
+      const has = this._rawBindings().filter((b) => normIeee(b.sourceIeee) === key && b.targetIeee !== this._coordinatorIeee()).length;
+      if (still)
+        return {
+          level: "warning",
+          text: `Bindings: ${still} still missing after putting them back. ${text}`.trim()
+        };
+      return {
+        level: "success",
+        text: `Bindings: ${text ? `${text} ` : "nothing was missing. "}Read back from the device: ${has} binding${has === 1 ? "" : "s"} in place.`
+      };
+    }
+    async _otaLoad() {
+      if (!this._otaEnabled || !this._api) return;
+      try {
+        const res = await this._api.otaClaimants();
+        this._otaClaimants = res && res.claimants || [];
+        this._otaServers = new Map(Object.entries(res && res.results || {}).map(([k, v]) => [normIeee(k), v]));
+      } catch (e) {
+        this._otaClaimants = [];
+      }
+      this._renderOtaBanner();
+      if (this._view === "devices") this._renderDevicesTab();
+      if (this._drawerIeee) this._renderDrawer();
+    }
+    /** Does this device have an OTA client cluster? True when its clusters
+     *  aren't known yet: reading it then says so. */
+    _hasOta(ieee) {
+      const cl = this._clusterCache.get(ieee) || this._clusterCache.get(normIeee(ieee));
+      return !cl || cl.some((c) => c.type === "out" && Number(c.id) === 25);
+    }
+    /** Devices tab: read every mains device's update server, one at a time. */
+    async _otaCheckAll() {
+      if (this._otaProgress) return;
+      const coord = normIeee(this._coordinatorIeee() || "");
+      const list2 = this._devices.filter((d) => normIeee(d.ieee) !== coord && !this._isBatteryDevice(d) && this._hasOta(d.ieee));
+      if (!this._otaServers) this._otaServers = /* @__PURE__ */ new Map();
+      this._otaProgress = { done: 0, total: list2.length, stop: false };
+      this._renderOtaBanner();
+      for (const d of list2) {
+        if (this._otaProgress.stop) break;
+        try {
+          this._otaServers.set(normIeee(d.ieee), await this._api.otaServer(d.ieee));
+        } catch (err) {
+          this._otaServers.set(normIeee(d.ieee), { status: "error", detail: extractErrorMessage(err) });
+        }
+        this._otaProgress.done += 1;
+        this._renderOtaBanner();
+        if (this._view === "devices") this._renderDevicesTab();
+        await new Promise((r) => setTimeout(r, 800));
+      }
+      const wrong = devicesWithWrongServer(Object.fromEntries(this._otaServers));
+      const stopped = this._otaProgress.stop;
+      this._otaProgress = null;
+      this._renderOtaBanner();
+      if (this._view === "devices") this._renderDevicesTab();
+      this._setStatus(
+        wrong ? "warning" : "success",
+        `${stopped ? "Stopped. " : ""}Checked where devices get their firmware updates: ${wrong ? `${wrong} device${wrong === 1 ? " gets them" : "s get them"} from a device other than the coordinator, so ${wrong === 1 ? "its" : "their"} updates will time out.` : "all from the coordinator, or not set yet."} Battery devices were skipped: check them from their side panel when they're awake.`,
+        0
+      );
+    }
+    /** Devices tab: devices that claim to be a firmware update server. */
+    _renderOtaBanner() {
+      const el = this._q("#ota-banner");
+      if (!el) return;
+      const list2 = this._otaClaimants || [];
+      const wrong = devicesWithWrongServer(this._otaServers ? Object.fromEntries(this._otaServers) : {});
+      const prog = this._otaProgress;
+      if (!list2.length && !wrong && !prog) {
+        el.style.display = "none";
+        el.innerHTML = "";
+        return;
+      }
+      const nameOf = (i) => this._ieeeLabel(i, { plain: true });
+      const wrongText = wrong ? ` ${wrong} device${wrong === 1 ? " gets its" : "s get their"} updates from a device other than the coordinator (see the OTA server column).` : "";
+      const checkBtn = prog ? `<span class="muted">Checking ${prog.done} of ${prog.total}\u2026</span><button class="btn btn-small" id="btn-ota-stop">Stop</button>` : `<button class="btn btn-small btn-primary" id="btn-ota-check-all" title="Reads where each mains device gets its firmware updates, one at a time. Battery devices are skipped.">Check update servers</button>`;
+      el.innerHTML = `<div class="stale-row"><span>${list2.length ? `${escapeHtml(claimantsText(list2, nameOf))} It's a fault in ${list2.length === 1 ? "its" : "their"} firmware: only the maker can fix it.` : ""}${escapeHtml(wrongText)}</span>${checkBtn}${list2.map((c) => `<button class="btn btn-small" data-ota-claimant="${escapeHtml(c.ieee)}">Open ${escapeHtml(nameOf(c.ieee))}</button>`).join("")}</div>`;
+      el.style.display = "";
+      const checkAll = this._q("#btn-ota-check-all");
+      if (checkAll) checkAll.addEventListener("click", () => this._otaCheckAll());
+      const stop = this._q("#btn-ota-stop");
+      if (stop)
+        stop.addEventListener("click", () => {
+          if (this._otaProgress) this._otaProgress.stop = true;
+        });
+      this._qa("#ota-banner [data-ota-claimant]").forEach(
+        (b) => b.addEventListener("click", () => {
+          const d = this._devices.find((x) => normIeee(x.ieee) === normIeee(b.dataset.otaClaimant));
+          if (d) this._openDeviceDrawer(d);
+        })
+      );
+    }
+    _nameIfKnown(ieee) {
+      const d = this._devices.find((x) => normIeee(x.ieee) === normIeee(ieee || ""));
+      return d ? this._deviceLabel(d) : null;
+    }
+    async _otaCheck(ieee) {
+      const key = normIeee(ieee);
+      if (!this._otaServers) this._otaServers = /* @__PURE__ */ new Map();
+      this._otaBusy = key;
+      if (this._drawerIeee) this._renderDrawer();
+      if (this._view === "devices") this._renderDevicesTab();
+      try {
+        this._otaServers.set(key, await this._api.otaServer(key));
+      } catch (err) {
+        this._otaServers.set(key, { status: "error", detail: extractErrorMessage(err) });
+      } finally {
+        this._otaBusy = null;
+        if (this._drawerIeee) this._renderDrawer();
+        this._renderOtaBanner();
+        if (this._view === "devices") this._renderDevicesTab();
+      }
+    }
+    /** Side panel: firmware updates. */
+    _drawerOtaHtml(d) {
+      if (!this._otaEnabled) return "";
+      const key = normIeee(d.ieee);
+      const claim = isClaimant(this._otaClaimants, key);
+      const res = this._otaServers && this._otaServers.get(key);
+      const busy = this._otaBusy === key;
+      let line = `<span class="muted">not checked yet.</span>`;
+      if (busy) line = `<span class="muted">checking\u2026</span>`;
+      else if (res) {
+        const t = updateServerText(res, (i) => this._nameIfKnown(i));
+        line = `<span class="ota-${escapeHtml(t.level)}">${escapeHtml(t.text)}</span>${t.server && this._nameIfKnown(t.server) ? ` <a href="#" class="src-link" data-ota-open="${escapeHtml(t.server)}">Open it</a>` : ""}${res.at ? ` <span class="muted">(checked ${escapeHtml(sinceText(res.at))})</span>` : ""}`;
+      }
+      return `<div class="drawer-section drawer-ota">
+      <div class="drawer-section-title">Firmware updates</div>
+      ${claim ? `<p class="drawer-ota-claim">\u26A0 This device claims to be a firmware update server: it lists the OTA cluster as an input on endpoint ${escapeHtml(
+        claim.endpoints.join(", ")
+      )}. Devices near it can pick it instead of the coordinator, and their firmware updates then time out. It's a firmware fault: report it to the maker.</p>` : ""}
+      <p>OTA server: ${line}</p>
+      <button class="btn btn-small" id="drawer-ota-check" ${busy ? "disabled" : ""} title="Reads where this device sends its firmware update requests (its OTA upgrade server)">Check</button>
+    </div>`;
+    }
+    async _settingsLoad(ieee, force = false) {
+      const key = normIeee(ieee);
+      if (!this._settingsSaved) this._settingsSaved = /* @__PURE__ */ new Map();
+      if (!this._settingsLoading) this._settingsLoading = /* @__PURE__ */ new Set();
+      if (!force && this._settingsSaved.has(key) || this._settingsLoading.has(key)) return this._settingsSaved.get(key);
+      this._settingsLoading.add(key);
+      try {
+        this._settingsSaved.set(key, await this._api.settingsGet(key));
+      } catch (e) {
+        this._settingsSaved.set(key, { snapshots: [], after_reset: null, error: extractErrorMessage(e) });
+      } finally {
+        this._settingsLoading.delete(key);
+      }
+      if (this._drawerIeee && normIeee(this._drawerIeee) === key) this._renderDrawer();
+      return this._settingsSaved.get(key);
+    }
+    /** Side panel: configuration backups. */
+    _drawerSettingsHtml(d) {
+      if (!this._settingsEnabled) return "";
+      const key = normIeee(d.ieee);
+      const saved = this._settingsSaved && this._settingsSaved.get(key);
+      if (saved === void 0) this._settingsLoad(key);
+      const latest = saved && (saved.snapshots || [])[0];
+      const busy = this._settingsBusy === key;
+      const any = snapshotChoices(saved).length > 0;
+      const battery = this._isBatteryDevice(d);
+      let status = "Loading\u2026";
+      if (saved && latest) status = `Last backup: ${snapshotLabel(latest)}, ${settingsCount(latest)} settings.`;
+      else if (saved && saved.after_reset) status = "No backup from before it was reset, only its factory settings.";
+      else if (saved) status = battery ? "No backup yet." : "No backup yet. Mains devices are backed up automatically after a scan, once a week.";
+      return `<div class="drawer-section drawer-settings">
+      <div class="drawer-section-title">Configuration</div>
+      <p class="hint">${escapeHtml(status)}${battery ? " It runs on battery: press one of its buttons just before backing up or restoring." : ""}</p>
+      <div class="drawer-settings-actions">
+        <button class="btn btn-small" id="drawer-settings-backup" ${busy ? "disabled" : ""} title="Reads every setting ZHA knows on this device and saves it">${busy ? "Reading\u2026" : "Back up now"}</button>
+        ${any ? `<button class="btn btn-small" id="drawer-settings-view" title="See the saved settings next to what it has now, and restore them">View and restore\u2026</button>
+               <button class="btn btn-small" id="drawer-settings-apply" title="Copy these settings to another device, for example its replacement">Apply to another device\u2026</button>
+               <button class="btn btn-small" id="drawer-settings-export" title="Download the latest backup as a file">Export</button>` : ""}
+        <button class="btn btn-small" id="drawer-settings-import" title="Load a backup from a file, to view it or apply it to this device">Import\u2026</button>
+        <input type="file" id="drawer-settings-file" accept=".json,application/json" style="display:none">
+      </div>
+      <details class="drawer-lost-expect"><summary>What's saved</summary>
+        <ul>
+          <li>Every setting ZHA knows on each endpoint: power-on behaviour, dimming levels and speeds, and maker-specific settings its quirk defines (for example SONOFF's detach-relay mode and network LED).</li>
+          <li>Its group memberships and bindings, for the record. Bindings are put back by Lost bindings, groups by Restore everything.</li>
+          <li>Not saved: settings ZHA has no definition for (there's no safe way to write them back), timers, and identify, time, poll and update settings.</li>
+          <li>Nothing is written until you've seen the list and pressed Write. Each setting is read back afterwards.</li>
+        </ul>
+      </details>
+    </div>`;
+    }
+    async _settingsBackupNow(d) {
+      const key = normIeee(d.ieee);
+      this._settingsBusy = key;
+      this._renderDrawer();
+      try {
+        const snap = await this._api.settingsBackup(key);
+        this._setStatus("success", `${this._deviceLabel(d)}: ${settingsCount(snap)} settings backed up${snap.unread ? ` (${snap.unread} didn't answer)` : ""}.`);
+      } catch (err) {
+        this._setStatus("error", `Back up ${this._deviceLabel(d)}: ${extractErrorMessage(err)}`, 0);
+      } finally {
+        this._settingsBusy = null;
+        await this._settingsLoad(key, true);
+        if (this._drawerIeee) this._renderDrawer();
+      }
+    }
+    async _settingsExport(d) {
+      const saved = await this._settingsLoad(d.ieee);
+      const snap = saved && (saved.snapshots || [])[0] || saved && saved.after_reset;
+      if (!snap) return;
+      const dev = { ieee: d.ieee, name: this._deviceLabel(d), manufacturer: d.manufacturer, model: d.model };
+      const blob = new Blob([JSON.stringify(exportFile(snap, dev), null, 2)], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = exportFileName(dev, snap);
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 1e3);
+    }
+    async _settingsImportFile(d, file) {
+      if (!file) return;
+      try {
+        const { snapshot } = parseImport(await file.text());
+        const imported = await this._api.settingsImport(d.ieee, snapshot);
+        await this._settingsLoad(d.ieee, true);
+        this._openSettings({ sourceIeee: d.ieee, targetIeee: d.ieee, snapshotId: imported.id, mode: "restore" });
+      } catch (err) {
+        this._setStatus("error", `Import: ${extractErrorMessage(err)}`, 0);
+      }
+    }
+    // --- the settings dialog ---------------------------------------------------
+    /** mode "restore": a device's backup against the same device.
+     *  mode "apply": a device's backup against another device (picked here). */
+    async _openSettings({ sourceIeee, targetIeee = null, snapshotId = null, before = null, mode = "restore", intro = null, repaired = false }) {
+      this._closeDrawer();
+      this._settingsDlg = {
+        mode,
+        sourceIeee: normIeee(sourceIeee),
+        targetIeee: targetIeee ? normIeee(targetIeee) : null,
+        snapshotId,
+        before,
+        intro: intro || [],
+        repaired,
+        endpointMap: {},
+        plan: null,
+        selected: /* @__PURE__ */ new Set(),
+        results: null,
+        error: null,
+        loading: false
+      };
+      const src = this._ieeeLabel(sourceIeee, { plain: true });
+      this._q("#dialog-title").textContent = mode === "apply" ? `Apply ${src}'s settings to another device` : `Settings of ${src}`;
+      const panel = this._q(".dialog-panel");
+      if (panel) panel.classList.add("wide");
+      this._q("#dialog").classList.add("open");
+      await this._settingsLoad(sourceIeee);
+      if (this._settingsDlg && this._settingsDlg.targetIeee) await this._settingsPlan();
+      else this._renderSettings();
+    }
+    async _settingsPlan() {
+      const s = this._settingsDlg;
+      if (!s || !s.targetIeee) return;
+      s.plan = null;
+      s.results = null;
+      s.error = null;
+      s.loading = true;
+      this._renderSettings();
+      try {
+        const plan = await this._api.settingsPlan(s.sourceIeee, s.targetIeee, { snapshotId: s.snapshotId, before: s.before, endpointMap: s.endpointMap });
+        if (this._settingsDlg !== s) return;
+        s.plan = plan;
+        s.snapshotId = plan.snapshot_id || s.snapshotId;
+        s.selected = defaultSelection2(plan.rows);
+      } catch (err) {
+        if (this._settingsDlg !== s) return;
+        s.error = extractErrorMessage(err);
+      } finally {
+        s.loading = false;
+        if (this._settingsDlg === s) this._renderSettings();
+      }
+    }
+    async _settingsWrite() {
+      const s = this._settingsDlg;
+      if (!s || !s.plan) return;
+      const items = applyItems(s.plan.rows, s.selected);
+      if (!items.length) return;
+      s.loading = true;
+      this._renderSettings();
+      try {
+        s.results = await this._api.settingsApply(s.targetIeee, items);
+        const m = applySummary(s.results, this._ieeeLabel(s.targetIeee, { plain: true }));
+        this._setStatus(m.level, m.text, m.level === "success" ? void 0 : 0);
+      } catch (err) {
+        s.error = extractErrorMessage(err);
+      } finally {
+        s.loading = false;
+        if (this._settingsDlg === s) this._renderSettings();
+      }
+      if (s.repaired && s.results) await this._settingsThenBindings(s);
+    }
+    /** Restore everything, step 3, after the settings (written or skipped). */
+    async _settingsThenBindings(s) {
+      s.bindings = { level: "info", text: "Bindings: putting them back and reading the device\u2026" };
+      this._renderSettings();
+      s.bindings = await this._restoreBindings(s.targetIeee);
+      const settingsOk = !s.results || applySummary(s.results, "").level === "success";
+      if (s.bindings.level === "success" && settingsOk) {
+        try {
+          await this._api.watchRepairedDismiss(s.targetIeee);
+          await this._lostLoad();
+        } catch (e) {
+        }
+      }
+      if (this._settingsDlg === s) this._renderSettings();
+    }
+    _settingsTargets() {
+      const s = this._settingsDlg;
+      const src = this._devices.find((d) => normIeee(d.ieee) === s.sourceIeee);
+      const coord = this._coordinatorIeee();
+      return this._devices.filter((d) => normIeee(d.ieee) !== s.sourceIeee && normIeee(d.ieee) !== normIeee(coord || "")).map((d) => ({ d, same: !!(src && d.model && d.model === src.model) })).sort((a, b) => Number(b.same) - Number(a.same) || this._deviceLabel(a.d).localeCompare(this._deviceLabel(b.d)));
+    }
+    _renderSettings() {
+      const s = this._settingsDlg;
+      const body = this._q("#dialog-body");
+      if (!s || !body) return;
+      const saved = this._settingsSaved && this._settingsSaved.get(s.sourceIeee);
+      const choices = snapshotChoices(saved);
+      const intro = s.intro.length ? `<div class="flow-callout flow-result-success">${s.intro.map((t) => `<div>${escapeHtml(t)}</div>`).join("")}</div>` : "";
+      const repairedNote = s.repaired ? `<p>Next its settings, then its bindings. Below is its last backup from before it was removed, next to what it has now; ticked settings are the ones that differ. After writing them, its bindings are put back and read back from the device.</p>` : "";
+      if (!choices.length && !s.snapshotId) {
+        const bindingsStep2 = s.bindings ? `<div class="flow-callout flow-result-${escapeHtml(s.bindings.level)}">${escapeHtml(s.bindings.text)}</div>` : "";
+        body.innerHTML = `${intro}<p>There's no backup of ${escapeHtml(this._ieeeLabel(s.sourceIeee, { plain: true }))} yet${s.repaired ? " from before it was removed, so its settings can't be restored" : ""}.</p>${bindingsStep2}<div class="dialog-actions">${s.repaired && !s.bindings ? `<button class="btn btn-primary" id="settings-skip">Put bindings back</button>` : ""}<button class="btn" id="settings-close">${s.bindings ? "Done" : "Close"}</button></div>`;
+        const skip2 = this._q("#settings-skip");
+        if (skip2) skip2.addEventListener("click", () => this._settingsThenBindings(s));
+        this._q("#settings-close").addEventListener("click", () => this._closeSettings());
+        return;
+      }
+      const current = s.plan ? s.plan.snapshot_id : s.snapshotId;
+      const picker = choices.length ? `<label class="settings-pick">Backup:
+          <select id="settings-snapshot">${choices.map((c) => `<option value="${escapeHtml(c.id)}" ${c.id === current || !current && c === choices[0] ? "selected" : ""}>${escapeHtml(c.label)}</option>`).join("")}</select></label>` : "";
+      const targetPicker = s.mode === "apply" ? `<label class="settings-pick">Apply to:
+            <select id="settings-target"><option value="">Choose a device\u2026</option>${this._settingsTargets().map(
+        ({ d, same }) => `<option value="${escapeHtml(normIeee(d.ieee))}" ${normIeee(d.ieee) === s.targetIeee ? "selected" : ""}>${escapeHtml(this._deviceLabel(d))}${same ? " (same model)" : d.model ? ` (${escapeHtml(d.model)})` : ""}</option>`
+      ).join("")}</select></label>` : "";
+      let main = "";
+      if (s.loading) main = `<p class="muted">${s.results === null && s.plan ? "Writing and checking\u2026" : "Reading the device\u2026"}</p>`;
+      else if (s.error) main = `<div class="flow-callout flow-result-warning">${escapeHtml(s.error)}</div>`;
+      else if (s.results) main = this._settingsResultsHtml();
+      else if (s.plan) main = this._settingsPlanHtml();
+      else if (s.mode === "apply") main = `<p class="muted">Choose the device to compare with.</p>`;
+      const n = s.plan && !s.results ? applyItems(s.plan.rows, s.selected).length : 0;
+      const anyDiffer = !!(s.plan && s.plan.rows.some((r) => r.state === "differs"));
+      const deciding = s.plan && !s.results && !s.loading && !s.bindings;
+      let actions = "";
+      if (deciding && anyDiffer)
+        actions = `<button class="btn btn-primary" id="settings-write" ${n ? "" : "disabled"}>Write ${n} setting${n === 1 ? "" : "s"}${s.repaired ? ", then put bindings back" : ""}</button>${s.repaired ? `<button class="btn" id="settings-skip">Skip settings, put bindings back</button>` : ""}`;
+      else if (deciding && s.repaired) actions = `<button class="btn btn-primary" id="settings-skip">Put bindings back</button>`;
+      const matches = deciding && !anyDiffer ? `<div class="flow-callout flow-result-success">Everything matches the backup: nothing to write.</div>` : "";
+      const bindingsStep = s.bindings ? `<div class="flow-callout flow-result-${escapeHtml(s.bindings.level)}">${escapeHtml(s.bindings.text)}</div>` : "";
+      const finished = s.results || s.bindings && s.bindings.level !== "info" || deciding && !anyDiffer && !s.repaired;
+      const tail = s.bindings && s.bindings.level !== "info" ? `<p>Now press each of its buttons and check the lights respond.</p>` : "";
+      body.innerHTML = `${intro}${repairedNote}<div class="settings-pickers">${picker}${targetPicker}</div>${matches}${main}${bindingsStep}${tail}
+      <div class="dialog-actions">${actions}<button class="btn" id="settings-close">${finished ? "Done" : "Close"}</button></div>`;
+      const skip = this._q("#settings-skip");
+      if (skip) skip.addEventListener("click", () => this._settingsThenBindings(s));
+      const snapSel = this._q("#settings-snapshot");
+      if (snapSel)
+        snapSel.addEventListener("change", () => {
+          s.snapshotId = snapSel.value;
+          s.before = null;
+          if (s.targetIeee) this._settingsPlan();
+        });
+      const tgtSel = this._q("#settings-target");
+      if (tgtSel)
+        tgtSel.addEventListener("change", () => {
+          s.targetIeee = tgtSel.value || null;
+          s.endpointMap = {};
+          if (s.targetIeee) this._settingsPlan();
+          else {
+            s.plan = null;
+            this._renderSettings();
+          }
+        });
+      this._qa("#dialog-body [data-settings-row]").forEach(
+        (cb) => cb.addEventListener("change", () => {
+          if (cb.checked) s.selected.add(cb.dataset.settingsRow);
+          else s.selected.delete(cb.dataset.settingsRow);
+          this._renderSettings();
+        })
+      );
+      this._qa("#dialog-body [data-settings-epmap]").forEach(
+        (sel) => sel.addEventListener("change", () => {
+          if (sel.value) s.endpointMap[sel.dataset.settingsEpmap] = Number(sel.value);
+          else delete s.endpointMap[sel.dataset.settingsEpmap];
+          this._settingsPlan();
+        })
+      );
+      const write = this._q("#settings-write");
+      if (write) write.addEventListener("click", () => this._settingsWrite());
+      this._q("#settings-close").addEventListener("click", () => this._closeSettings());
+    }
+    _settingsPlanHtml() {
+      const s = this._settingsDlg;
+      const p = s.plan;
+      const c = planCounts(p.rows);
+      const target = this._ieeeLabel(s.targetIeee, { plain: true });
+      const notes = [];
+      if (p.firmware_differs)
+        notes.push(
+          `The firmware has changed since this backup (${escapeHtml(JSON.stringify(p.firmware.saved))} then, ${escapeHtml(
+            JSON.stringify(p.firmware.now)
+          )} now). A setting can mean something different, or be refused, on other firmware.`
+        );
+      if (s.mode === "apply" && !p.same_model)
+        notes.push(`${escapeHtml(target)} is a different model: only settings it has too are offered.`);
+      const summary = `${c.differs} differ${c.differs === 1 ? "s" : ""}, ${c.same} already the same${c.not_on_device ? `, ${c.not_on_device} not on ${escapeHtml(target)}` : ""}${c.not_read ? `, ${c.not_read} couldn't be read` : ""}.`;
+      const STATE = { differs: "differs", same: "same", not_on_device: "not on this device", not_read: "couldn't read" };
+      const missingEps = [...new Set(p.rows.filter((r) => r.state === "not_on_device").map((r) => r.saved_endpoint))];
+      const tgtDev = this._devices.find((d) => normIeee(d.ieee) === s.targetIeee);
+      const tgtEps = [...new Set((this._clusterCache.get(s.targetIeee) || []).map((x) => Number(x.endpoint_id)))].filter((e) => e > 0 && e < 240).sort((a, b) => a - b);
+      const epMap = s.mode === "apply" && missingEps.length && tgtEps.length ? `<p class="hint">${missingEps.length === 1 ? "Endpoint" : "Endpoints"} ${escapeHtml(missingEps.join(", "))} of the backup ${missingEps.length === 1 ? "doesn't" : "don't"} exist on ${escapeHtml(target)}. To use ${missingEps.length === 1 ? "it" : "them"} anyway, choose an endpoint on ${escapeHtml(target)}: ${missingEps.map(
+        (e) => `endpoint ${e} \u2192 <select data-settings-epmap="${e}"><option value="">(skip)</option>${tgtEps.map((t) => `<option value="${t}" ${s.endpointMap[e] === t ? "selected" : ""}>${t}</option>`).join("")}</select>`
+      ).join(" ")}</p>` : "";
+      if (tgtDev && !this._clusterCache.get(s.targetIeee)) this._ensureClusters(s.targetIeee).then(() => this._renderSettings()).catch(() => {
+      });
+      const groups = groupRows(p.rows);
+      const table = groups.map(
+        (ep) => `<tr class="settings-ep"><td colspan="5">Endpoint ${ep.endpoint}</td></tr>${ep.clusters.map(
+          (cl) => `<tr class="settings-cluster"><td colspan="5">${escapeHtml(settingName(cl.name))} <span class="muted">0x${cl.cluster.toString(16).padStart(4, "0")}</span></td></tr>${cl.rows.map((r) => {
+            const k = rowKey(r);
+            const canWrite = r.state === "differs";
+            return `<tr class="settings-row settings-${escapeHtml(r.state)}">
+                  <td>${canWrite ? `<input type="checkbox" data-settings-row="${escapeHtml(k)}" ${s.selected.has(k) ? "checked" : ""}>` : ""}</td>
+                  <td title="${escapeHtml(r.name)}${r.manufacturer_specific ? " (maker-specific)" : ""}">${escapeHtml(settingName(r.name))}</td>
+                  <td>${escapeHtml(formatValue(r.saved, r.saved_label))}</td>
+                  <td>${escapeHtml(formatValue(r.current, r.current_label))}</td>
+                  <td class="muted">${escapeHtml(STATE[r.state] || r.state)}</td>
+                </tr>`;
+          }).join("")}`
+        ).join("")}`
+      ).join("");
+      return `${notes.map((t) => `<div class="flow-callout flow-result-warning">${t}</div>`).join("")}
+      <p>${summary}</p>${epMap}
+      <div class="table-scroll"><table class="bindings-table settings-table">
+        <thead><tr><th></th><th>Setting</th><th>Saved</th><th title="${escapeHtml(target)} now">Now</th><th></th></tr></thead>
+        <tbody>${table || `<tr><td colspan="5" class="muted">This backup has no settings.</td></tr>`}</tbody>
+      </table></div>
+      <p class="hint">Untick anything you don't want written. A setting you don't recognise is usually safest left alone.</p>`;
+    }
+    _settingsResultsHtml() {
+      const s = this._settingsDlg;
+      const res = s.results;
+      const m = applySummary(res, this._ieeeLabel(s.targetIeee, { plain: true }));
+      return `<div class="flow-callout flow-result-${m.level}">${escapeHtml(m.text)}</div>
+      <ul>${(res.results || []).map((r) => `<li>${escapeHtml(settingName(r.name || `0x${Number(r.attribute).toString(16)}`))} <span class="muted">(endpoint ${r.endpoint})</span>: <strong>${escapeHtml(resultText(r))}</strong></li>`).join("")}</ul>
+`;
+    }
+    _closeSettings() {
+      this._settingsDlg = null;
+      this._closeDialog();
     }
     // -------------------------------------------------------------------
     // Address changes and missed presses (1.10.0, integration)
@@ -6037,6 +6894,7 @@ a.health-chip-lost { text-decoration:none; cursor:pointer; }
       if (r.cleaned) {
         return `<div class="flow-callout flow-result-success">${escapeHtml(r.cleaned)}</div>
         <p>Now press each remote that controls the new device${p.items.some((i) => i.kind === "controls") ? ", and the new remote itself" : ""}, and check the lights respond.</p>
+        ${this._replaceSettingsHtml(old)}
         <div class="dialog-actions"><button class="btn btn-primary" id="replace-close">Done</button></div>`;
       }
       return `<div class="flow-callout flow-result-${sum.level}">${escapeHtml(sum.text)}.</div><ul>${rows}</ul>
@@ -6045,7 +6903,16 @@ a.health-chip-lost { text-decoration:none; cursor:pointer; }
       ${!old.gone && groups.length ? `<label class="flow-target"><input type="checkbox" id="replace-leave-groups" checked> Take ${escapeHtml(this._deviceLabel(old))} out of its groups</label>` : ""}
       ${!old.gone ? `<label class="flow-target"><input type="checkbox" id="replace-remove-old"> Remove ${escapeHtml(this._deviceLabel(old))} from ZHA <span class="muted">(leave unticked if you'll reuse it)</span></label>` : ""}
       <p class="hint">Until then both devices stay bound, so nothing goes dark. The old device's bindings won't be reported as lost.</p>
+      ${this._replaceSettingsHtml(old)}
       <div class="dialog-actions"><button class="btn btn-primary" id="replace-cleanup">Clean up</button><button class="btn" id="replace-close">Not now</button></div>`;
+    }
+    /** 1.12.0: copy the old device's saved settings to the new one. */
+    _replaceSettingsHtml(old) {
+      if (!this._settingsEnabled) return "";
+      return `<div class="drawer-section-title">Settings</div>
+      <p class="hint">Settings such as power-on behaviour or detach-relay mode aren't bindings. If ZHA Bindings Manager has a backup of
+        ${escapeHtml(old.name || this._deviceLabel(old))}, you can compare it with the new device and copy what you want.</p>
+      <button class="btn btn-small" id="replace-settings">Copy settings\u2026</button>`;
     }
     async _replacePlan() {
       const r = this._replace;
@@ -6137,6 +7004,12 @@ a.health-chip-lost { text-decoration:none; cursor:pointer; }
       const on = (sel, ev, fn) => root.querySelectorAll(sel).forEach((el) => el.addEventListener(ev, fn));
       on("#replace-cancel", "click", () => this._closeReplace());
       on("#replace-close", "click", () => this._closeReplace());
+      on("#replace-settings", "click", () => {
+        const r2 = this._replace;
+        const oldDev = this._replaceOldDevice();
+        this._replace = null;
+        this._openSettings({ sourceIeee: oldDev.ieee, targetIeee: r2.newIeee, mode: "apply" });
+      });
       on('input[name="replace-old"]', "change", (e) => {
         r.oldIeee = normIeee(e.target.value);
         const next = root.querySelector("#replace-next");
@@ -6480,6 +7353,20 @@ a.health-chip-lost { text-decoration:none; cursor:pointer; }
     /** Sends On/Off itself (a remote or switch), so a press can be checked. */
     _isRemoteLike(d) {
       return (this._clusterCache.get(d.ieee) || []).some((c) => c.type === "out" && Number(c.id) === 6);
+    }
+    /** Side panel (1.12.0): the device was removed from ZHA and paired again. */
+    _drawerRepairedHtml(d) {
+      if (!this._watchEnabled) return "";
+      const r = repairedDevices(this._lost).find((x) => x.ieee === normIeee(d.ieee));
+      if (!r) return "";
+      const busy = this._restoreBusy === r.ieee;
+      return `<div class="drawer-section drawer-problems drawer-repaired">
+      <div class="drawer-section-title">Paired again</div>
+      <p>It was removed from ZHA${r.removedAt ? ` ${escapeHtml(sinceText(r.removedAt))}` : ""} and paired again ${escapeHtml(sinceText(r.at))}.
+        Removing a device resets it, so it lost ${escapeHtml(this._repairedWhatText(r))}.</p>
+      <button class="btn btn-primary btn-small" data-restore-all="${escapeHtml(r.ieee)}" ${busy ? "disabled" : ""}>${busy ? "Restoring\u2026" : "Restore everything\u2026"}</button>
+      <a href="#" class="src-link" data-repaired-dismiss="${escapeHtml(r.ieee)}" title="Stop showing this">Dismiss</a>
+    </div>`;
     }
     /** Side panel: lost bindings and the watch setting for one device. */
     _drawerLostHtml(d, rel) {
@@ -8951,7 +9838,7 @@ a.health-chip-lost { text-decoration:none; cursor:pointer; }
           <div class="dialog-actions"><a class="btn btn-primary" id="flow-share" href="${escapeHtml(shareUrl)}" target="_blank" rel="noopener">Share result</a></div>
           ${f.notInDb ? `<p class="hint">This remote isn't in the community database yet. Sharing a capability scan helps too: click the remote anywhere in the card, then <strong>Check and share capabilities\u2026</strong>.</p>` : ""}
         </div>`;
-      return `<div class="flow-result flow-result-${level}"><strong>Result: ${escapeHtml(RESULT_TEXT[f.result] || f.result)}.</strong> ${escapeHtml(advice)}</div>
+      return `<div class="flow-result flow-result-${level}"><strong>Result: ${escapeHtml(RESULT_TEXT2[f.result] || f.result)}.</strong> ${escapeHtml(advice)}</div>
       ${share}
       ${failedRun ? this._flowUndoHtml() : ""}
       <div class="dialog-actions">${fallback}<button class="btn" id="flow-cancel">Close</button></div>`;
@@ -9087,7 +9974,7 @@ a.health-chip-lost { text-decoration:none; cursor:pointer; }
       return `zbm:flow-shared:${this._flowSlugKey()}|${firmwareKey2(this._flowFirmware())}|${this._flowBehaviour()}`;
     }
     _flowShareUrl(report) {
-      const title = `[Behaviour Report] ${report.manufacturer || "Unknown"} ${report.model || "Unknown"}: ${report.behaviour === "group_binding" ? "group binding" : "direct binding"} ${RESULT_TEXT[report.result] || report.result}`;
+      const title = `[Behaviour Report] ${report.manufacturer || "Unknown"} ${report.model || "Unknown"}: ${report.behaviour === "group_binding" ? "group binding" : "direct binding"} ${RESULT_TEXT2[report.result] || report.result}`;
       const body = 'Shared from ZHA Bindings Manager\'s "Set up what this controls" flow.\n\n```json\n' + JSON.stringify(report, null, 2) + "\n```";
       return `https://github.com/${CAPABILITY_DB_REPO}/issues/new?title=${encodeURIComponent(title)}&body=${encodeURIComponent(body)}&labels=${encodeURIComponent("behaviour-report")}`;
     }
@@ -9652,6 +10539,7 @@ a.health-chip-lost { text-decoration:none; cursor:pointer; }
         </div>
       </div>
       ${problems}
+      ${this._drawerRepairedHtml(d)}
       <div class="drawer-section">
         <div class="drawer-section-title">Controls</div>
         ${this._drawerRelListHtml(rel.controls, "Nothing: it isn't bound to another device or group.")}
@@ -9664,6 +10552,8 @@ a.health-chip-lost { text-decoration:none; cursor:pointer; }
         ${rel.memberOf.length ? `<p class="hint">Member of ${rel.memberOf.map((g) => escapeHtml(g.name)).join(", ")}.</p>` : ""}
       </div>
       ${this._drawerLostHtml(d, rel)}
+      ${this._drawerSettingsHtml(d)}
+      ${this._drawerOtaHtml(d)}
       ${this._drawerAnswersHtml(d)}
       ${this._drawerMeshHtml(d)}
       <div class="drawer-section drawer-actions">
@@ -9699,6 +10589,25 @@ a.health-chip-lost { text-decoration:none; cursor:pointer; }
       on("#drawer-show-bindings", showBindings);
       on("#drawer-problems-link", showBindings);
       on("#drawer-lost-put-back", () => this._lostPutBack(d.ieee));
+      this._wireRepairedButtons("#drawer-body");
+      on("#drawer-ota-check", () => this._otaCheck(d.ieee));
+      this._qa("#drawer-body [data-ota-open]").forEach(
+        (a) => a.addEventListener("click", (e) => {
+          e.preventDefault();
+          const other = this._devices.find((x) => normIeee(x.ieee) === normIeee(a.dataset.otaOpen));
+          if (other) this._openDeviceDrawer(other);
+        })
+      );
+      on("#drawer-settings-backup", () => this._settingsBackupNow(d));
+      on("#drawer-settings-view", () => this._openSettings({ sourceIeee: d.ieee, targetIeee: d.ieee, mode: "restore" }));
+      on("#drawer-settings-apply", () => this._openSettings({ sourceIeee: d.ieee, mode: "apply" }));
+      on("#drawer-settings-export", () => this._settingsExport(d));
+      on("#drawer-settings-import", () => {
+        const f = this._q("#drawer-settings-file");
+        if (f) f.click();
+      });
+      const fileInput = this._q("#drawer-settings-file");
+      if (fileInput) fileInput.addEventListener("change", () => this._settingsImportFile(d, fileInput.files && fileInput.files[0]));
       const evLink = this._q("#drawer-evidence-link");
       if (evLink)
         evLink.addEventListener("click", (e) => {
@@ -10136,6 +11045,10 @@ a.health-chip-lost { text-decoration:none; cursor:pointer; }
               <option value="all" ${this._meshShowMode() === "all" ? "selected" : ""}>Every link heard</option>
               <option value="routes" ${this._meshShowMode() === "routes" ? "selected" : ""}>Routes my bindings use</option>
             </select></label>
+          <label class="row">Names
+            <select id="mesh-size" title="Size of device names and circles. Names that would overlap are hidden: zoom in or point at a device to see them.">
+              ${["small", "medium", "large"].map((v) => `<option value="${v}" ${this._meshSizeChoice() === v ? "selected" : ""}>${v[0].toUpperCase()}${v.slice(1)}</option>`).join("")}
+            </select></label>
           <label class="row"><input type="checkbox" id="mesh-battery" ${this._meshShowBattery !== false ? "checked" : ""}> Battery devices</label>
         </div>
         <p class="hint mesh-show-hint">${escapeHtml(this._meshShowHint())}</p>
@@ -10244,7 +11157,8 @@ a.health-chip-lost { text-decoration:none; cursor:pointer; }
           `<g class="mesh-link" data-link="${escapeHtml(l.a)}|${escapeHtml(l.b)}"><line x1="${pa.x}" y1="${pa.y}" x2="${pb.x}" y2="${pb.y}" stroke="${this._lqiColor(level)}" style="--sw:${(hi ? 3 : 1) * (1 + l.lqi / 255 * 3) * k}" stroke-opacity="${hi ? 1 : level === "weak" ? 0.9 : 0.55}" ${level === "weak" ? `stroke-dasharray="${6 * k} ${4 * k}"` : ""}/><line class="mesh-link-hit" x1="${pa.x}" y1="${pa.y}" x2="${pb.x}" y2="${pb.y}" style="--sw:${16 * k}"><title>${escapeHtml(this._meshLinkTitle(l, nameOf))}</title></line></g>`
         );
       }
-      const r0 = 11 * k;
+      const sz = this._meshSizes();
+      const r0 = sz.r * k;
       if (showMode === "routes") {
         const hops = /* @__PURE__ */ new Map();
         for (const r of this._meshBindingRoutes(mesh)) {
@@ -10302,16 +11216,16 @@ From ${nameOf(this._meshSnapshot[h.from] ? h.from : h.to)}'s tables, read ${relT
             );
           }
           const tip = parent ? `${nameOf(i)} (battery): parent ${nameOf(parent.parent)}, ${level}${typeof parent.lqi === "number" ? ` ${parent.lqi}` : ""}` : `${nameOf(i)} (battery): parent unknown. No router listed it as a child in the last scan; it may have been asleep or moved.`;
-          batteryNodes.push(`<g class="mesh-node mesh-battery ${parent ? "" : "orphan"}${onRoute.has(i) ? " on-route" : ""}" data-ieee="${escapeHtml(i)}" transform="translate(${p.x},${p.y})"><g class="mesh-zs">${onRoute.has(i) ? `<circle r="${r0 * 1.2}" class="route-ring"/>` : ""}
+          batteryNodes.push(`<g class="mesh-node mesh-battery ${parent ? "" : "orphan"}${onRoute.has(i) ? " on-route" : ""}" data-ieee="${escapeHtml(i)}" data-pri="${onRoute.has(i) ? 500 : 0}" transform="translate(${p.x},${p.y})"><g class="mesh-zs">${onRoute.has(i) ? `<circle r="${r0 * 1.2}" class="route-ring"/>` : ""}
           <circle r="${r0 * 0.5}" style="stroke:${this._lqiColor(level)}"/><title>${escapeHtml(tip)}</title>
-          <text class="mesh-label mesh-battery-label" y="${r0 * 0.5 + 11 * k}" font-size="${10 * k}" text-anchor="middle">${escapeHtml(nameOf(i))}</text>
+          <text class="mesh-label mesh-battery-label" y="${r0 * 0.5 + (sz.battery + 1) * k}" font-size="${sz.battery * k}" text-anchor="middle">${escapeHtml(nameOf(i))}</text>
         </g></g>`);
         }
       }
       const placedLabels = [];
       const labelY = (p) => {
-        const below = p.y + r0 + 13 * k;
-        const clash = (y2) => placedLabels.some((q) => Math.abs(q.x - p.x) < 110 * k && Math.abs(q.y - y2) < 13 * k);
+        const below = p.y + r0 + (sz.label + 1) * k;
+        const clash = (y2) => placedLabels.some((q) => Math.abs(q.x - p.x) < 110 * k && Math.abs(q.y - y2) < (sz.label + 1) * k);
         const y = clash(below) ? p.y - r0 - 5 * k : below;
         placedLabels.push({ x: p.x, y });
         return y - p.y;
@@ -10339,10 +11253,12 @@ From ${nameOf(this._meshSnapshot[h.from] ? h.from : h.to)}'s tables, read ${relT
           }
         }
         const viaCeiling = mode === "plan" && layout.floor && !sameFloorOk && up.length + down.length > 0;
-        const floorBadge = up.length || down.length ? `<text class="mesh-floor-badge" x="${-r0 * 1.15}" y="${-r0 * 0.6}" text-anchor="end" font-size="${15 * k}">${up.length ? `\u2191${up.length}` : ""}${down.length ? `\u2193${down.length}` : ""}<title>${escapeHtml(
+        const floorBadge = up.length || down.length ? `<text class="mesh-floor-badge" x="${-r0 * 1.15}" y="${-r0 * 0.6}" text-anchor="end" font-size="${(sz.label + 3) * k}">${up.length ? `\u2191${up.length}` : ""}${down.length ? `\u2193${down.length}` : ""}<title>${escapeHtml(
           [...up, ...down].join("\n")
         )}</title></text>` : "";
-        nodes.push(`<g class="mesh-node${onRoute.has(i) ? " on-route" : ""}" data-ieee="${escapeHtml(i)}" transform="translate(${p.x},${p.y})"><g class="mesh-zs">
+        const degree = [...mesh.links.values()].filter((l) => l.a === i || l.b === i).length;
+        const pri = isCoord ? 1e3 : onRoute.has(i) ? 500 : 100 + degree;
+        nodes.push(`<g class="mesh-node${onRoute.has(i) ? " on-route" : ""}" data-ieee="${escapeHtml(i)}" data-pri="${pri}" transform="translate(${p.x},${p.y})"><g class="mesh-zs">
         ${onRoute.has(i) ? `<circle r="${r0 * 1.7}" class="route-ring"/>` : ""}
         ${viaCeiling ? `<circle r="${r0 * 1.6}" class="via-ceiling"><title>${escapeHtml(`${nameOf(i)}: no usable link on this floor, only to other floors`)}</title></circle>` : ""}
         ${isCoord ? `<rect x="${-r0}" y="${-r0}" width="${2 * r0}" height="${2 * r0}" rx="${r0 / 3}"/>` : `<circle r="${r0}" class="${unread ? "unread" : ""}"/>`}
@@ -10351,7 +11267,7 @@ From ${nameOf(this._meshSnapshot[h.from] ? h.from : h.to)}'s tables, read ${relT
         ${unread ? `<title>${escapeHtml(
           this._meshSnapshot[i] ? `${nameOf(i)}: didn't answer${this._meshSnapshot[i].error ? ` (${this._meshSnapshot[i].error})` : ""}. Open it to read it again.` : `${nameOf(i)}: not read yet. Open it to read it.`
         )}</title>` : ""}
-        <text class="mesh-label" y="${labelY(p)}" font-size="${12 * k}" text-anchor="middle">${escapeHtml(d ? this._deviceLabel(d) : i)}${unread ? " (not read)" : ""}</text>
+        <text class="mesh-label" y="${labelY(p)}" font-size="${sz.label * k}" text-anchor="middle">${escapeHtml(d ? this._deviceLabel(d) : i)}${unread ? " (not read)" : ""}</text>
       </g></g>`);
       }
       const img = mode === "plan" ? `<image href="${escapeHtml(this._fpPlanFor(layout.floor).imageUrl)}" x="0" y="0" width="${W}" height="${H}" opacity="0.55"/>` : mode === "all" ? Object.values(allGeom.panels).map(
@@ -10370,6 +11286,7 @@ From ${nameOf(this._meshSnapshot[h.from] ? h.from : h.to)}'s tables, read ${relT
       const vb = this._meshViews[vk];
       return `<div class="mesh-zoom"><button class="btn btn-small" id="mesh-zoom-out" title="Zoom out">\uFF0D</button><button class="btn btn-small" id="mesh-zoom-fit" title="Show the whole plan">Fit</button><button class="btn btn-small" id="mesh-zoom-in" title="Zoom in">\uFF0B</button></div>
       <svg class="mesh-svg" style="--mz:${this._meshGrowth(vb)}" viewBox="${vb.x} ${vb.y} ${vb.w} ${vb.h}" preserveAspectRatio="xMidYMid meet"><defs>${grad("good")}${grad("fair")}${grad("weak")}${["good", "fair", "weak", "unknown"].map((lvl) => `<marker id="mesh-arrow-${lvl}" viewBox="0 0 10 10" refX="16" refY="5" markerWidth="5" markerHeight="5" orient="auto"><path d="M0 0L10 5L0 10z" fill="${this._lqiColor(lvl)}"/></marker>`).join("")}</defs>${img}<g>${heat.join("")}</g><g>${lines.join("")}</g><g>${batteryNodes.join("")}</g><g>${nodes.join("")}</g></svg>
+      <p class="hint" id="mesh-hidden-note"></p>
       ${missing ? `<details class="mesh-unplaced muted"><summary>${missing} router${missing === 1 ? "" : "s"} not on this layout</summary>${escapeHtml(missingNames.join(", "))}. ${mode === "plan" ? `Place them on the Floor Plan tab${layout.floor ? ` (${escapeHtml(this._floorName(layout.floor))})` : ""} to include them.` : mode === "all" ? "Place them on their floor's plan on the Floor Plan tab to include them." : "Open the Map tab once to lay them out."} They're still part of the suggestions and route checks.</details>` : ""}`;
     }
     _meshShowMode() {
@@ -10613,7 +11530,59 @@ From ${nameOf(this._meshSnapshot[h.from] ? h.from : h.to)}'s tables, read ${relT
       if (svg && vb) {
         svg.setAttribute("viewBox", `${vb.x} ${vb.y} ${vb.w} ${vb.h}`);
         svg.style.setProperty("--mz", String(this._meshGrowth(vb)));
+        if (typeof requestAnimationFrame === "function") {
+          if (!this._meshDeclutterQueued) {
+            this._meshDeclutterQueued = true;
+            requestAnimationFrame(() => {
+              this._meshDeclutterQueued = false;
+              this._meshDeclutter();
+            });
+          }
+        } else this._meshDeclutter();
       }
+    }
+    /** 1.12.0: label and circle sizes in screen pixels. */
+    _meshSizeChoice() {
+      if (!this._meshSize) {
+        try {
+          this._meshSize = localStorage.getItem("zbm-mesh-size") || "medium";
+        } catch (e) {
+          this._meshSize = "medium";
+        }
+      }
+      return ["small", "medium", "large"].includes(this._meshSize) ? this._meshSize : "medium";
+    }
+    _meshSizes() {
+      return { small: { label: 10, battery: 9, r: 7 }, medium: { label: 12, battery: 10, r: 9 }, large: { label: 14, battery: 12, r: 11 } }[this._meshSizeChoice()];
+    }
+    /** 1.12.0: hides names that would overlap a more important one. Run after
+     *  drawing and after each zoom (zooming in makes room, so more appear).
+     *  Pointing at a device always shows its name (CSS). */
+    _meshDeclutter() {
+      const svg = this._q("#view-mesh .mesh-svg");
+      if (!svg) return;
+      const items = [...svg.querySelectorAll(".mesh-node")].map((g, n) => ({ g, t: g.querySelector(".mesh-label"), pri: Number(g.dataset.pri || 0), n })).filter((x) => x.t);
+      items.forEach((x) => x.t.classList.remove("mesh-label-hidden"));
+      items.sort((a, b) => b.pri - a.pri || a.n - b.n);
+      const shapes = items.map((x) => {
+        const c = x.g.querySelector(":scope > .mesh-zs > circle:not(.route-ring):not(.via-ceiling), :scope > .mesh-zs > rect");
+        return { g: x.g, r: c ? c.getBoundingClientRect() : null };
+      });
+      const kept = [];
+      let hidden = 0;
+      const overlaps = (r, q, pad) => r.left < q.right + pad && r.right > q.left - pad && r.top < q.bottom + pad && r.bottom > q.top - pad;
+      for (const x of items) {
+        const r = x.t.getBoundingClientRect();
+        if (!r.width) continue;
+        const pad = 2;
+        if (kept.some((q) => overlaps(r, q, pad)) || shapes.some((sh) => sh.g !== x.g && sh.r && sh.r.width && overlaps(r, sh.r, -1))) {
+          x.t.classList.add("mesh-label-hidden");
+          hidden++;
+        } else kept.push(r);
+      }
+      const note = this._q("#mesh-hidden-note");
+      if (note)
+        note.textContent = hidden ? `${hidden} name${hidden === 1 ? "" : "s"} hidden where they'd overlap: zoom in, or point at a device, to see ${hidden === 1 ? "it" : "them"}.` : "";
     }
     /** Scale for devices and labels at the current zoom (1 when the whole plan shows). */
     _meshGrowth(vb) {
@@ -10794,11 +11763,24 @@ From ${nameOf(this._meshSnapshot[h.from] ? h.from : h.to)}'s tables, read ${relT
         this._meshShowBattery = e.target.checked;
         this._renderMesh();
       });
+      on("#mesh-size", "change", (e) => {
+        this._meshSize = e.target.value;
+        try {
+          localStorage.setItem("zbm-mesh-size", this._meshSize);
+        } catch (err) {
+        }
+        this._renderMesh();
+      });
       this._qa("#view-mesh [data-mesh-read]").forEach((b) => b.addEventListener("click", () => this._meshReadOne(b.dataset.meshRead)));
       on("#mesh-layout", "change", (e) => {
         this._meshLayoutChoice = e.target.value;
         this._renderMesh();
       });
+      this._qa("#view-mesh .mesh-node").forEach(
+        (g) => g.addEventListener("mouseenter", () => {
+          if (g.parentNode && g.parentNode.lastChild !== g) g.parentNode.appendChild(g);
+        })
+      );
       this._qa("#view-mesh .mesh-node").forEach(
         (g) => g.addEventListener("click", () => {
           if (this._meshDragged) return;
@@ -10820,13 +11802,21 @@ From ${nameOf(this._meshSnapshot[h.from] ? h.from : h.to)}'s tables, read ${relT
         });
       this._wireMeshZoom();
       this._wireMeshCoordRoute();
-      if (typeof requestAnimationFrame === "function") requestAnimationFrame(() => this._meshMeasure());
+      if (typeof requestAnimationFrame === "function")
+        requestAnimationFrame(() => {
+          this._meshMeasure();
+          this._meshDeclutter();
+        });
       if (!this._meshResizeBound && typeof window !== "undefined") {
         this._meshResizeBound = true;
         let t = null;
         window.addEventListener("resize", () => {
           clearTimeout(t);
-          t = setTimeout(() => this._view === "mesh" && this._meshMeasure(), 250);
+          t = setTimeout(() => {
+            if (this._view !== "mesh") return;
+            this._meshMeasure();
+            this._meshDeclutter();
+          }, 250);
         });
       }
       this._qa("#view-mesh tr[data-link]").forEach(
@@ -10978,9 +11968,9 @@ From ${nameOf(this._meshSnapshot[h.from] ? h.from : h.to)}'s tables, read ${relT
       });
       this._qa(".ep-cmd-toggle").forEach((btn) => {
         btn.addEventListener("click", () => {
-          const rowKey = btn.dataset.rowKey;
-          if (this._expandedCmdClusters.has(rowKey)) this._expandedCmdClusters.delete(rowKey);
-          else this._expandedCmdClusters.add(rowKey);
+          const rowKey2 = btn.dataset.rowKey;
+          if (this._expandedCmdClusters.has(rowKey2)) this._expandedCmdClusters.delete(rowKey2);
+          else this._expandedCmdClusters.add(rowKey2);
           this._renderExplodedView(d);
         });
       });
@@ -11192,8 +12182,8 @@ From ${nameOf(this._meshSnapshot[h.from] ? h.from : h.to)}'s tables, read ${relT
       const rows = relevantIds.map((clusterId) => {
         const hexKey = hex4(clusterId);
         const c = inClusters[hexKey];
-        const rowKey = `${key}:${clusterId}`;
-        const expanded = this._expandedCmdClusters.has(rowKey);
+        const rowKey2 = `${key}:${clusterId}`;
+        const expanded = this._expandedCmdClusters.has(rowKey2);
         const title = `${escapeHtml(clusterName(clusterId))} <span class="ep-cmd-cluster-id">${hex4(clusterId)}</span>`;
         let summary = "Not checked yet";
         let bodyHtml = `<p class="hint">Run "Check supported commands" above to see this cluster's valid/invalid commands.</p>`;
@@ -11223,7 +12213,7 @@ From ${nameOf(this._meshSnapshot[h.from] ? h.from : h.to)}'s tables, read ${relT
         }
         return `
           <div class="ep-cmd-cluster">
-            <button type="button" class="ep-cmd-cluster-head ep-cmd-toggle" data-row-key="${escapeHtml(rowKey)}">
+            <button type="button" class="ep-cmd-cluster-head ep-cmd-toggle" data-row-key="${escapeHtml(rowKey2)}">
               <span class="ep-cmd-chevron">${expanded ? "\u25BE" : "\u25B8"}</span>
               <span class="ep-cmd-cluster-title">${title}</span>
               <span class="ep-cmd-summary">${escapeHtml(summary)}</span>
@@ -11780,6 +12770,45 @@ From ${nameOf(this._meshSnapshot[h.from] ? h.from : h.to)}'s tables, read ${relT
     /** `healthMap` is optional — pass the one _renderTable() already computed
      *  to avoid a redundant pass; callers like _exportRowsData() that don't
      *  have one handy get a freshly-computed one for free. */
+    /** 1.12.0: lost bindings that pass the table's filters. They count as
+     *  errors for the health filter. */
+    _lostTableRows(deviceIeee, bySearch) {
+      if (!this._watchEnabled || !this._lost) return [];
+      const f = this._tableHealthFilter;
+      if (f !== "all" && f !== "problems" && f !== "error") return [];
+      const s = bySearch ? "" : (this._filters.search || "").trim().toLowerCase();
+      return lostBindings(this._lost).filter((b) => {
+        if (!matchesDeviceFilter(b, deviceIeee, this._tableDirection)) return false;
+        if (!s) return true;
+        const hay = `${this._ieeeLabel(b.sourceIeee, { plain: true })} ${b.text || ""} ${clusterName(b.clusterId)}`.toLowerCase();
+        return hay.includes(s);
+      });
+    }
+    _lostTableRowsHtml(list2, filtered, deviceIeee) {
+      const busy = this._lostBusy;
+      return list2.map((b) => {
+        const source = this._devices.find((d) => normIeee(d.ieee) === b.sourceIeee);
+        const group = b.isGroup ? this._groups.find((g) => g.group_id === b.groupId) : null;
+        const targetLabel = b.isGroup ? `${group && group.name || `Group ${b.groupId}`} (group)` : this._ieeeLabel(b.targetIeee, { plain: true });
+        const dir = filtered ? bindingDirection(b, deviceIeee) : null;
+        const noticed = [NOTICED_BY[b.noticed_by] || "", sinceText(b.since)].filter(Boolean).join(", ");
+        return `<tr class="lost-row" data-id="${escapeHtml(b.id)}">
+          ${filtered ? `<td class="dir-cell dir-${dir}">${escapeHtml(directionLabel(dir))}</td>` : ""}
+          <td><a href="#" class="src-link" data-ieee="${escapeHtml(b.sourceIeee)}">${escapeHtml(
+          this._ieeeLabel(b.sourceIeee, { plain: true })
+        )}</a> <span class="muted">(ep ${escapeHtml(String(b.sourceEndpoint))})</span></td>
+          <td>${escapeHtml(source ? this._devicePrimaryType(source) : "\u2014")}</td>
+          <td>${escapeHtml(source ? this._areaName(source.area_id) : "\u2014")}</td>
+          <td>${escapeHtml(source ? [source.manufacturer, source.model].filter(Boolean).join(" / ") || "\u2014" : "\u2014")}</td>
+          <td><span class="dot" style="background:${clusterColor(b.clusterId)}"></span> ${escapeHtml(clusterName(b.clusterId))}</td>
+          <td><s>${escapeHtml(targetLabel)}</s>${b.isGroup ? "" : ` <span class="muted">(ep ${escapeHtml(String(b.targetEndpoint))})</span>`}</td>
+          <td><span class="health-badge health-error" title="It had this binding and doesn't any more${noticed ? ` (${escapeHtml(noticed)})` : ""}">${HEALTH_ICON.error} Lost</span>
+            <div class="muted lost-since">${escapeHtml(sinceText(b.since))}</div></td>
+          <td><button class="btn btn-small btn-primary" data-lost-put-back="${escapeHtml(b.ownerIeee)}" ${busy ? "disabled" : ""}>Put back</button>
+            <a href="#" class="src-link" data-lost-forget="${escapeHtml(b.ownerIeee)}" data-key="${escapeHtml(b.key)}" title="You removed it yourself: stop expecting it">Removed on purpose</a></td>
+        </tr>`;
+      }).join("");
+    }
     _filteredBindingRows(healthMap) {
       const map = healthMap || this._computeHealthMap();
       const { ieee: deviceIeee, bySearch } = this._effectiveTableDevice();
@@ -11906,7 +12935,8 @@ From ${nameOf(this._meshSnapshot[h.from] ? h.from : h.to)}'s tables, read ${relT
       if (filtered && !this._tableSort.key) rows = [...rows].sort((a, b) => a.directionRank - b.directionRank);
       else rows = this._sortRows(rows, this._tableSort);
       const colCount = filtered ? 9 : 8;
-      if (!rows.length) {
+      const lostRows = this._lostTableRows(deviceIeee, bySearch);
+      if (!rows.length && !lostRows.length) {
         const all = this._allBindings();
         const dev = filtered ? this._devices.find((d) => d.ieee === deviceIeee) : null;
         const healthChip = this._q(`[data-health-filter="${this._tableHealthFilter}"]`);
@@ -11924,7 +12954,7 @@ From ${nameOf(this._meshSnapshot[h.from] ? h.from : h.to)}'s tables, read ${relT
         wrap.innerHTML = `<tr><td colspan="${colCount}" class="muted">${escapeHtml(state.message)}</td></tr>`;
         return;
       }
-      wrap.innerHTML = rows.map((r) => {
+      wrap.innerHTML = this._lostTableRowsHtml(lostRows, filtered, deviceIeee) + rows.map((r) => {
         const b = r.binding;
         const h = r.health;
         return `
@@ -11954,6 +12984,13 @@ From ${nameOf(this._meshSnapshot[h.from] ? h.from : h.to)}'s tables, read ${relT
           if (binding) this._openUnbindPopover(binding);
         });
       });
+      this._qa("#table-body [data-lost-put-back]").forEach((btn) => btn.addEventListener("click", () => this._lostPutBack(btn.dataset.lostPutBack)));
+      this._qa("#table-body [data-lost-forget]").forEach(
+        (a) => a.addEventListener("click", (e) => {
+          e.preventDefault();
+          this._lostForget(a.dataset.lostForget, a.dataset.key);
+        })
+      );
       this._qa("#table-body [data-forget]").forEach((btn) => {
         btn.addEventListener("click", () => this._confirmForgetSources([btn.dataset.forget]));
       });
@@ -12393,7 +13430,7 @@ From ${nameOf(this._meshSnapshot[h.from] ? h.from : h.to)}'s tables, read ${relT
       }
       this._ensureHealthData();
       const coord = this._coordinatorIeee();
-      const rows = groupRows({ groups: this._groups, bindings: this._rawBindings(), classify: (b) => this._classifyBinding(b), coordinatorIeee: coord });
+      const rows = groupRows2({ groups: this._groups, bindings: this._rawBindings(), classify: (b) => this._classifyBinding(b), coordinatorIeee: coord });
       const busy = this._groupsBusy != null;
       const dis = busy ? "disabled" : "";
       const devLink = (ieee, extra = "") => {
@@ -12781,6 +13818,7 @@ From ${nameOf(this._meshSnapshot[h.from] ? h.from : h.to)}'s tables, read ${relT
     _renderDevicesTab() {
       const wrap = this._q("#devices-table-body");
       if (!wrap) return;
+      this._renderOtaBanner();
       this._updateSortIndicators("#view-devices", this._devicesSort);
       if (!this._loaded) {
         wrap.innerHTML = `<tr><td colspan="8" class="muted">Loading devices\u2026</td></tr>`;
@@ -12800,12 +13838,20 @@ From ${nameOf(this._meshSnapshot[h.from] ? h.from : h.to)}'s tables, read ${relT
           power: d.power_source || "\u2014",
           count: this._deviceBindingCount(d.ieee),
           scanRank: scanCell.scanRank,
-          scanHtml: scanCell.html
+          scanHtml: scanCell.html,
+          ota: this._otaEnabled ? updateServerCell(this._otaServers && this._otaServers.get(normIeee(d.ieee)), (i) => this._nameIfKnown(i), {
+            battery: this._isBatteryDevice(d),
+            hasOta: normIeee(d.ieee) !== normIeee(this._coordinatorIeee() || "") && this._hasOta(d.ieee)
+          }) : null
         };
       });
+      rows.forEach((r) => r.otaRank = r.ota ? r.ota.rank : 9);
+      const thOta = this._q("#th-ota");
+      if (thOta) thOta.style.display = this._otaEnabled ? "" : "none";
+      const cols = this._otaEnabled ? 9 : 8;
       rows = this._devicesSort.key ? this._sortRows(rows, this._devicesSort) : rows.sort((a, b) => a.name.localeCompare(b.name));
       if (!rows.length) {
-        wrap.innerHTML = search ? `<tr><td colspan="8" class="muted">No devices match \u201C${escapeHtml(search)}\u201D. Clear the search box to see all ${this._devices.length} devices.</td></tr>` : `<tr><td colspan="8" class="muted">No devices found.</td></tr>`;
+        wrap.innerHTML = search ? `<tr><td colspan="${cols}" class="muted">No devices match \u201C${escapeHtml(search)}\u201D. Clear the search box to see all ${this._devices.length} devices.</td></tr>` : `<tr><td colspan="${cols}" class="muted">No devices found.</td></tr>`;
         return;
       }
       wrap.innerHTML = rows.map(
@@ -12819,12 +13865,19 @@ From ${nameOf(this._meshSnapshot[h.from] ? h.from : h.to)}'s tables, read ${relT
           <td>${escapeHtml(r.power)}</td>
           <td>${r.count}</td>
           <td>${r.scanHtml}</td>
+          ${r.ota ? `<td class="ota-cell ota-${escapeHtml(r.ota.level)}" title="${escapeHtml(r.ota.title)}">${this._otaBusy === normIeee(r.device.ieee) ? `<span class="muted">Checking\u2026</span>` : r.ota.check ? `<a href="#" class="ota-cell-link" data-ota-ieee="${escapeHtml(r.device.ieee)}">${escapeHtml(r.ota.text)}</a>` : escapeHtml(r.ota.text)}</td>` : ""}
         </tr>`
       ).join("");
       this._qa("#devices-table-body .src-link").forEach((el) => {
         el.addEventListener("click", (e) => {
           e.preventDefault();
           this._openDeviceDrawer(this._devices.find((x) => x.ieee === el.dataset.ieee));
+        });
+      });
+      this._qa("#devices-table-body .ota-cell-link").forEach((el) => {
+        el.addEventListener("click", (e) => {
+          e.preventDefault();
+          if (!this._otaBusy) this._otaCheck(el.dataset.otaIeee);
         });
       });
       this._qa("#devices-table-body .scan-cell-btn").forEach((btn) => {

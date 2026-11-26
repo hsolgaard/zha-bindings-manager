@@ -3,6 +3,62 @@
 All notable changes to ZHA Bindings Manager are documented here.
 
 
+## [1.12.0]
+
+Needs integration 1.12.0 for everything below except the lost-binding rows.
+
+### Added
+
+- **Device configuration backups:** each device's side panel has a **Configuration** section. **Back up now** saves every
+  setting ZHA knows on each of its endpoints: power-on behaviour, dimming levels and speeds, and maker-specific settings
+  its quirk defines (SONOFF's detach-relay mode and network LED, for example), plus its groups and bindings. Mains
+  devices are backed up automatically after a scan, once a week; the last 5 backups are kept.
+  - **View and restore…** shows the saved settings next to what the device has now, with the ones that differ ticked.
+    **Write** sends only the ticked ones and reads each back: done, refused by the device, or didn't stick.
+  - **Apply to another device…** compares a backup with any other device (same model first) and offers only the
+    settings that device has too, with an endpoint map when the endpoints don't match.
+  - **Export** and **Import…** a backup as a file.
+  - **Replace this device** gets a **Copy settings…** step.
+- **Devices that were removed and paired again:** a device removed from ZHA is reset, so it loses its bindings, its
+  groups and its settings. When it's paired again with the same address, a notice above the Bindings table and in its
+  side panel offers **Restore everything…**: it adds it back to its groups, shows which settings differ from its last
+  backup before the removal for you to write, then puts its bindings back and reads them back from the device, so they
+  go onto a device that's already set up again (detach-relay mode and so on).
+- **Firmware updates** in each device's side panel: **Check** reads where the device sends its firmware update requests,
+  by name. It should be the coordinator; any other device means its updates time out. A device that claims to be a
+  firmware update server is flagged there and in a notice on the Devices tab. The SONOFF ZBM5-3C-80/86 on firmware 1.0.6
+  does this, and it stops updates for the devices around it.
+- **OTA server** column on the Devices tab (click a cell to check that device; it updates straight away): every device's firmware update server at a glance (the coordinator, not
+  set, or the device it wrongly uses, in amber), sortable so problems come first. **Check update servers** in the notice
+  reads every mains device one at a time; answers are saved, so they're still there after a reload.
+- **Lost bindings as rows in the Bindings table**, with the lost target struck through, when it was noticed, **Put
+  back** and **Removed on purpose**. They also show when the table is filtered on the device, and under Errors.
+
+### Changed
+
+- **Network tab (beta): names no longer pile on top of each other.** Where two names would overlap, or a name would run
+  under another device, the less important one is hidden: the coordinator, the route being shown and the routers with
+  the most links keep theirs. Zooming in makes room, so more names appear, and pointing at a device always shows its
+  name. A line under the picture says how many are hidden.
+- **Names: Small / Medium / Large** on the Network tab sets the size of names and devices, remembered in this browser.
+  Devices are drawn smaller than in 1.11.0 at every size.
+
+### Fixed
+
+- A device's group bindings are now reported as lost after it's removed and paired again. Removing it took it out of
+  its groups, so they were treated as "left the group" and quietly dropped (integration 1.12.0).
+
+## [1.11.1]
+
+### Fixed
+
+- **Put back / Put all back:** after putting lost bindings back, the side panel, Map and table weren't updated (a
+  device could still say it controls nothing until you rescanned it), and the message could say "Nothing to put back"
+  even though it worked. The card misread the integration's answer; it now reads each device's result and rescans the
+  devices that changed.
+- **Check again** (lost bindings) also rescans the devices it found with lost bindings, so the rest of the card shows
+  what they have now.
+
 ## [1.11.0]
 
 ### Added

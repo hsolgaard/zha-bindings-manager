@@ -59,7 +59,8 @@ const LOST_EDGE_COLOR = "#db4437";
 import { replacementCandidates, commandGaps, VERDICT, RESULT_LABEL, defaultSelection, runSummary } from "./replace.js";
 import BUNDLED_QUESTIONS from "./questions.json";
 import { changedDevices, historyLines, addressFact, noticeSummary, buildNetworkReport, reportIssue } from "./evidence.js";
-import { lostSummary, lostFor, putBackMessage, sinceText, NOTICED_BY, POLICIES, POLICY_LABELS, POLICY_HINTS } from "./lost.js";
+import { lostSummary, lostFor, lostBindings, repairedDevices, putBackMessage, putBackDone, sinceText, NOTICED_BY, POLICIES, POLICY_LABELS, POLICY_HINTS } from "./lost.js";
+import * as Settings from "./settings.js";
 import { SHELL_HTML } from "./template.js";
 import { LocalStorageProvider } from "./storage/local-storage-provider.js";
 import { HaStorageProvider } from "./storage/ha-storage-provider.js";
@@ -656,6 +657,8 @@ export class ZhaBindingMapCard extends HTMLElement {
     this._replaceEnabled = !!probe.replace;
     this._evidenceEnabled = !!probe.evidence;
     this._directUnbind = !!probe.directUnbind;
+    this._settingsEnabled = !!probe.settingsBackup;
+    this._otaEnabled = !!probe.otaServer;
     if (this._api) {
       this._api.watchEnabled = this._watchEnabled;
       this._api.directUnbind = this._directUnbind;
@@ -1161,7 +1164,12 @@ export class ZhaBindingMapCard extends HTMLElement {
     } catch (e) {
       this._lost = null; // older integration, or watch switched off
     }
+    if (this._otaEnabled && !this._otaLoaded) {
+      this._otaLoaded = true;
+      this._otaLoad();
+    }
     this._renderLostBanner();
+    if (this._view === "table") this._renderTable();
     this._renderHealthSummary(this._computeHealthMap());
     if (this._edgesLayer) this._renderGraphEdges();
     if (this._drawerIeee) this._renderDrawer();
@@ -1201,7 +1209,7 @@ export class ZhaBindingMapCard extends HTMLElement {
     const m = putBackMessage(res.results, nameOf);
     this._setStatus(m.level, m.text, 0);
     // The card's own copy of the binding table is now out of date.
-    const done = Object.entries(res.results || {}).filter(([, st]) => st === "put_back").map(([i]) => i);
+    const done = putBackDone(res.results);
     if (done.length) this._scanBindings(done, { tries: 1 });
   }
 
@@ -1215,6 +1223,12 @@ export class ZhaBindingMapCard extends HTMLElement {
     const vals = Object.values((res && res.results) || res || {});
     const asleep = vals.filter((v) => v === "no_answer").length;
     const lost = lostSummary(this._lost).total;
+    // Devices that turned out to have lost bindings: the card's copy of
+    // their table is out of date, so read them again (1.11.1).
+    const changed = Object.entries((res && res.results) || {})
+      .filter(([, v]) => v === "lost")
+      .map(([i]) => i);
+    if (changed.length) this._scanBindings(changed, { tries: 1 });
     this._setStatus(
       lost ? "warning" : "success",
       `Checked ${vals.length} device${vals.length === 1 ? "" : "s"}: ${lost ? `${lost} lost binding${lost === 1 ? "" : "s"}` : "nothing lost"}.${
@@ -1228,9 +1242,29 @@ export class ZhaBindingMapCard extends HTMLElement {
     const el = this._q("#lost-banner");
     if (!el) return;
     const sum = lostSummary(this._lost);
-    if (!this._watchEnabled || !sum.total) {
+    const repaired = this._watchEnabled ? repairedDevices(this._lost) : [];
+    if (!this._watchEnabled || (!sum.total && !repaired.length)) {
       el.style.display = "none";
       el.innerHTML = "";
+      return;
+    }
+    // 1.12.0: devices removed from ZHA and paired again come first, with one
+    // action that puts everything back.
+    const repairedHtml = repaired
+      .map(
+        (r) => `<div class="stale-row repaired-row">
+          <span><strong>${escapeHtml(this._ieeeLabel(r.ieee, { plain: true }) || r.name)}</strong> was paired again ${escapeHtml(
+          sinceText(r.at)
+        )}. Removing it from ZHA reset it: ${escapeHtml(this._repairedWhatText(r))}.</span>
+          <button class="btn btn-small btn-primary" data-restore-all="${escapeHtml(r.ieee)}" ${this._restoreBusy ? "disabled" : ""}>Restore everything…</button>
+          <button class="btn btn-small" data-repaired-dismiss="${escapeHtml(r.ieee)}">Dismiss</button>
+        </div>`
+      )
+      .join("");
+    if (!sum.total) {
+      el.innerHTML = repairedHtml;
+      el.style.display = "";
+      this._wireRepairedButtons("#lost-banner");
       return;
     }
     const busy = this._lostBusy;
@@ -1257,7 +1291,7 @@ export class ZhaBindingMapCard extends HTMLElement {
           )
           .join("")}</div>`
       : "";
-    el.innerHTML = `
+    el.innerHTML = `${repairedHtml}
       <div class="stale-row">
         <span><strong>${sum.total} lost binding${sum.total === 1 ? "" : "s"}</strong> on ${nDev} device${nDev === 1 ? "" : "s"}:
           ${nDev === 1 ? "it" : "they"} had ${sum.total === 1 ? "this binding" : "these bindings"} before and ${nDev === 1 ? "doesn't" : "don't"} any more,
@@ -1301,6 +1335,654 @@ export class ZhaBindingMapCard extends HTMLElement {
         if (d) this._openDeviceDrawer(d);
       })
     );
+    this._wireRepairedButtons("#lost-banner");
+  }
+
+  // -------------------------------------------------------------------
+  // Re-paired devices, configuration backups, update servers (1.12.0)
+  // -------------------------------------------------------------------
+
+  /** "2 lost bindings, 1 group membership (Lounge) and its settings". */
+  _repairedWhatText(r) {
+    const parts = [];
+    if (r.lost) parts.push(`${r.lost} lost binding${r.lost === 1 ? "" : "s"}`);
+    if (r.missingGroups.length)
+      parts.push(
+        `${r.missingGroups.length} group membership${r.missingGroups.length === 1 ? "" : "s"} (${r.missingGroups.map((g) => g.name).join(", ")})`
+      );
+    if (this._settingsEnabled) parts.push("its settings");
+    if (!parts.length) return "nothing that ZHA Bindings Manager knew about";
+    return parts.length === 1 ? parts[0] : `${parts.slice(0, -1).join(", ")} and ${parts[parts.length - 1]}`;
+  }
+
+  _wireRepairedButtons(scope) {
+    this._qa(`${scope} [data-restore-all]`).forEach((b) => b.addEventListener("click", () => this._restoreEverything(b.dataset.restoreAll)));
+    this._qa(`${scope} [data-repaired-dismiss]`).forEach((b) =>
+      b.addEventListener("click", (e) => {
+        e.preventDefault();
+        this._lostAction("Dismiss", () => this._api.watchRepairedDismiss(b.dataset.repairedDismiss));
+      })
+    );
+  }
+
+  /** A device was removed and paired again. Restore in this order:
+   *  1. its groups, 2. its settings (shown first, from the last backup
+   *  before the removal), 3. its bindings, put back and read back last, so
+   *  they go onto a device that's already set up again (detach-relay mode
+   *  and so on). Without settings backups it goes straight to 3. */
+  async _restoreEverything(ieee) {
+    const key = normIeee(ieee);
+    const rep = repairedDevices(this._lost).find((r) => r.ieee === key);
+    if (!rep || this._restoreBusy) return;
+    this._restoreBusy = key;
+    this._renderLostBanner();
+    if (this._drawerIeee) this._renderDrawer();
+    const done = [];
+    try {
+      if (rep.missingGroups.length) {
+        const ok = [];
+        const failed = [];
+        for (const g of rep.missingGroups) {
+          try {
+            await this._api.addGroupMembers(g.group_id, [{ ieee: key, endpoint: g.endpoint_id }]);
+            ok.push(g.name);
+          } catch (err) {
+            failed.push(`${g.name} (${extractErrorMessage(err)})`);
+          }
+        }
+        if (ok.length) done.push(`Groups: added back to ${ok.join(", ")}.`);
+        if (failed.length) done.push(`Groups: couldn't add it back to ${failed.join(", ")}.`);
+        await this._reloadDevices({ quiet: true });
+      }
+    } finally {
+      this._restoreBusy = null;
+    }
+    if (!this._settingsEnabled) {
+      const res = await this._restoreBindings(key);
+      this._setStatus(res.level, [...done, res.text].join(" "), 0);
+      return;
+    }
+    this._openSettings({
+      sourceIeee: key,
+      targetIeee: key,
+      mode: "restore",
+      before: rep.removedAt || null,
+      intro: done,
+      repaired: true,
+    });
+  }
+
+  /** Step 3 of Restore everything: put the lost bindings back, read the
+   *  device back, and say what it has now. {level, text}. */
+  async _restoreBindings(ieee) {
+    const key = normIeee(ieee);
+    const name = this._ieeeLabel(key, { plain: true });
+    let text = "";
+    try {
+      if (lostFor(this._lost, key).lost.length) {
+        const res = await this._api.watchPutBack(key);
+        text = putBackMessage(res.results, () => name).text;
+      }
+      await this._scanBindings([key], { tries: 1 });
+    } catch (err) {
+      return { level: "error", text: `Bindings: ${extractErrorMessage(err)}` };
+    }
+    await this._lostLoad();
+    const still = lostFor(this._lost, key).lost.length;
+    const has = this._rawBindings().filter((b) => normIeee(b.sourceIeee) === key && b.targetIeee !== this._coordinatorIeee()).length;
+    if (still)
+      return {
+        level: "warning",
+        text: `Bindings: ${still} still missing after putting them back. ${text}`.trim(),
+      };
+    return {
+      level: "success",
+      text: `Bindings: ${text ? `${text} ` : "nothing was missing. "}Read back from the device: ${has} binding${has === 1 ? "" : "s"} in place.`,
+    };
+  }
+
+  async _otaLoad() {
+    if (!this._otaEnabled || !this._api) return;
+    try {
+      const res = await this._api.otaClaimants();
+      this._otaClaimants = (res && res.claimants) || [];
+      // Saved answers (with when each was read), for the Devices tab column.
+      this._otaServers = new Map(Object.entries((res && res.results) || {}).map(([k, v]) => [normIeee(k), v]));
+    } catch (e) {
+      this._otaClaimants = [];
+    }
+    this._renderOtaBanner();
+    if (this._view === "devices") this._renderDevicesTab();
+    if (this._drawerIeee) this._renderDrawer();
+  }
+
+  /** Does this device have an OTA client cluster? True when its clusters
+   *  aren't known yet: reading it then says so. */
+  _hasOta(ieee) {
+    const cl = this._clusterCache.get(ieee) || this._clusterCache.get(normIeee(ieee));
+    return !cl || cl.some((c) => c.type === "out" && Number(c.id) === 0x0019);
+  }
+
+  /** Devices tab: read every mains device's update server, one at a time. */
+  async _otaCheckAll() {
+    if (this._otaProgress) return;
+    const coord = normIeee(this._coordinatorIeee() || "");
+    const list = this._devices.filter((d) => normIeee(d.ieee) !== coord && !this._isBatteryDevice(d) && this._hasOta(d.ieee));
+    if (!this._otaServers) this._otaServers = new Map();
+    this._otaProgress = { done: 0, total: list.length, stop: false };
+    this._renderOtaBanner();
+    for (const d of list) {
+      if (this._otaProgress.stop) break;
+      try {
+        this._otaServers.set(normIeee(d.ieee), await this._api.otaServer(d.ieee));
+      } catch (err) {
+        this._otaServers.set(normIeee(d.ieee), { status: "error", detail: extractErrorMessage(err) });
+      }
+      this._otaProgress.done += 1;
+      this._renderOtaBanner();
+      if (this._view === "devices") this._renderDevicesTab();
+      await new Promise((r) => setTimeout(r, 800));
+    }
+    const wrong = Settings.devicesWithWrongServer(Object.fromEntries(this._otaServers));
+    const stopped = this._otaProgress.stop;
+    this._otaProgress = null;
+    this._renderOtaBanner();
+    if (this._view === "devices") this._renderDevicesTab();
+    this._setStatus(
+      wrong ? "warning" : "success",
+      `${stopped ? "Stopped. " : ""}Checked where devices get their firmware updates: ${
+        wrong
+          ? `${wrong} device${wrong === 1 ? " gets them" : "s get them"} from a device other than the coordinator, so ${wrong === 1 ? "its" : "their"} updates will time out.`
+          : "all from the coordinator, or not set yet."
+      } Battery devices were skipped: check them from their side panel when they're awake.`,
+      0
+    );
+  }
+
+  /** Devices tab: devices that claim to be a firmware update server. */
+  _renderOtaBanner() {
+    const el = this._q("#ota-banner");
+    if (!el) return;
+    const list = this._otaClaimants || [];
+    const wrong = Settings.devicesWithWrongServer(this._otaServers ? Object.fromEntries(this._otaServers) : {});
+    const prog = this._otaProgress;
+    if (!list.length && !wrong && !prog) {
+      el.style.display = "none";
+      el.innerHTML = "";
+      return;
+    }
+    const nameOf = (i) => this._ieeeLabel(i, { plain: true });
+    const wrongText = wrong
+      ? ` ${wrong} device${wrong === 1 ? " gets its" : "s get their"} updates from a device other than the coordinator (see the OTA server column).`
+      : "";
+    const checkBtn = prog
+      ? `<span class="muted">Checking ${prog.done} of ${prog.total}…</span><button class="btn btn-small" id="btn-ota-stop">Stop</button>`
+      : `<button class="btn btn-small btn-primary" id="btn-ota-check-all" title="Reads where each mains device gets its firmware updates, one at a time. Battery devices are skipped.">Check update servers</button>`;
+    el.innerHTML = `<div class="stale-row"><span>${
+      list.length
+        ? `${escapeHtml(Settings.claimantsText(list, nameOf))} It's a fault in ${list.length === 1 ? "its" : "their"} firmware: only the maker can fix it.`
+        : ""
+    }${escapeHtml(wrongText)}</span>${checkBtn}${list
+      .map((c) => `<button class="btn btn-small" data-ota-claimant="${escapeHtml(c.ieee)}">Open ${escapeHtml(nameOf(c.ieee))}</button>`)
+      .join("")}</div>`;
+    el.style.display = "";
+    const checkAll = this._q("#btn-ota-check-all");
+    if (checkAll) checkAll.addEventListener("click", () => this._otaCheckAll());
+    const stop = this._q("#btn-ota-stop");
+    if (stop)
+      stop.addEventListener("click", () => {
+        if (this._otaProgress) this._otaProgress.stop = true;
+      });
+    this._qa("#ota-banner [data-ota-claimant]").forEach((b) =>
+      b.addEventListener("click", () => {
+        const d = this._devices.find((x) => normIeee(x.ieee) === normIeee(b.dataset.otaClaimant));
+        if (d) this._openDeviceDrawer(d);
+      })
+    );
+  }
+
+  _nameIfKnown(ieee) {
+    const d = this._devices.find((x) => normIeee(x.ieee) === normIeee(ieee || ""));
+    return d ? this._deviceLabel(d) : null;
+  }
+
+  async _otaCheck(ieee) {
+    const key = normIeee(ieee);
+    if (!this._otaServers) this._otaServers = new Map();
+    this._otaBusy = key;
+    if (this._drawerIeee) this._renderDrawer();
+    if (this._view === "devices") this._renderDevicesTab();
+    try {
+      this._otaServers.set(key, await this._api.otaServer(key));
+    } catch (err) {
+      this._otaServers.set(key, { status: "error", detail: extractErrorMessage(err) });
+    } finally {
+      this._otaBusy = null;
+      // Side panel, Devices tab column and banner all show the new answer
+      // straight away (1.12.0: the column used to need a page reload).
+      if (this._drawerIeee) this._renderDrawer();
+      this._renderOtaBanner();
+      if (this._view === "devices") this._renderDevicesTab();
+    }
+  }
+
+  /** Side panel: firmware updates. */
+  _drawerOtaHtml(d) {
+    if (!this._otaEnabled) return "";
+    const key = normIeee(d.ieee);
+    const claim = Settings.isClaimant(this._otaClaimants, key);
+    const res = this._otaServers && this._otaServers.get(key);
+    const busy = this._otaBusy === key;
+    let line = `<span class="muted">not checked yet.</span>`;
+    if (busy) line = `<span class="muted">checking…</span>`;
+    else if (res) {
+      const t = Settings.updateServerText(res, (i) => this._nameIfKnown(i));
+      line = `<span class="ota-${escapeHtml(t.level)}">${escapeHtml(t.text)}</span>${
+        t.server && this._nameIfKnown(t.server) ? ` <a href="#" class="src-link" data-ota-open="${escapeHtml(t.server)}">Open it</a>` : ""
+      }${res.at ? ` <span class="muted">(checked ${escapeHtml(sinceText(res.at))})</span>` : ""}`;
+    }
+    return `<div class="drawer-section drawer-ota">
+      <div class="drawer-section-title">Firmware updates</div>
+      ${
+        claim
+          ? `<p class="drawer-ota-claim">⚠ This device claims to be a firmware update server: it lists the OTA cluster as an input on endpoint ${escapeHtml(
+              claim.endpoints.join(", ")
+            )}. Devices near it can pick it instead of the coordinator, and their firmware updates then time out. It's a firmware fault: report it to the maker.</p>`
+          : ""
+      }
+      <p>OTA server: ${line}</p>
+      <button class="btn btn-small" id="drawer-ota-check" ${busy ? "disabled" : ""} title="Reads where this device sends its firmware update requests (its OTA upgrade server)">Check</button>
+    </div>`;
+  }
+
+  async _settingsLoad(ieee, force = false) {
+    const key = normIeee(ieee);
+    if (!this._settingsSaved) this._settingsSaved = new Map();
+    if (!this._settingsLoading) this._settingsLoading = new Set();
+    if ((!force && this._settingsSaved.has(key)) || this._settingsLoading.has(key)) return this._settingsSaved.get(key);
+    this._settingsLoading.add(key);
+    try {
+      this._settingsSaved.set(key, await this._api.settingsGet(key));
+    } catch (e) {
+      this._settingsSaved.set(key, { snapshots: [], after_reset: null, error: extractErrorMessage(e) });
+    } finally {
+      this._settingsLoading.delete(key);
+    }
+    if (this._drawerIeee && normIeee(this._drawerIeee) === key) this._renderDrawer();
+    return this._settingsSaved.get(key);
+  }
+
+  /** Side panel: configuration backups. */
+  _drawerSettingsHtml(d) {
+    if (!this._settingsEnabled) return "";
+    const key = normIeee(d.ieee);
+    const saved = this._settingsSaved && this._settingsSaved.get(key);
+    if (saved === undefined) this._settingsLoad(key);
+    const latest = saved && (saved.snapshots || [])[0];
+    const busy = this._settingsBusy === key;
+    const any = Settings.snapshotChoices(saved).length > 0;
+    const battery = this._isBatteryDevice(d);
+    let status = "Loading…";
+    if (saved && latest) status = `Last backup: ${Settings.snapshotLabel(latest)}, ${Settings.settingsCount(latest)} settings.`;
+    else if (saved && saved.after_reset) status = "No backup from before it was reset, only its factory settings.";
+    else if (saved) status = battery ? "No backup yet." : "No backup yet. Mains devices are backed up automatically after a scan, once a week.";
+    return `<div class="drawer-section drawer-settings">
+      <div class="drawer-section-title">Configuration</div>
+      <p class="hint">${escapeHtml(status)}${battery ? " It runs on battery: press one of its buttons just before backing up or restoring." : ""}</p>
+      <div class="drawer-settings-actions">
+        <button class="btn btn-small" id="drawer-settings-backup" ${busy ? "disabled" : ""} title="Reads every setting ZHA knows on this device and saves it">${busy ? "Reading…" : "Back up now"}</button>
+        ${
+          any
+            ? `<button class="btn btn-small" id="drawer-settings-view" title="See the saved settings next to what it has now, and restore them">View and restore…</button>
+               <button class="btn btn-small" id="drawer-settings-apply" title="Copy these settings to another device, for example its replacement">Apply to another device…</button>
+               <button class="btn btn-small" id="drawer-settings-export" title="Download the latest backup as a file">Export</button>`
+            : ""
+        }
+        <button class="btn btn-small" id="drawer-settings-import" title="Load a backup from a file, to view it or apply it to this device">Import…</button>
+        <input type="file" id="drawer-settings-file" accept=".json,application/json" style="display:none">
+      </div>
+      <details class="drawer-lost-expect"><summary>What's saved</summary>
+        <ul>
+          <li>Every setting ZHA knows on each endpoint: power-on behaviour, dimming levels and speeds, and maker-specific settings its quirk defines (for example SONOFF's detach-relay mode and network LED).</li>
+          <li>Its group memberships and bindings, for the record. Bindings are put back by Lost bindings, groups by Restore everything.</li>
+          <li>Not saved: settings ZHA has no definition for (there's no safe way to write them back), timers, and identify, time, poll and update settings.</li>
+          <li>Nothing is written until you've seen the list and pressed Write. Each setting is read back afterwards.</li>
+        </ul>
+      </details>
+    </div>`;
+  }
+
+  async _settingsBackupNow(d) {
+    const key = normIeee(d.ieee);
+    this._settingsBusy = key;
+    this._renderDrawer();
+    try {
+      const snap = await this._api.settingsBackup(key);
+      this._setStatus("success", `${this._deviceLabel(d)}: ${Settings.settingsCount(snap)} settings backed up${snap.unread ? ` (${snap.unread} didn't answer)` : ""}.`);
+    } catch (err) {
+      this._setStatus("error", `Back up ${this._deviceLabel(d)}: ${extractErrorMessage(err)}`, 0);
+    } finally {
+      this._settingsBusy = null;
+      await this._settingsLoad(key, true);
+      if (this._drawerIeee) this._renderDrawer();
+    }
+  }
+
+  async _settingsExport(d) {
+    const saved = await this._settingsLoad(d.ieee);
+    const snap = (saved && (saved.snapshots || [])[0]) || (saved && saved.after_reset);
+    if (!snap) return;
+    const dev = { ieee: d.ieee, name: this._deviceLabel(d), manufacturer: d.manufacturer, model: d.model };
+    const blob = new Blob([JSON.stringify(Settings.exportFile(snap, dev), null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = Settings.exportFileName(dev, snap);
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+
+  async _settingsImportFile(d, file) {
+    if (!file) return;
+    try {
+      const { snapshot } = Settings.parseImport(await file.text());
+      const imported = await this._api.settingsImport(d.ieee, snapshot);
+      await this._settingsLoad(d.ieee, true);
+      this._openSettings({ sourceIeee: d.ieee, targetIeee: d.ieee, snapshotId: imported.id, mode: "restore" });
+    } catch (err) {
+      this._setStatus("error", `Import: ${extractErrorMessage(err)}`, 0);
+    }
+  }
+
+  // --- the settings dialog ---------------------------------------------------
+
+  /** mode "restore": a device's backup against the same device.
+   *  mode "apply": a device's backup against another device (picked here). */
+  async _openSettings({ sourceIeee, targetIeee = null, snapshotId = null, before = null, mode = "restore", intro = null, repaired = false }) {
+    this._closeDrawer();
+    this._settingsDlg = {
+      mode,
+      sourceIeee: normIeee(sourceIeee),
+      targetIeee: targetIeee ? normIeee(targetIeee) : null,
+      snapshotId,
+      before,
+      intro: intro || [],
+      repaired,
+      endpointMap: {},
+      plan: null,
+      selected: new Set(),
+      results: null,
+      error: null,
+      loading: false,
+    };
+    const src = this._ieeeLabel(sourceIeee, { plain: true });
+    this._q("#dialog-title").textContent = mode === "apply" ? `Apply ${src}'s settings to another device` : `Settings of ${src}`;
+    const panel = this._q(".dialog-panel");
+    if (panel) panel.classList.add("wide");
+    this._q("#dialog").classList.add("open");
+    await this._settingsLoad(sourceIeee);
+    if (this._settingsDlg && this._settingsDlg.targetIeee) await this._settingsPlan();
+    else this._renderSettings();
+  }
+
+  async _settingsPlan() {
+    const s = this._settingsDlg;
+    if (!s || !s.targetIeee) return;
+    s.plan = null;
+    s.results = null;
+    s.error = null;
+    s.loading = true;
+    this._renderSettings();
+    try {
+      const plan = await this._api.settingsPlan(s.sourceIeee, s.targetIeee, { snapshotId: s.snapshotId, before: s.before, endpointMap: s.endpointMap });
+      if (this._settingsDlg !== s) return;
+      s.plan = plan;
+      s.snapshotId = plan.snapshot_id || s.snapshotId;
+      s.selected = Settings.defaultSelection(plan.rows);
+    } catch (err) {
+      if (this._settingsDlg !== s) return;
+      s.error = extractErrorMessage(err);
+    } finally {
+      s.loading = false;
+      if (this._settingsDlg === s) this._renderSettings();
+    }
+  }
+
+  async _settingsWrite() {
+    const s = this._settingsDlg;
+    if (!s || !s.plan) return;
+    const items = Settings.applyItems(s.plan.rows, s.selected);
+    if (!items.length) return;
+    s.loading = true;
+    this._renderSettings();
+    try {
+      s.results = await this._api.settingsApply(s.targetIeee, items);
+      const m = Settings.applySummary(s.results, this._ieeeLabel(s.targetIeee, { plain: true }));
+      this._setStatus(m.level, m.text, m.level === "success" ? undefined : 0);
+    } catch (err) {
+      s.error = extractErrorMessage(err);
+    } finally {
+      s.loading = false;
+      if (this._settingsDlg === s) this._renderSettings();
+    }
+    if (s.repaired && s.results) await this._settingsThenBindings(s);
+  }
+
+  /** Restore everything, step 3, after the settings (written or skipped). */
+  async _settingsThenBindings(s) {
+    s.bindings = { level: "info", text: "Bindings: putting them back and reading the device…" };
+    this._renderSettings();
+    s.bindings = await this._restoreBindings(s.targetIeee);
+    const settingsOk = !s.results || Settings.applySummary(s.results, "").level === "success";
+    if (s.bindings.level === "success" && settingsOk) {
+      try {
+        await this._api.watchRepairedDismiss(s.targetIeee);
+        await this._lostLoad();
+      } catch (e) {
+        /* the notice stays; nothing else depends on it */
+      }
+    }
+    if (this._settingsDlg === s) this._renderSettings();
+  }
+
+  _settingsTargets() {
+    const s = this._settingsDlg;
+    const src = this._devices.find((d) => normIeee(d.ieee) === s.sourceIeee);
+    const coord = this._coordinatorIeee();
+    return this._devices
+      .filter((d) => normIeee(d.ieee) !== s.sourceIeee && normIeee(d.ieee) !== normIeee(coord || ""))
+      .map((d) => ({ d, same: !!(src && d.model && d.model === src.model) }))
+      .sort((a, b) => Number(b.same) - Number(a.same) || this._deviceLabel(a.d).localeCompare(this._deviceLabel(b.d)));
+  }
+
+  _renderSettings() {
+    const s = this._settingsDlg;
+    const body = this._q("#dialog-body");
+    if (!s || !body) return;
+    const saved = this._settingsSaved && this._settingsSaved.get(s.sourceIeee);
+    const choices = Settings.snapshotChoices(saved);
+    const intro = s.intro.length
+      ? `<div class="flow-callout flow-result-success">${s.intro.map((t) => `<div>${escapeHtml(t)}</div>`).join("")}</div>`
+      : "";
+    const repairedNote = s.repaired
+      ? `<p>Next its settings, then its bindings. Below is its last backup from before it was removed, next to what it has now; ticked settings are the ones that differ. After writing them, its bindings are put back and read back from the device.</p>`
+      : "";
+    if (!choices.length && !s.snapshotId) {
+      const bindingsStep = s.bindings ? `<div class="flow-callout flow-result-${escapeHtml(s.bindings.level)}">${escapeHtml(s.bindings.text)}</div>` : "";
+      body.innerHTML = `${intro}<p>There's no backup of ${escapeHtml(this._ieeeLabel(s.sourceIeee, { plain: true }))} yet${
+        s.repaired ? " from before it was removed, so its settings can't be restored" : ""
+      }.</p>${bindingsStep}<div class="dialog-actions">${
+        s.repaired && !s.bindings ? `<button class="btn btn-primary" id="settings-skip">Put bindings back</button>` : ""
+      }<button class="btn" id="settings-close">${s.bindings ? "Done" : "Close"}</button></div>`;
+      const skip = this._q("#settings-skip");
+      if (skip) skip.addEventListener("click", () => this._settingsThenBindings(s));
+      this._q("#settings-close").addEventListener("click", () => this._closeSettings());
+      return;
+    }
+    const current = s.plan ? s.plan.snapshot_id : s.snapshotId;
+    const picker = choices.length
+      ? `<label class="settings-pick">Backup:
+          <select id="settings-snapshot">${choices
+            .map((c) => `<option value="${escapeHtml(c.id)}" ${c.id === current || (!current && c === choices[0]) ? "selected" : ""}>${escapeHtml(c.label)}</option>`)
+            .join("")}</select></label>`
+      : "";
+    const targetPicker =
+      s.mode === "apply"
+        ? `<label class="settings-pick">Apply to:
+            <select id="settings-target"><option value="">Choose a device…</option>${this._settingsTargets()
+              .map(
+                ({ d, same }) =>
+                  `<option value="${escapeHtml(normIeee(d.ieee))}" ${normIeee(d.ieee) === s.targetIeee ? "selected" : ""}>${escapeHtml(this._deviceLabel(d))}${
+                    same ? " (same model)" : d.model ? ` (${escapeHtml(d.model)})` : ""
+                  }</option>`
+              )
+              .join("")}</select></label>`
+        : "";
+    let main = "";
+    if (s.loading) main = `<p class="muted">${s.results === null && s.plan ? "Writing and checking…" : "Reading the device…"}</p>`;
+    else if (s.error) main = `<div class="flow-callout flow-result-warning">${escapeHtml(s.error)}</div>`;
+    else if (s.results) main = this._settingsResultsHtml();
+    else if (s.plan) main = this._settingsPlanHtml();
+    else if (s.mode === "apply") main = `<p class="muted">Choose the device to compare with.</p>`;
+    const n = s.plan && !s.results ? Settings.applyItems(s.plan.rows, s.selected).length : 0;
+    const anyDiffer = !!(s.plan && s.plan.rows.some((r) => r.state === "differs"));
+    const deciding = s.plan && !s.results && !s.loading && !s.bindings;
+    let actions = "";
+    if (deciding && anyDiffer)
+      actions = `<button class="btn btn-primary" id="settings-write" ${n ? "" : "disabled"}>Write ${n} setting${n === 1 ? "" : "s"}${
+        s.repaired ? ", then put bindings back" : ""
+      }</button>${s.repaired ? `<button class="btn" id="settings-skip">Skip settings, put bindings back</button>` : ""}`;
+    else if (deciding && s.repaired) actions = `<button class="btn btn-primary" id="settings-skip">Put bindings back</button>`;
+    const matches =
+      deciding && !anyDiffer ? `<div class="flow-callout flow-result-success">Everything matches the backup: nothing to write.</div>` : "";
+    const bindingsStep = s.bindings ? `<div class="flow-callout flow-result-${escapeHtml(s.bindings.level)}">${escapeHtml(s.bindings.text)}</div>` : "";
+    const finished = s.results || (s.bindings && s.bindings.level !== "info") || (deciding && !anyDiffer && !s.repaired);
+    const tail = s.bindings && s.bindings.level !== "info" ? `<p>Now press each of its buttons and check the lights respond.</p>` : "";
+    body.innerHTML = `${intro}${repairedNote}<div class="settings-pickers">${picker}${targetPicker}</div>${matches}${main}${bindingsStep}${tail}
+      <div class="dialog-actions">${actions}<button class="btn" id="settings-close">${finished ? "Done" : "Close"}</button></div>`;
+    const skip = this._q("#settings-skip");
+    if (skip) skip.addEventListener("click", () => this._settingsThenBindings(s));
+    const snapSel = this._q("#settings-snapshot");
+    if (snapSel)
+      snapSel.addEventListener("change", () => {
+        s.snapshotId = snapSel.value;
+        s.before = null;
+        if (s.targetIeee) this._settingsPlan();
+      });
+    const tgtSel = this._q("#settings-target");
+    if (tgtSel)
+      tgtSel.addEventListener("change", () => {
+        s.targetIeee = tgtSel.value || null;
+        s.endpointMap = {};
+        if (s.targetIeee) this._settingsPlan();
+        else {
+          s.plan = null;
+          this._renderSettings();
+        }
+      });
+    this._qa("#dialog-body [data-settings-row]").forEach((cb) =>
+      cb.addEventListener("change", () => {
+        if (cb.checked) s.selected.add(cb.dataset.settingsRow);
+        else s.selected.delete(cb.dataset.settingsRow);
+        this._renderSettings();
+      })
+    );
+    this._qa("#dialog-body [data-settings-epmap]").forEach((sel) =>
+      sel.addEventListener("change", () => {
+        if (sel.value) s.endpointMap[sel.dataset.settingsEpmap] = Number(sel.value);
+        else delete s.endpointMap[sel.dataset.settingsEpmap];
+        this._settingsPlan();
+      })
+    );
+    const write = this._q("#settings-write");
+    if (write) write.addEventListener("click", () => this._settingsWrite());
+    this._q("#settings-close").addEventListener("click", () => this._closeSettings());
+  }
+
+  _settingsPlanHtml() {
+    const s = this._settingsDlg;
+    const p = s.plan;
+    const c = Settings.planCounts(p.rows);
+    const target = this._ieeeLabel(s.targetIeee, { plain: true });
+    const notes = [];
+    if (p.firmware_differs)
+      notes.push(
+        `The firmware has changed since this backup (${escapeHtml(JSON.stringify(p.firmware.saved))} then, ${escapeHtml(
+          JSON.stringify(p.firmware.now)
+        )} now). A setting can mean something different, or be refused, on other firmware.`
+      );
+    if (s.mode === "apply" && !p.same_model)
+      notes.push(`${escapeHtml(target)} is a different model: only settings it has too are offered.`);
+    const summary = `${c.differs} differ${c.differs === 1 ? "s" : ""}, ${c.same} already the same${c.not_on_device ? `, ${c.not_on_device} not on ${escapeHtml(target)}` : ""}${
+      c.not_read ? `, ${c.not_read} couldn't be read` : ""
+    }.`;
+    const STATE = { differs: "differs", same: "same", not_on_device: "not on this device", not_read: "couldn't read" };
+    const missingEps = [...new Set(p.rows.filter((r) => r.state === "not_on_device").map((r) => r.saved_endpoint))];
+    const tgtDev = this._devices.find((d) => normIeee(d.ieee) === s.targetIeee);
+    const tgtEps = [...new Set((this._clusterCache.get(s.targetIeee) || []).map((x) => Number(x.endpoint_id)))].filter((e) => e > 0 && e < 240).sort((a, b) => a - b);
+    const epMap =
+      s.mode === "apply" && missingEps.length && tgtEps.length
+        ? `<p class="hint">${missingEps.length === 1 ? "Endpoint" : "Endpoints"} ${escapeHtml(missingEps.join(", "))} of the backup ${
+            missingEps.length === 1 ? "doesn't" : "don't"
+          } exist on ${escapeHtml(target)}. To use ${missingEps.length === 1 ? "it" : "them"} anyway, choose an endpoint on ${escapeHtml(target)}: ${missingEps
+            .map(
+              (e) =>
+                `endpoint ${e} → <select data-settings-epmap="${e}"><option value="">(skip)</option>${tgtEps
+                  .map((t) => `<option value="${t}" ${s.endpointMap[e] === t ? "selected" : ""}>${t}</option>`)
+                  .join("")}</select>`
+            )
+            .join(" ")}</p>`
+        : "";
+    if (tgtDev && !this._clusterCache.get(s.targetIeee)) this._ensureClusters(s.targetIeee).then(() => this._renderSettings()).catch(() => {});
+    const groups = Settings.groupRows(p.rows);
+    const table = groups
+      .map(
+        (ep) => `<tr class="settings-ep"><td colspan="5">Endpoint ${ep.endpoint}</td></tr>${ep.clusters
+          .map(
+            (cl) => `<tr class="settings-cluster"><td colspan="5">${escapeHtml(Settings.settingName(cl.name))} <span class="muted">0x${cl.cluster
+              .toString(16)
+              .padStart(4, "0")}</span></td></tr>${cl.rows
+              .map((r) => {
+                const k = Settings.rowKey(r);
+                const canWrite = r.state === "differs";
+                return `<tr class="settings-row settings-${escapeHtml(r.state)}">
+                  <td>${canWrite ? `<input type="checkbox" data-settings-row="${escapeHtml(k)}" ${s.selected.has(k) ? "checked" : ""}>` : ""}</td>
+                  <td title="${escapeHtml(r.name)}${r.manufacturer_specific ? " (maker-specific)" : ""}">${escapeHtml(Settings.settingName(r.name))}</td>
+                  <td>${escapeHtml(Settings.formatValue(r.saved, r.saved_label))}</td>
+                  <td>${escapeHtml(Settings.formatValue(r.current, r.current_label))}</td>
+                  <td class="muted">${escapeHtml(STATE[r.state] || r.state)}</td>
+                </tr>`;
+              })
+              .join("")}`
+          )
+          .join("")}`
+      )
+      .join("");
+    return `${notes.map((t) => `<div class="flow-callout flow-result-warning">${t}</div>`).join("")}
+      <p>${summary}</p>${epMap}
+      <div class="table-scroll"><table class="bindings-table settings-table">
+        <thead><tr><th></th><th>Setting</th><th>Saved</th><th title="${escapeHtml(target)} now">Now</th><th></th></tr></thead>
+        <tbody>${table || `<tr><td colspan="5" class="muted">This backup has no settings.</td></tr>`}</tbody>
+      </table></div>
+      <p class="hint">Untick anything you don't want written. A setting you don't recognise is usually safest left alone.</p>`;
+  }
+
+  _settingsResultsHtml() {
+    const s = this._settingsDlg;
+    const res = s.results;
+    const m = Settings.applySummary(res, this._ieeeLabel(s.targetIeee, { plain: true }));
+    return `<div class="flow-callout flow-result-${m.level}">${escapeHtml(m.text)}</div>
+      <ul>${(res.results || [])
+        .map((r) => `<li>${escapeHtml(Settings.settingName(r.name || `0x${Number(r.attribute).toString(16)}`))} <span class="muted">(endpoint ${r.endpoint})</span>: <strong>${escapeHtml(Settings.resultText(r))}</strong></li>`)
+        .join("")}</ul>
+`;
+  }
+
+  _closeSettings() {
+    this._settingsDlg = null;
+    this._closeDialog();
   }
 
   // -------------------------------------------------------------------
@@ -1624,6 +2306,7 @@ export class ZhaBindingMapCard extends HTMLElement {
     if (r.cleaned) {
       return `<div class="flow-callout flow-result-success">${escapeHtml(r.cleaned)}</div>
         <p>Now press each remote that controls the new device${p.items.some((i) => i.kind === "controls") ? ", and the new remote itself" : ""}, and check the lights respond.</p>
+        ${this._replaceSettingsHtml(old)}
         <div class="dialog-actions"><button class="btn btn-primary" id="replace-close">Done</button></div>`;
     }
     return `<div class="flow-callout flow-result-${sum.level}">${escapeHtml(sum.text)}.</div><ul>${rows}</ul>
@@ -1632,7 +2315,17 @@ export class ZhaBindingMapCard extends HTMLElement {
       ${!old.gone && groups.length ? `<label class="flow-target"><input type="checkbox" id="replace-leave-groups" checked> Take ${escapeHtml(this._deviceLabel(old))} out of its groups</label>` : ""}
       ${!old.gone ? `<label class="flow-target"><input type="checkbox" id="replace-remove-old"> Remove ${escapeHtml(this._deviceLabel(old))} from ZHA <span class="muted">(leave unticked if you'll reuse it)</span></label>` : ""}
       <p class="hint">Until then both devices stay bound, so nothing goes dark. The old device's bindings won't be reported as lost.</p>
+      ${this._replaceSettingsHtml(old)}
       <div class="dialog-actions"><button class="btn btn-primary" id="replace-cleanup">Clean up</button><button class="btn" id="replace-close">Not now</button></div>`;
+  }
+
+  /** 1.12.0: copy the old device's saved settings to the new one. */
+  _replaceSettingsHtml(old) {
+    if (!this._settingsEnabled) return "";
+    return `<div class="drawer-section-title">Settings</div>
+      <p class="hint">Settings such as power-on behaviour or detach-relay mode aren't bindings. If ZHA Bindings Manager has a backup of
+        ${escapeHtml(old.name || this._deviceLabel(old))}, you can compare it with the new device and copy what you want.</p>
+      <button class="btn btn-small" id="replace-settings">Copy settings…</button>`;
   }
 
   async _replacePlan() {
@@ -1725,6 +2418,12 @@ export class ZhaBindingMapCard extends HTMLElement {
     const on = (sel, ev, fn) => root.querySelectorAll(sel).forEach((el) => el.addEventListener(ev, fn));
     on("#replace-cancel", "click", () => this._closeReplace());
     on("#replace-close", "click", () => this._closeReplace());
+    on("#replace-settings", "click", () => {
+      const r2 = this._replace;
+      const oldDev = this._replaceOldDevice();
+      this._replace = null;
+      this._openSettings({ sourceIeee: oldDev.ieee, targetIeee: r2.newIeee, mode: "apply" });
+    });
     on('input[name="replace-old"]', "change", (e) => {
       r.oldIeee = normIeee(e.target.value);
       const next = root.querySelector("#replace-next");
@@ -2134,6 +2833,21 @@ export class ZhaBindingMapCard extends HTMLElement {
   /** Sends On/Off itself (a remote or switch), so a press can be checked. */
   _isRemoteLike(d) {
     return (this._clusterCache.get(d.ieee) || []).some((c) => c.type === "out" && Number(c.id) === 0x0006);
+  }
+
+  /** Side panel (1.12.0): the device was removed from ZHA and paired again. */
+  _drawerRepairedHtml(d) {
+    if (!this._watchEnabled) return "";
+    const r = repairedDevices(this._lost).find((x) => x.ieee === normIeee(d.ieee));
+    if (!r) return "";
+    const busy = this._restoreBusy === r.ieee;
+    return `<div class="drawer-section drawer-problems drawer-repaired">
+      <div class="drawer-section-title">Paired again</div>
+      <p>It was removed from ZHA${r.removedAt ? ` ${escapeHtml(sinceText(r.removedAt))}` : ""} and paired again ${escapeHtml(sinceText(r.at))}.
+        Removing a device resets it, so it lost ${escapeHtml(this._repairedWhatText(r))}.</p>
+      <button class="btn btn-primary btn-small" data-restore-all="${escapeHtml(r.ieee)}" ${busy ? "disabled" : ""}>${busy ? "Restoring…" : "Restore everything…"}</button>
+      <a href="#" class="src-link" data-repaired-dismiss="${escapeHtml(r.ieee)}" title="Stop showing this">Dismiss</a>
+    </div>`;
   }
 
   /** Side panel: lost bindings and the watch setting for one device. */
@@ -5831,6 +6545,7 @@ export class ZhaBindingMapCard extends HTMLElement {
         </div>
       </div>
       ${problems}
+      ${this._drawerRepairedHtml(d)}
       <div class="drawer-section">
         <div class="drawer-section-title">Controls</div>
         ${this._drawerRelListHtml(rel.controls, "Nothing: it isn't bound to another device or group.")}
@@ -5849,6 +6564,8 @@ export class ZhaBindingMapCard extends HTMLElement {
         ${rel.memberOf.length ? `<p class="hint">Member of ${rel.memberOf.map((g) => escapeHtml(g.name)).join(", ")}.</p>` : ""}
       </div>
       ${this._drawerLostHtml(d, rel)}
+      ${this._drawerSettingsHtml(d)}
+      ${this._drawerOtaHtml(d)}
       ${this._drawerAnswersHtml(d)}
       ${this._drawerMeshHtml(d)}
       <div class="drawer-section drawer-actions">
@@ -5888,6 +6605,26 @@ export class ZhaBindingMapCard extends HTMLElement {
     on("#drawer-show-bindings", showBindings);
     on("#drawer-problems-link", showBindings);
     on("#drawer-lost-put-back", () => this._lostPutBack(d.ieee));
+    // 1.12.0
+    this._wireRepairedButtons("#drawer-body");
+    on("#drawer-ota-check", () => this._otaCheck(d.ieee));
+    this._qa("#drawer-body [data-ota-open]").forEach((a) =>
+      a.addEventListener("click", (e) => {
+        e.preventDefault();
+        const other = this._devices.find((x) => normIeee(x.ieee) === normIeee(a.dataset.otaOpen));
+        if (other) this._openDeviceDrawer(other);
+      })
+    );
+    on("#drawer-settings-backup", () => this._settingsBackupNow(d));
+    on("#drawer-settings-view", () => this._openSettings({ sourceIeee: d.ieee, targetIeee: d.ieee, mode: "restore" }));
+    on("#drawer-settings-apply", () => this._openSettings({ sourceIeee: d.ieee, mode: "apply" }));
+    on("#drawer-settings-export", () => this._settingsExport(d));
+    on("#drawer-settings-import", () => {
+      const f = this._q("#drawer-settings-file");
+      if (f) f.click();
+    });
+    const fileInput = this._q("#drawer-settings-file");
+    if (fileInput) fileInput.addEventListener("change", () => this._settingsImportFile(d, fileInput.files && fileInput.files[0]));
     const evLink = this._q("#drawer-evidence-link");
     if (evLink)
       evLink.addEventListener("click", (e) => {
@@ -6384,6 +7121,12 @@ export class ZhaBindingMapCard extends HTMLElement {
               <option value="all" ${this._meshShowMode() === "all" ? "selected" : ""}>Every link heard</option>
               <option value="routes" ${this._meshShowMode() === "routes" ? "selected" : ""}>Routes my bindings use</option>
             </select></label>
+          <label class="row">Names
+            <select id="mesh-size" title="Size of device names and circles. Names that would overlap are hidden: zoom in or point at a device to see them.">
+              ${["small", "medium", "large"]
+                .map((v) => `<option value="${v}" ${this._meshSizeChoice() === v ? "selected" : ""}>${v[0].toUpperCase()}${v.slice(1)}</option>`)
+                .join("")}
+            </select></label>
           <label class="row"><input type="checkbox" id="mesh-battery" ${this._meshShowBattery !== false ? "checked" : ""}> Battery devices</label>
         </div>
         <p class="hint mesh-show-hint">${escapeHtml(this._meshShowHint())}</p>
@@ -6516,7 +7259,10 @@ export class ZhaBindingMapCard extends HTMLElement {
         `<g class="mesh-link" data-link="${escapeHtml(l.a)}|${escapeHtml(l.b)}"><line x1="${pa.x}" y1="${pa.y}" x2="${pb.x}" y2="${pb.y}" stroke="${this._lqiColor(level)}" style="--sw:${(hi ? 3 : 1) * (1 + (l.lqi / 255) * 3) * k}" stroke-opacity="${hi ? 1 : level === "weak" ? 0.9 : 0.55}" ${level === "weak" ? `stroke-dasharray="${6 * k} ${4 * k}"` : ""}/><line class="mesh-link-hit" x1="${pa.x}" y1="${pa.y}" x2="${pb.x}" y2="${pb.y}" style="--sw:${16 * k}"><title>${escapeHtml(this._meshLinkTitle(l, nameOf))}</title></line></g>`
       );
     }
-    const r0 = 11 * k;
+    // 1.12.0: names and devices in three sizes (Names: Small / Medium /
+    // Large), and smaller circles than 1.11.0's 11 px.
+    const sz = this._meshSizes();
+    const r0 = sz.r * k;
     // 1.5.0b6: "Routes my bindings use" draws each binding's predicted hops
     // (deduplicated), with an arrow in the direction of travel.
     if (showMode === "routes") {
@@ -6580,17 +7326,17 @@ export class ZhaBindingMapCard extends HTMLElement {
         const tip = parent
           ? `${nameOf(i)} (battery): parent ${nameOf(parent.parent)}, ${level}${typeof parent.lqi === "number" ? ` ${parent.lqi}` : ""}`
           : `${nameOf(i)} (battery): parent unknown. No router listed it as a child in the last scan; it may have been asleep or moved.`;
-        batteryNodes.push(`<g class="mesh-node mesh-battery ${parent ? "" : "orphan"}${onRoute.has(i) ? " on-route" : ""}" data-ieee="${escapeHtml(i)}" transform="translate(${p.x},${p.y})"><g class="mesh-zs">${onRoute.has(i) ? `<circle r="${r0 * 1.2}" class="route-ring"/>` : ""}
+        batteryNodes.push(`<g class="mesh-node mesh-battery ${parent ? "" : "orphan"}${onRoute.has(i) ? " on-route" : ""}" data-ieee="${escapeHtml(i)}" data-pri="${onRoute.has(i) ? 500 : 0}" transform="translate(${p.x},${p.y})"><g class="mesh-zs">${onRoute.has(i) ? `<circle r="${r0 * 1.2}" class="route-ring"/>` : ""}
           <circle r="${r0 * 0.5}" style="stroke:${this._lqiColor(level)}"/><title>${escapeHtml(tip)}</title>
-          <text class="mesh-label mesh-battery-label" y="${r0 * 0.5 + 11 * k}" font-size="${10 * k}" text-anchor="middle">${escapeHtml(nameOf(i))}</text>
+          <text class="mesh-label mesh-battery-label" y="${r0 * 0.5 + (sz.battery + 1) * k}" font-size="${sz.battery * k}" text-anchor="middle">${escapeHtml(nameOf(i))}</text>
         </g></g>`);
       }
     }
     // 1.5.0b3: a label that would collide with an earlier one goes above its node.
     const placedLabels = [];
     const labelY = (p) => {
-      const below = p.y + r0 + 13 * k;
-      const clash = (y) => placedLabels.some((q) => Math.abs(q.x - p.x) < 110 * k && Math.abs(q.y - y) < 13 * k);
+      const below = p.y + r0 + (sz.label + 1) * k;
+      const clash = (y) => placedLabels.some((q) => Math.abs(q.x - p.x) < 110 * k && Math.abs(q.y - y) < (sz.label + 1) * k);
       const y = clash(below) ? p.y - r0 - 5 * k : below;
       placedLabels.push({ x: p.x, y });
       return y - p.y;
@@ -6621,11 +7367,15 @@ export class ZhaBindingMapCard extends HTMLElement {
       const viaCeiling = mode === "plan" && layout.floor && !sameFloorOk && up.length + down.length > 0;
       const floorBadge =
         up.length || down.length
-          ? `<text class="mesh-floor-badge" x="${-r0 * 1.15}" y="${-r0 * 0.6}" text-anchor="end" font-size="${15 * k}">${up.length ? `↑${up.length}` : ""}${down.length ? `↓${down.length}` : ""}<title>${escapeHtml(
+          ? `<text class="mesh-floor-badge" x="${-r0 * 1.15}" y="${-r0 * 0.6}" text-anchor="end" font-size="${(sz.label + 3) * k}">${up.length ? `↑${up.length}` : ""}${down.length ? `↓${down.length}` : ""}<title>${escapeHtml(
               [...up, ...down].join("\n")
             )}</title></text>`
           : "";
-      nodes.push(`<g class="mesh-node${onRoute.has(i) ? " on-route" : ""}" data-ieee="${escapeHtml(i)}" transform="translate(${p.x},${p.y})"><g class="mesh-zs">
+      // 1.12.0: which names stay when they'd overlap: the coordinator, the
+      // route being shown, then routers with the most links.
+      const degree = [...mesh.links.values()].filter((l) => l.a === i || l.b === i).length;
+      const pri = isCoord ? 1000 : onRoute.has(i) ? 500 : 100 + degree;
+      nodes.push(`<g class="mesh-node${onRoute.has(i) ? " on-route" : ""}" data-ieee="${escapeHtml(i)}" data-pri="${pri}" transform="translate(${p.x},${p.y})"><g class="mesh-zs">
         ${onRoute.has(i) ? `<circle r="${r0 * 1.7}" class="route-ring"/>` : ""}
         ${viaCeiling ? `<circle r="${r0 * 1.6}" class="via-ceiling"><title>${escapeHtml(`${nameOf(i)}: no usable link on this floor, only to other floors`)}</title></circle>` : ""}
         ${isCoord ? `<rect x="${-r0}" y="${-r0}" width="${2 * r0}" height="${2 * r0}" rx="${r0 / 3}"/>` : `<circle r="${r0}" class="${unread ? "unread" : ""}"/>`}
@@ -6638,7 +7388,7 @@ export class ZhaBindingMapCard extends HTMLElement {
               )}</title>`
             : ""
         }
-        <text class="mesh-label" y="${labelY(p)}" font-size="${12 * k}" text-anchor="middle">${escapeHtml(d ? this._deviceLabel(d) : i)}${unread ? " (not read)" : ""}</text>
+        <text class="mesh-label" y="${labelY(p)}" font-size="${sz.label * k}" text-anchor="middle">${escapeHtml(d ? this._deviceLabel(d) : i)}${unread ? " (not read)" : ""}</text>
       </g></g>`);
     }
     const img =
@@ -6668,6 +7418,7 @@ export class ZhaBindingMapCard extends HTMLElement {
       <svg class="mesh-svg" style="--mz:${this._meshGrowth(vb)}" viewBox="${vb.x} ${vb.y} ${vb.w} ${vb.h}" preserveAspectRatio="xMidYMid meet"><defs>${grad("good")}${grad("fair")}${grad("weak")}${["good", "fair", "weak", "unknown"]
         .map((lvl) => `<marker id="mesh-arrow-${lvl}" viewBox="0 0 10 10" refX="16" refY="5" markerWidth="5" markerHeight="5" orient="auto"><path d="M0 0L10 5L0 10z" fill="${this._lqiColor(lvl)}"/></marker>`)
         .join("")}</defs>${img}<g>${heat.join("")}</g><g>${lines.join("")}</g><g>${batteryNodes.join("")}</g><g>${nodes.join("")}</g></svg>
+      <p class="hint" id="mesh-hidden-note"></p>
       ${
         missing
           ? `<details class="mesh-unplaced muted"><summary>${missing} router${missing === 1 ? "" : "s"} not on this layout</summary>${escapeHtml(missingNames.join(", "))}. ${
@@ -6984,7 +7735,70 @@ export class ZhaBindingMapCard extends HTMLElement {
       // zooming. 1.11.0: they grow gently instead (square root of the zoom),
       // so they become readable without getting huge (issue #49).
       svg.style.setProperty("--mz", String(this._meshGrowth(vb)));
+      if (typeof requestAnimationFrame === "function") {
+        if (!this._meshDeclutterQueued) {
+          this._meshDeclutterQueued = true;
+          requestAnimationFrame(() => {
+            this._meshDeclutterQueued = false;
+            this._meshDeclutter();
+          });
+        }
+      } else this._meshDeclutter();
     }
+  }
+
+  /** 1.12.0: label and circle sizes in screen pixels. */
+  _meshSizeChoice() {
+    if (!this._meshSize) {
+      try {
+        this._meshSize = localStorage.getItem("zbm-mesh-size") || "medium";
+      } catch (e) {
+        this._meshSize = "medium";
+      }
+    }
+    return ["small", "medium", "large"].includes(this._meshSize) ? this._meshSize : "medium";
+  }
+
+  _meshSizes() {
+    return { small: { label: 10, battery: 9, r: 7 }, medium: { label: 12, battery: 10, r: 9 }, large: { label: 14, battery: 12, r: 11 } }[this._meshSizeChoice()];
+  }
+
+  /** 1.12.0: hides names that would overlap a more important one. Run after
+   *  drawing and after each zoom (zooming in makes room, so more appear).
+   *  Pointing at a device always shows its name (CSS). */
+  _meshDeclutter() {
+    const svg = this._q("#view-mesh .mesh-svg");
+    if (!svg) return;
+    const items = [...svg.querySelectorAll(".mesh-node")]
+      .map((g, n) => ({ g, t: g.querySelector(".mesh-label"), pri: Number(g.dataset.pri || 0), n }))
+      .filter((x) => x.t);
+    items.forEach((x) => x.t.classList.remove("mesh-label-hidden"));
+    items.sort((a, b) => b.pri - a.pri || a.n - b.n);
+    // Other devices' circles count too: a name running under one can't be read.
+    const shapes = items.map((x) => {
+      const c = x.g.querySelector(":scope > .mesh-zs > circle:not(.route-ring):not(.via-ceiling), :scope > .mesh-zs > rect");
+      return { g: x.g, r: c ? c.getBoundingClientRect() : null };
+    });
+    const kept = [];
+    let hidden = 0;
+    const overlaps = (r, q, pad) => r.left < q.right + pad && r.right > q.left - pad && r.top < q.bottom + pad && r.bottom > q.top - pad;
+    for (const x of items) {
+      const r = x.t.getBoundingClientRect();
+      if (!r.width) continue;
+      const pad = 2;
+      if (
+        kept.some((q) => overlaps(r, q, pad)) ||
+        shapes.some((sh) => sh.g !== x.g && sh.r && sh.r.width && overlaps(r, sh.r, -1))
+      ) {
+        x.t.classList.add("mesh-label-hidden");
+        hidden++;
+      } else kept.push(r);
+    }
+    const note = this._q("#mesh-hidden-note");
+    if (note)
+      note.textContent = hidden
+        ? `${hidden} name${hidden === 1 ? "" : "s"} hidden where they'd overlap: zoom in, or point at a device, to see ${hidden === 1 ? "it" : "them"}.`
+        : "";
   }
 
   /** Scale for devices and labels at the current zoom (1 when the whole plan shows). */
@@ -7179,11 +7993,27 @@ export class ZhaBindingMapCard extends HTMLElement {
       this._meshShowBattery = e.target.checked;
       this._renderMesh();
     });
+    on("#mesh-size", "change", (e) => {
+      this._meshSize = e.target.value;
+      try {
+        localStorage.setItem("zbm-mesh-size", this._meshSize);
+      } catch (err) {
+        /* a remembered choice is a convenience only */
+      }
+      this._renderMesh();
+    });
     this._qa("#view-mesh [data-mesh-read]").forEach((b) => b.addEventListener("click", () => this._meshReadOne(b.dataset.meshRead)));
     on("#mesh-layout", "change", (e) => {
       this._meshLayoutChoice = e.target.value;
       this._renderMesh();
     });
+    // 1.12.0: the device pointed at comes to the front, so its name (shown
+    // even when hidden for overlapping) isn't covered by other devices.
+    this._qa("#view-mesh .mesh-node").forEach((g) =>
+      g.addEventListener("mouseenter", () => {
+        if (g.parentNode && g.parentNode.lastChild !== g) g.parentNode.appendChild(g);
+      })
+    );
     this._qa("#view-mesh .mesh-node").forEach((g) =>
       g.addEventListener("click", () => {
         if (this._meshDragged) return;
@@ -7205,13 +8035,21 @@ export class ZhaBindingMapCard extends HTMLElement {
       });
     this._wireMeshZoom();
     this._wireMeshCoordRoute();
-    if (typeof requestAnimationFrame === "function") requestAnimationFrame(() => this._meshMeasure());
+    if (typeof requestAnimationFrame === "function")
+      requestAnimationFrame(() => {
+        this._meshMeasure();
+        this._meshDeclutter();
+      });
     if (!this._meshResizeBound && typeof window !== "undefined") {
       this._meshResizeBound = true;
       let t = null;
       window.addEventListener("resize", () => {
         clearTimeout(t);
-        t = setTimeout(() => this._view === "mesh" && this._meshMeasure(), 250);
+        t = setTimeout(() => {
+          if (this._view !== "mesh") return;
+          this._meshMeasure();
+          this._meshDeclutter();
+        }, 250);
       });
     }
     this._qa("#view-mesh tr[data-link]").forEach((tr) =>
@@ -8422,6 +9260,51 @@ export class ZhaBindingMapCard extends HTMLElement {
   /** `healthMap` is optional — pass the one _renderTable() already computed
    *  to avoid a redundant pass; callers like _exportRowsData() that don't
    *  have one handy get a freshly-computed one for free. */
+  /** 1.12.0: lost bindings that pass the table's filters. They count as
+   *  errors for the health filter. */
+  _lostTableRows(deviceIeee, bySearch) {
+    if (!this._watchEnabled || !this._lost) return [];
+    const f = this._tableHealthFilter;
+    if (f !== "all" && f !== "problems" && f !== "error") return [];
+    const s = bySearch ? "" : (this._filters.search || "").trim().toLowerCase();
+    return lostBindings(this._lost).filter((b) => {
+      if (!matchesDeviceFilter(b, deviceIeee, this._tableDirection)) return false;
+      if (!s) return true;
+      const hay = `${this._ieeeLabel(b.sourceIeee, { plain: true })} ${b.text || ""} ${clusterName(b.clusterId)}`.toLowerCase();
+      return hay.includes(s);
+    });
+  }
+
+  _lostTableRowsHtml(list, filtered, deviceIeee) {
+    const busy = this._lostBusy;
+    return list
+      .map((b) => {
+        const source = this._devices.find((d) => normIeee(d.ieee) === b.sourceIeee);
+        const group = b.isGroup ? this._groups.find((g) => g.group_id === b.groupId) : null;
+        const targetLabel = b.isGroup
+          ? `${(group && group.name) || `Group ${b.groupId}`} (group)`
+          : this._ieeeLabel(b.targetIeee, { plain: true });
+        const dir = filtered ? bindingDirection(b, deviceIeee) : null;
+        const noticed = [NOTICED_BY[b.noticed_by] || "", sinceText(b.since)].filter(Boolean).join(", ");
+        return `<tr class="lost-row" data-id="${escapeHtml(b.id)}">
+          ${filtered ? `<td class="dir-cell dir-${dir}">${escapeHtml(directionLabel(dir))}</td>` : ""}
+          <td><a href="#" class="src-link" data-ieee="${escapeHtml(b.sourceIeee)}">${escapeHtml(
+          this._ieeeLabel(b.sourceIeee, { plain: true })
+        )}</a> <span class="muted">(ep ${escapeHtml(String(b.sourceEndpoint))})</span></td>
+          <td>${escapeHtml(source ? this._devicePrimaryType(source) : "—")}</td>
+          <td>${escapeHtml(source ? this._areaName(source.area_id) : "—")}</td>
+          <td>${escapeHtml(source ? [source.manufacturer, source.model].filter(Boolean).join(" / ") || "—" : "—")}</td>
+          <td><span class="dot" style="background:${clusterColor(b.clusterId)}"></span> ${escapeHtml(clusterName(b.clusterId))}</td>
+          <td><s>${escapeHtml(targetLabel)}</s>${b.isGroup ? "" : ` <span class="muted">(ep ${escapeHtml(String(b.targetEndpoint))})</span>`}</td>
+          <td><span class="health-badge health-error" title="It had this binding and doesn't any more${noticed ? ` (${escapeHtml(noticed)})` : ""}">${HEALTH_ICON.error} Lost</span>
+            <div class="muted lost-since">${escapeHtml(sinceText(b.since))}</div></td>
+          <td><button class="btn btn-small btn-primary" data-lost-put-back="${escapeHtml(b.ownerIeee)}" ${busy ? "disabled" : ""}>Put back</button>
+            <a href="#" class="src-link" data-lost-forget="${escapeHtml(b.ownerIeee)}" data-key="${escapeHtml(b.key)}" title="You removed it yourself: stop expecting it">Removed on purpose</a></td>
+        </tr>`;
+      })
+      .join("");
+  }
+
   _filteredBindingRows(healthMap) {
     const map = healthMap || this._computeHealthMap();
     const { ieee: deviceIeee, bySearch } = this._effectiveTableDevice();
@@ -8605,7 +9488,9 @@ export class ZhaBindingMapCard extends HTMLElement {
     else rows = this._sortRows(rows, this._tableSort);
 
     const colCount = filtered ? 9 : 8;
-    if (!rows.length) {
+    // 1.12.0: lost bindings as rows too (Lost Bindings PRD R8), first.
+    const lostRows = this._lostTableRows(deviceIeee, bySearch);
+    if (!rows.length && !lostRows.length) {
       const all = this._allBindings();
       const dev = filtered ? this._devices.find((d) => d.ieee === deviceIeee) : null;
       const healthChip = this._q(`[data-health-filter="${this._tableHealthFilter}"]`);
@@ -8627,7 +9512,7 @@ export class ZhaBindingMapCard extends HTMLElement {
       return;
     }
 
-    wrap.innerHTML = rows
+    wrap.innerHTML = this._lostTableRowsHtml(lostRows, filtered, deviceIeee) + rows
       .map((r) => {
         const b = r.binding;
         const h = r.health;
@@ -8668,6 +9553,14 @@ export class ZhaBindingMapCard extends HTMLElement {
         if (binding) this._openUnbindPopover(binding);
       });
     });
+
+    this._qa("#table-body [data-lost-put-back]").forEach((btn) => btn.addEventListener("click", () => this._lostPutBack(btn.dataset.lostPutBack)));
+    this._qa("#table-body [data-lost-forget]").forEach((a) =>
+      a.addEventListener("click", (e) => {
+        e.preventDefault();
+        this._lostForget(a.dataset.lostForget, a.dataset.key);
+      })
+    );
 
     this._qa("#table-body [data-forget]").forEach((btn) => {
       btn.addEventListener("click", () => this._confirmForgetSources([btn.dataset.forget]));
@@ -9615,6 +10508,7 @@ export class ZhaBindingMapCard extends HTMLElement {
   _renderDevicesTab() {
     const wrap = this._q("#devices-table-body");
     if (!wrap) return;
+    this._renderOtaBanner();
     this._updateSortIndicators("#view-devices", this._devicesSort);
     if (!this._loaded) {
       wrap.innerHTML = `<tr><td colspan="8" class="muted">Loading devices…</td></tr>`;
@@ -9635,14 +10529,24 @@ export class ZhaBindingMapCard extends HTMLElement {
         count: this._deviceBindingCount(d.ieee),
         scanRank: scanCell.scanRank,
         scanHtml: scanCell.html,
+        ota: this._otaEnabled
+          ? Settings.updateServerCell(this._otaServers && this._otaServers.get(normIeee(d.ieee)), (i) => this._nameIfKnown(i), {
+              battery: this._isBatteryDevice(d),
+              hasOta: normIeee(d.ieee) !== normIeee(this._coordinatorIeee() || "") && this._hasOta(d.ieee),
+            })
+          : null,
       };
     });
+    rows.forEach((r) => (r.otaRank = r.ota ? r.ota.rank : 9));
+    const thOta = this._q("#th-ota");
+    if (thOta) thOta.style.display = this._otaEnabled ? "" : "none";
+    const cols = this._otaEnabled ? 9 : 8;
     rows = this._devicesSort.key ? this._sortRows(rows, this._devicesSort) : rows.sort((a, b) => a.name.localeCompare(b.name));
 
     if (!rows.length) {
       wrap.innerHTML = search
-        ? `<tr><td colspan="8" class="muted">No devices match “${escapeHtml(search)}”. Clear the search box to see all ${this._devices.length} devices.</td></tr>`
-        : `<tr><td colspan="8" class="muted">No devices found.</td></tr>`;
+        ? `<tr><td colspan="${cols}" class="muted">No devices match “${escapeHtml(search)}”. Clear the search box to see all ${this._devices.length} devices.</td></tr>`
+        : `<tr><td colspan="${cols}" class="muted">No devices found.</td></tr>`;
       return;
     }
     wrap.innerHTML = rows
@@ -9657,6 +10561,17 @@ export class ZhaBindingMapCard extends HTMLElement {
           <td>${escapeHtml(r.power)}</td>
           <td>${r.count}</td>
           <td>${r.scanHtml}</td>
+          ${
+            r.ota
+              ? `<td class="ota-cell ota-${escapeHtml(r.ota.level)}" title="${escapeHtml(r.ota.title)}">${
+                  this._otaBusy === normIeee(r.device.ieee)
+                    ? `<span class="muted">Checking…</span>`
+                    : r.ota.check
+                    ? `<a href="#" class="ota-cell-link" data-ota-ieee="${escapeHtml(r.device.ieee)}">${escapeHtml(r.ota.text)}</a>`
+                    : escapeHtml(r.ota.text)
+                }</td>`
+              : ""
+          }
         </tr>`
       )
       .join("");
@@ -9665,6 +10580,12 @@ export class ZhaBindingMapCard extends HTMLElement {
       el.addEventListener("click", (e) => {
         e.preventDefault();
         this._openDeviceDrawer(this._devices.find((x) => x.ieee === el.dataset.ieee));
+      });
+    });
+    this._qa("#devices-table-body .ota-cell-link").forEach((el) => {
+      el.addEventListener("click", (e) => {
+        e.preventDefault();
+        if (!this._otaBusy) this._otaCheck(el.dataset.otaIeee);
       });
     });
     this._qa("#devices-table-body .scan-cell-btn").forEach((btn) => {

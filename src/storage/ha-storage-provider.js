@@ -51,7 +51,7 @@ export class HaStorageProvider extends StorageProvider {
    *  - bundledCardVersion: the card version the integration ships (1.0.0+).
    *  Unknown values are null. */
   static async probe(hass) {
-    const none = { installed: false, available: false, version: null, bundledCardVersion: null, experimental: false, watch: false, replace: false, evidence: false, directUnbind: false, lqi: null };
+    const none = { installed: false, available: false, version: null, bundledCardVersion: null, experimental: false, watch: false, replace: false, evidence: false, directUnbind: false, settingsBackup: false, otaServer: false, lqi: null };
     try {
       const res = await hass.connection.sendMessagePromise({ type: WS_GET_CAPABILITIES });
       if (!res || !res.available) return none;
@@ -72,6 +72,9 @@ export class HaStorageProvider extends StorageProvider {
         evidence: !!(res.features && res.features.evidence === true),
         // 1.10.6: the integration sends unbinds itself.
         directUnbind: !!(res.features && res.features.direct_unbind === true),
+        // 1.12.0: device configuration backups and update-server reads.
+        settingsBackup: !!(res.features && res.features.settings_backup === true),
+        otaServer: !!(res.features && res.features.ota_server === true),
         lqi:
           res.lqi_thresholds && Number.isInteger(res.lqi_thresholds.good) && Number.isInteger(res.lqi_thresholds.weak)
             ? { good: res.lqi_thresholds.good, weak: res.lqi_thresholds.weak }

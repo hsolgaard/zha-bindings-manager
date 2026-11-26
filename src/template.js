@@ -146,6 +146,7 @@ export const SHELL_HTML = `
 
   <div id="view-groups" class="view"></div>
   <div id="view-devices" class="view">
+    <div id="ota-banner" class="stale-banner ota-banner" style="display:none"></div>
     <div class="table-scroll">
     <table class="bindings-table">
       <thead><tr>
@@ -157,6 +158,7 @@ export const SHELL_HTML = `
         <th data-sort="power">Power</th>
         <th data-sort="count">Bindings</th>
         <th data-sort="scanRank">Last scan</th>
+        <th data-sort="otaRank" id="th-ota" style="display:none" title="The device each device asks for firmware updates (its OTA upgrade server). It should be the coordinator. Click a cell to check it.">OTA server</th>
       </tr></thead>
       <tbody id="devices-table-body"></tbody>
     </table>

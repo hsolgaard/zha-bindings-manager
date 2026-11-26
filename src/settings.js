@@ -51,6 +51,9 @@ export function settingName(name) {
 /** A value as shown: an enum's name with its number, true/false as On/Off. */
 export function formatValue(value, label) {
   if (value === undefined) return "—";
+  // zigpy's Bool enum is named "true"/"false": a yes/no setting.
+  if (label === "true" || label === "True") return "Yes";
+  if (label === "false" || label === "False") return "No";
   if (label && label !== "None") return `${label} (${value})`;
   if (value === true) return "On";
   if (value === false) return "Off";

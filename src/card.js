@@ -1365,9 +1365,11 @@ export class ZhaBindingMapCard extends HTMLElement {
     );
   }
 
-  /** A device was removed and paired again: put its bindings back, put it
-   *  back in its groups, then show which settings differ from its last
-   *  backup before the removal, to restore after a look. */
+  /** A device was removed and paired again. Restore in this order:
+   *  1. its groups, 2. its settings (shown first, from the last backup
+   *  before the removal), 3. its bindings, put back and read back last, so
+   *  they go onto a device that's already set up again (detach-relay mode
+   *  and so on). Without settings backups it goes straight to 3. */
   async _restoreEverything(ieee) {
     const key = normIeee(ieee);
     const rep = repairedDevices(this._lost).find((r) => r.ieee === key);
@@ -1375,18 +1377,8 @@ export class ZhaBindingMapCard extends HTMLElement {
     this._restoreBusy = key;
     this._renderLostBanner();
     if (this._drawerIeee) this._renderDrawer();
-    const name = this._ieeeLabel(key, { plain: true });
     const done = [];
     try {
-      if (rep.lost) {
-        try {
-          const res = await this._api.watchPutBack(key);
-          done.push(putBackMessage(res.results, () => name).text);
-          if (putBackDone(res.results).length) await this._scanBindings([key], { tries: 1 });
-        } catch (err) {
-          done.push(`Bindings: ${extractErrorMessage(err)}`);
-        }
-      }
       if (rep.missingGroups.length) {
         const ok = [];
         const failed = [];
@@ -1398,16 +1390,16 @@ export class ZhaBindingMapCard extends HTMLElement {
             failed.push(`${g.name} (${extractErrorMessage(err)})`);
           }
         }
-        if (ok.length) done.push(`Added back to ${ok.join(", ")}.`);
-        if (failed.length) done.push(`Couldn't add it back to ${failed.join(", ")}.`);
+        if (ok.length) done.push(`Groups: added back to ${ok.join(", ")}.`);
+        if (failed.length) done.push(`Groups: couldn't add it back to ${failed.join(", ")}.`);
         await this._reloadDevices({ quiet: true });
       }
     } finally {
       this._restoreBusy = null;
-      await this._lostLoad();
     }
     if (!this._settingsEnabled) {
-      this._setStatus("success", done.join(" ") || `Nothing to put back on ${name}.`, 0);
+      const res = await this._restoreBindings(key);
+      this._setStatus(res.level, [...done, res.text].join(" "), 0);
       return;
     }
     this._openSettings({
@@ -1418,6 +1410,35 @@ export class ZhaBindingMapCard extends HTMLElement {
       intro: done,
       repaired: true,
     });
+  }
+
+  /** Step 3 of Restore everything: put the lost bindings back, read the
+   *  device back, and say what it has now. {level, text}. */
+  async _restoreBindings(ieee) {
+    const key = normIeee(ieee);
+    const name = this._ieeeLabel(key, { plain: true });
+    let text = "";
+    try {
+      if (lostFor(this._lost, key).lost.length) {
+        const res = await this._api.watchPutBack(key);
+        text = putBackMessage(res.results, () => name).text;
+      }
+      await this._scanBindings([key], { tries: 1 });
+    } catch (err) {
+      return { level: "error", text: `Bindings: ${extractErrorMessage(err)}` };
+    }
+    await this._lostLoad();
+    const still = lostFor(this._lost, key).lost.length;
+    const has = this._rawBindings().filter((b) => normIeee(b.sourceIeee) === key && b.targetIeee !== this._coordinatorIeee()).length;
+    if (still)
+      return {
+        level: "warning",
+        text: `Bindings: ${still} still missing after putting them back. ${text}`.trim(),
+      };
+    return {
+      level: "success",
+      text: `Bindings: ${text ? `${text} ` : "nothing was missing. "}Read back from the device: ${has} binding${has === 1 ? "" : "s"} in place.`,
+    };
   }
 
   async _otaLoad() {
@@ -1735,13 +1756,30 @@ export class ZhaBindingMapCard extends HTMLElement {
       s.results = await this._api.settingsApply(s.targetIeee, items);
       const m = Settings.applySummary(s.results, this._ieeeLabel(s.targetIeee, { plain: true }));
       this._setStatus(m.level, m.text, m.level === "success" ? undefined : 0);
-      if (s.repaired && m.level === "success") this._api.watchRepairedDismiss(s.targetIeee).then(() => this._lostLoad()).catch(() => {});
     } catch (err) {
       s.error = extractErrorMessage(err);
     } finally {
       s.loading = false;
       if (this._settingsDlg === s) this._renderSettings();
     }
+    if (s.repaired && s.results) await this._settingsThenBindings(s);
+  }
+
+  /** Restore everything, step 3, after the settings (written or skipped). */
+  async _settingsThenBindings(s) {
+    s.bindings = { level: "info", text: "Bindings: putting them back and reading the device…" };
+    this._renderSettings();
+    s.bindings = await this._restoreBindings(s.targetIeee);
+    const settingsOk = !s.results || Settings.applySummary(s.results, "").level === "success";
+    if (s.bindings.level === "success" && settingsOk) {
+      try {
+        await this._api.watchRepairedDismiss(s.targetIeee);
+        await this._lostLoad();
+      } catch (e) {
+        /* the notice stays; nothing else depends on it */
+      }
+    }
+    if (this._settingsDlg === s) this._renderSettings();
   }
 
   _settingsTargets() {
@@ -1764,12 +1802,17 @@ export class ZhaBindingMapCard extends HTMLElement {
       ? `<div class="flow-callout flow-result-success">${s.intro.map((t) => `<div>${escapeHtml(t)}</div>`).join("")}</div>`
       : "";
     const repairedNote = s.repaired
-      ? `<p>Now its settings. Below is its last backup from before it was removed, next to what it has now. Ticked settings are the ones that differ.</p>`
+      ? `<p>Next its settings, then its bindings. Below is its last backup from before it was removed, next to what it has now; ticked settings are the ones that differ. After writing them, its bindings are put back and read back from the device.</p>`
       : "";
     if (!choices.length && !s.snapshotId) {
+      const bindingsStep = s.bindings ? `<div class="flow-callout flow-result-${escapeHtml(s.bindings.level)}">${escapeHtml(s.bindings.text)}</div>` : "";
       body.innerHTML = `${intro}<p>There's no backup of ${escapeHtml(this._ieeeLabel(s.sourceIeee, { plain: true }))} yet${
         s.repaired ? " from before it was removed, so its settings can't be restored" : ""
-      }.</p><div class="dialog-actions"><button class="btn" id="settings-close">Close</button></div>`;
+      }.</p>${bindingsStep}<div class="dialog-actions">${
+        s.repaired && !s.bindings ? `<button class="btn btn-primary" id="settings-skip">Put bindings back</button>` : ""
+      }<button class="btn" id="settings-close">${s.bindings ? "Done" : "Close"}</button></div>`;
+      const skip = this._q("#settings-skip");
+      if (skip) skip.addEventListener("click", () => this._settingsThenBindings(s));
       this._q("#settings-close").addEventListener("click", () => this._closeSettings());
       return;
     }
@@ -1799,12 +1842,23 @@ export class ZhaBindingMapCard extends HTMLElement {
     else if (s.plan) main = this._settingsPlanHtml();
     else if (s.mode === "apply") main = `<p class="muted">Choose the device to compare with.</p>`;
     const n = s.plan && !s.results ? Settings.applyItems(s.plan.rows, s.selected).length : 0;
-    const actions =
-      s.plan && !s.results && !s.loading
-        ? `<button class="btn btn-primary" id="settings-write" ${n ? "" : "disabled"}>Write ${n} setting${n === 1 ? "" : "s"}</button>`
-        : "";
-    body.innerHTML = `${intro}${repairedNote}<div class="settings-pickers">${picker}${targetPicker}</div>${main}
-      <div class="dialog-actions">${actions}<button class="btn" id="settings-close">${s.results ? "Done" : "Close"}</button></div>`;
+    const anyDiffer = !!(s.plan && s.plan.rows.some((r) => r.state === "differs"));
+    const deciding = s.plan && !s.results && !s.loading && !s.bindings;
+    let actions = "";
+    if (deciding && anyDiffer)
+      actions = `<button class="btn btn-primary" id="settings-write" ${n ? "" : "disabled"}>Write ${n} setting${n === 1 ? "" : "s"}${
+        s.repaired ? ", then put bindings back" : ""
+      }</button>${s.repaired ? `<button class="btn" id="settings-skip">Skip settings, put bindings back</button>` : ""}`;
+    else if (deciding && s.repaired) actions = `<button class="btn btn-primary" id="settings-skip">Put bindings back</button>`;
+    const matches =
+      deciding && !anyDiffer ? `<div class="flow-callout flow-result-success">Everything matches the backup: nothing to write.</div>` : "";
+    const bindingsStep = s.bindings ? `<div class="flow-callout flow-result-${escapeHtml(s.bindings.level)}">${escapeHtml(s.bindings.text)}</div>` : "";
+    const finished = s.results || (s.bindings && s.bindings.level !== "info") || (deciding && !anyDiffer && !s.repaired);
+    const tail = s.bindings && s.bindings.level !== "info" ? `<p>Now press each of its buttons and check the lights respond.</p>` : "";
+    body.innerHTML = `${intro}${repairedNote}<div class="settings-pickers">${picker}${targetPicker}</div>${matches}${main}${bindingsStep}${tail}
+      <div class="dialog-actions">${actions}<button class="btn" id="settings-close">${finished ? "Done" : "Close"}</button></div>`;
+    const skip = this._q("#settings-skip");
+    if (skip) skip.addEventListener("click", () => this._settingsThenBindings(s));
     const snapSel = this._q("#settings-snapshot");
     if (snapSel)
       snapSel.addEventListener("change", () => {
@@ -1918,7 +1972,7 @@ export class ZhaBindingMapCard extends HTMLElement {
       <ul>${(res.results || [])
         .map((r) => `<li>${escapeHtml(Settings.settingName(r.name || `0x${Number(r.attribute).toString(16)}`))} <span class="muted">(endpoint ${r.endpoint})</span>: <strong>${escapeHtml(Settings.resultText(r))}</strong></li>`)
         .join("")}</ul>
-      ${s.repaired ? `<p>Now press each of its buttons and check the lights respond.</p>` : ""}`;
+`;
   }
 
   _closeSettings() {

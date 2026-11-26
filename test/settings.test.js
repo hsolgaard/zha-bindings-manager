@@ -55,6 +55,8 @@ describe("settings backups (1.12.0)", () => {
     expect(formatValue(0, "Off")).toBe("Off (0)");
     expect(formatValue(true)).toBe("On");
     expect(formatValue(4)).toBe("4");
+    expect(formatValue(1, "true")).toBe("Yes"); // zigpy's Bool enum, e.g. "Relay 1 detached"
+    expect(formatValue(0, "false")).toBe("No");
     expect(formatValue(undefined)).toBe("—");
     expect(settingName("detach_relay_mode2")).toBe("Detach relay mode2");
   });

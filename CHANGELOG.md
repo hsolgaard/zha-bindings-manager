@@ -21,8 +21,9 @@ Needs integration 1.12.0 for everything below except the lost-binding rows.
   - **Replace this device** gets a **Copy settings…** step.
 - **Devices that were removed and paired again:** a device removed from ZHA is reset, so it loses its bindings, its
   groups and its settings. When it's paired again with the same address, a notice above the Bindings table and in its
-  side panel offers **Restore everything…**: it puts its bindings back, adds it back to its groups, then shows which
-  settings differ from its last backup before the removal, for you to write.
+  side panel offers **Restore everything…**: it adds it back to its groups, shows which settings differ from its last
+  backup before the removal for you to write, then puts its bindings back and reads them back from the device, so they
+  go onto a device that's already set up again (detach-relay mode and so on).
 - **Firmware updates** in each device's side panel: **Check** reads where the device sends its firmware update requests,
   by name. It should be the coordinator; any other device means its updates time out. A device that claims to be a
   firmware update server is flagged there and in a notice on the Devices tab. The SONOFF ZBM5-3C-80/86 on firmware 1.0.6

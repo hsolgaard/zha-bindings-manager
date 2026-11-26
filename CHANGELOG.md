@@ -28,7 +28,7 @@ Needs integration 1.12.0 for everything below except the lost-binding rows.
   by name. It should be the coordinator; any other device means its updates time out. A device that claims to be a
   firmware update server is flagged there and in a notice on the Devices tab. The SONOFF ZBM5-3C-80/86 on firmware 1.0.6
   does this, and it stops updates for the devices around it.
-- **Updates from** column on the Devices tab: every device's firmware update server at a glance (the coordinator, not
+- **OTA server** column on the Devices tab (click a cell to check that device; it updates straight away): every device's firmware update server at a glance (the coordinator, not
   set, or the device it wrongly uses, in amber), sortable so problems come first. **Check update servers** in the notice
   reads every mains device one at a time; answers are saved, so they're still there after a reload.
 - **Lost bindings as rows in the Bindings table**, with the lost target struck through, when it was noticed, **Put

@@ -158,7 +158,7 @@ export const SHELL_HTML = `
         <th data-sort="power">Power</th>
         <th data-sort="count">Bindings</th>
         <th data-sort="scanRank">Last scan</th>
-        <th data-sort="otaRank" id="th-ota" style="display:none" title="Where each device gets its firmware updates from. It should be the coordinator.">Updates from</th>
+        <th data-sort="otaRank" id="th-ota" style="display:none" title="The device each device asks for firmware updates (its OTA upgrade server). It should be the coordinator. Click a cell to check it.">OTA server</th>
       </tr></thead>
       <tbody id="devices-table-body"></tbody>
     </table>

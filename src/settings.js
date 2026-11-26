@@ -202,20 +202,33 @@ export function isClaimant(claimants, ieee) {
   return (claimants || []).find((c) => String(c.ieee).toLowerCase() === key) || null;
 }
 
-/** Devices tab cell for a device's update server (1.12.0).
- *  {text, level, rank}: rank sorts problems first. */
+/** Devices tab cell for a device's OTA server (1.12.0).
+ *  {text, level, rank, title, check}: rank sorts problems first; check says
+ *  the cell can be clicked to read it (again). */
 export function updateServerCell(res, nameOf = () => null, { battery = false, hasOta = true } = {}) {
-  if (!hasOta) return { text: "—", level: "none", rank: 5, title: "It doesn't support firmware updates over Zigbee." };
-  if (!res) return { text: battery ? "Not checked (battery)" : "Not checked", level: "unknown", rank: 4, title: "" };
-  if (res.status === "no_ota") return { text: "—", level: "none", rank: 5, title: "It doesn't support firmware updates over Zigbee." };
-  if (res.status !== "ok") return { text: "Didn't answer", level: "unknown", rank: 3, title: "A battery device has to be awake." };
-  if (res.is_coordinator) return { text: "Coordinator", level: "ok", rank: 2, title: "As it should be." };
-  if (res.not_set) return { text: "Not set", level: "info", rank: 1, title: "It hasn't found an update server yet." };
+  const again = " Click to check again.";
+  if (!hasOta) return { text: "—", level: "none", rank: 5, title: "It doesn't support firmware updates over Zigbee.", check: false };
+  if (!res)
+    return battery
+      ? { text: "Check (battery)", level: "unknown", rank: 4, title: "Press a button on it to wake it, then click to read its OTA server.", check: true }
+      : { text: "Check", level: "unknown", rank: 4, title: "Click to read which device it asks for firmware updates.", check: true };
+  if (res.status === "no_ota") return { text: "—", level: "none", rank: 5, title: "It doesn't support firmware updates over Zigbee.", check: false };
+  if (res.status !== "ok")
+    return {
+      text: "Didn't answer",
+      level: "unknown",
+      rank: 3,
+      title: (battery ? "Press a button on it to wake it, then click to try again." : "It didn't answer.") + (battery ? "" : again),
+      check: true,
+    };
+  if (res.is_coordinator) return { text: "Coordinator", level: "ok", rank: 2, title: "As it should be." + again, check: true };
+  if (res.not_set) return { text: "Not set", level: "info", rank: 1, title: "It hasn't found an OTA server yet." + again, check: true };
   return {
     text: nameOf(res.server) || res.server,
     level: "warning",
     rank: 0,
-    title: "Not the coordinator: its update requests go to this device, so firmware updates for it time out.",
+    title: "Not the coordinator: its firmware update requests go to this device, so its updates time out." + again,
+    check: true,
   };
 }
 

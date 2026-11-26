@@ -195,6 +195,9 @@ tr.lost-row s { color: var(--error-color, #db4437); }
 .ota-ok { color: var(--success-color, #43a047); }
 td.ota-cell.ota-warning { color: #b26a00; font-weight: 500; }
 td.ota-cell.ota-unknown, td.ota-cell.ota-none, td.ota-cell.ota-info { color: var(--secondary-text-color, #727272); }
+td.ota-cell .ota-cell-link { color: inherit; text-decoration: underline dotted; text-underline-offset: 3px; cursor: pointer; }
+td.ota-cell.ota-unknown .ota-cell-link { color: var(--primary-color, #03a9f4); text-decoration: none; }
+td.ota-cell .ota-cell-link:hover { text-decoration: underline; }
 .settings-pickers { display: flex; flex-wrap: wrap; gap: 12px; margin: 4px 0 10px; }
 .settings-pick { display: flex; gap: 6px; align-items: center; }
 .settings-pick { flex-wrap: wrap; min-width: 0; max-width: 100%; }

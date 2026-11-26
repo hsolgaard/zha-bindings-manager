@@ -2777,17 +2777,27 @@
     return (claimants || []).find((c) => String(c.ieee).toLowerCase() === key) || null;
   }
   function updateServerCell(res, nameOf = () => null, { battery = false, hasOta = true } = {}) {
-    if (!hasOta) return { text: "\u2014", level: "none", rank: 5, title: "It doesn't support firmware updates over Zigbee." };
-    if (!res) return { text: battery ? "Not checked (battery)" : "Not checked", level: "unknown", rank: 4, title: "" };
-    if (res.status === "no_ota") return { text: "\u2014", level: "none", rank: 5, title: "It doesn't support firmware updates over Zigbee." };
-    if (res.status !== "ok") return { text: "Didn't answer", level: "unknown", rank: 3, title: "A battery device has to be awake." };
-    if (res.is_coordinator) return { text: "Coordinator", level: "ok", rank: 2, title: "As it should be." };
-    if (res.not_set) return { text: "Not set", level: "info", rank: 1, title: "It hasn't found an update server yet." };
+    const again = " Click to check again.";
+    if (!hasOta) return { text: "\u2014", level: "none", rank: 5, title: "It doesn't support firmware updates over Zigbee.", check: false };
+    if (!res)
+      return battery ? { text: "Check (battery)", level: "unknown", rank: 4, title: "Press a button on it to wake it, then click to read its OTA server.", check: true } : { text: "Check", level: "unknown", rank: 4, title: "Click to read which device it asks for firmware updates.", check: true };
+    if (res.status === "no_ota") return { text: "\u2014", level: "none", rank: 5, title: "It doesn't support firmware updates over Zigbee.", check: false };
+    if (res.status !== "ok")
+      return {
+        text: "Didn't answer",
+        level: "unknown",
+        rank: 3,
+        title: (battery ? "Press a button on it to wake it, then click to try again." : "It didn't answer.") + (battery ? "" : again),
+        check: true
+      };
+    if (res.is_coordinator) return { text: "Coordinator", level: "ok", rank: 2, title: "As it should be." + again, check: true };
+    if (res.not_set) return { text: "Not set", level: "info", rank: 1, title: "It hasn't found an OTA server yet." + again, check: true };
     return {
       text: nameOf(res.server) || res.server,
       level: "warning",
       rank: 0,
-      title: "Not the coordinator: its update requests go to this device, so firmware updates for it time out."
+      title: "Not the coordinator: its firmware update requests go to this device, so its updates time out." + again,
+      check: true
     };
   }
   function devicesWithWrongServer(results) {
@@ -2953,7 +2963,7 @@
         <th data-sort="power">Power</th>
         <th data-sort="count">Bindings</th>
         <th data-sort="scanRank">Last scan</th>
-        <th data-sort="otaRank" id="th-ota" style="display:none" title="Where each device gets its firmware updates from. It should be the coordinator.">Updates from</th>
+        <th data-sort="otaRank" id="th-ota" style="display:none" title="The device each device asks for firmware updates (its OTA upgrade server). It should be the coordinator. Click a cell to check it.">OTA server</th>
       </tr></thead>
       <tbody id="devices-table-body"></tbody>
     </table>
@@ -4049,6 +4059,9 @@ tr.lost-row s { color: var(--error-color, #db4437); }
 .ota-ok { color: var(--success-color, #43a047); }
 td.ota-cell.ota-warning { color: #b26a00; font-weight: 500; }
 td.ota-cell.ota-unknown, td.ota-cell.ota-none, td.ota-cell.ota-info { color: var(--secondary-text-color, #727272); }
+td.ota-cell .ota-cell-link { color: inherit; text-decoration: underline dotted; text-underline-offset: 3px; cursor: pointer; }
+td.ota-cell.ota-unknown .ota-cell-link { color: var(--primary-color, #03a9f4); text-decoration: none; }
+td.ota-cell .ota-cell-link:hover { text-decoration: underline; }
 .settings-pickers { display: flex; flex-wrap: wrap; gap: 12px; margin: 4px 0 10px; }
 .settings-pick { display: flex; gap: 6px; align-items: center; }
 .settings-pick { flex-wrap: wrap; min-width: 0; max-width: 100%; }
@@ -6246,7 +6259,7 @@ a.health-chip-lost { text-decoration:none; cursor:pointer; }
         return;
       }
       const nameOf = (i) => this._ieeeLabel(i, { plain: true });
-      const wrongText = wrong ? ` ${wrong} device${wrong === 1 ? " gets its" : "s get their"} updates from a device other than the coordinator (see the Updates from column).` : "";
+      const wrongText = wrong ? ` ${wrong} device${wrong === 1 ? " gets its" : "s get their"} updates from a device other than the coordinator (see the OTA server column).` : "";
       const checkBtn = prog ? `<span class="muted">Checking ${prog.done} of ${prog.total}\u2026</span><button class="btn btn-small" id="btn-ota-stop">Stop</button>` : `<button class="btn btn-small btn-primary" id="btn-ota-check-all" title="Reads where each mains device gets its firmware updates, one at a time. Battery devices are skipped.">Check update servers</button>`;
       el.innerHTML = `<div class="stale-row"><span>${list2.length ? `${escapeHtml(claimantsText(list2, nameOf))} It's a fault in ${list2.length === 1 ? "its" : "their"} firmware: only the maker can fix it.` : ""}${escapeHtml(wrongText)}</span>${checkBtn}${list2.map((c) => `<button class="btn btn-small" data-ota-claimant="${escapeHtml(c.ieee)}">Open ${escapeHtml(nameOf(c.ieee))}</button>`).join("")}</div>`;
       el.style.display = "";
@@ -6272,7 +6285,8 @@ a.health-chip-lost { text-decoration:none; cursor:pointer; }
       const key = normIeee(ieee);
       if (!this._otaServers) this._otaServers = /* @__PURE__ */ new Map();
       this._otaBusy = key;
-      this._renderDrawer();
+      if (this._drawerIeee) this._renderDrawer();
+      if (this._view === "devices") this._renderDevicesTab();
       try {
         this._otaServers.set(key, await this._api.otaServer(key));
       } catch (err) {
@@ -6280,6 +6294,8 @@ a.health-chip-lost { text-decoration:none; cursor:pointer; }
       } finally {
         this._otaBusy = null;
         if (this._drawerIeee) this._renderDrawer();
+        this._renderOtaBanner();
+        if (this._view === "devices") this._renderDevicesTab();
       }
     }
     /** Side panel: firmware updates. */
@@ -6300,7 +6316,7 @@ a.health-chip-lost { text-decoration:none; cursor:pointer; }
       ${claim ? `<p class="drawer-ota-claim">\u26A0 This device claims to be a firmware update server: it lists the OTA cluster as an input on endpoint ${escapeHtml(
         claim.endpoints.join(", ")
       )}. Devices near it can pick it instead of the coordinator, and their firmware updates then time out. It's a firmware fault: report it to the maker.</p>` : ""}
-      <p>Gets its updates from: ${line}</p>
+      <p>OTA server: ${line}</p>
       <button class="btn btn-small" id="drawer-ota-check" ${busy ? "disabled" : ""} title="Reads where this device sends its firmware update requests (its OTA upgrade server)">Check</button>
     </div>`;
     }
@@ -13849,13 +13865,19 @@ From ${nameOf(this._meshSnapshot[h.from] ? h.from : h.to)}'s tables, read ${relT
           <td>${escapeHtml(r.power)}</td>
           <td>${r.count}</td>
           <td>${r.scanHtml}</td>
-          ${r.ota ? `<td class="ota-cell ota-${escapeHtml(r.ota.level)}" title="${escapeHtml(r.ota.title)}">${escapeHtml(r.ota.text)}</td>` : ""}
+          ${r.ota ? `<td class="ota-cell ota-${escapeHtml(r.ota.level)}" title="${escapeHtml(r.ota.title)}">${this._otaBusy === normIeee(r.device.ieee) ? `<span class="muted">Checking\u2026</span>` : r.ota.check ? `<a href="#" class="ota-cell-link" data-ota-ieee="${escapeHtml(r.device.ieee)}">${escapeHtml(r.ota.text)}</a>` : escapeHtml(r.ota.text)}</td>` : ""}
         </tr>`
       ).join("");
       this._qa("#devices-table-body .src-link").forEach((el) => {
         el.addEventListener("click", (e) => {
           e.preventDefault();
           this._openDeviceDrawer(this._devices.find((x) => x.ieee === el.dataset.ieee));
+        });
+      });
+      this._qa("#devices-table-body .ota-cell-link").forEach((el) => {
+        el.addEventListener("click", (e) => {
+          e.preventDefault();
+          if (!this._otaBusy) this._otaCheck(el.dataset.otaIeee);
         });
       });
       this._qa("#devices-table-body .scan-cell-btn").forEach((btn) => {

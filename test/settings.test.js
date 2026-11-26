@@ -125,9 +125,19 @@ describe("update servers on the Devices tab (1.12.0)", () => {
     expect(wrong).toMatchObject({ text: "ZB-LoungeBIG-Switch-Wall2", level: "warning", rank: 0 });
     expect(updateServerCell({ status: "ok", server: COORD, is_coordinator: true }).text).toBe("Coordinator");
     expect(updateServerCell({ status: "ok", not_set: true }).text).toBe("Not set");
-    expect(updateServerCell(null, nameOf, { battery: true }).text).toBe("Not checked (battery)");
+    expect(updateServerCell(null, nameOf, { battery: true }).text).toBe("Check (battery)");
+    expect(updateServerCell(null, nameOf).text).toBe("Check");
     expect(updateServerCell(null, nameOf, { hasOta: false }).text).toBe("—");
     expect(updateServerCell({ status: "no_answer" }).text).toBe("Didn't answer");
+  });
+
+  it("every cell can be clicked to check, except devices without firmware updates", () => {
+    expect(updateServerCell(null).check).toBe(true);
+    expect(updateServerCell({ status: "no_answer" }).check).toBe(true);
+    expect(updateServerCell({ status: "ok", is_coordinator: true }).check).toBe(true);
+    expect(updateServerCell({ status: "ok", server: SW }, nameOf).check).toBe(true);
+    expect(updateServerCell(null, nameOf, { hasOta: false }).check).toBe(false);
+    expect(updateServerCell({ status: "no_ota" }).check).toBe(false);
   });
 
   it("counts devices getting updates from somewhere other than the coordinator", () => {

@@ -1513,7 +1513,7 @@ export class ZhaBindingMapCard extends HTMLElement {
     }
     const nameOf = (i) => this._ieeeLabel(i, { plain: true });
     const wrongText = wrong
-      ? ` ${wrong} device${wrong === 1 ? " gets its" : "s get their"} updates from a device other than the coordinator (see the Updates from column).`
+      ? ` ${wrong} device${wrong === 1 ? " gets its" : "s get their"} updates from a device other than the coordinator (see the OTA server column).`
       : "";
     const checkBtn = prog
       ? `<span class="muted">Checking ${prog.done} of ${prog.total}…</span><button class="btn btn-small" id="btn-ota-stop">Stop</button>`
@@ -1550,14 +1550,19 @@ export class ZhaBindingMapCard extends HTMLElement {
     const key = normIeee(ieee);
     if (!this._otaServers) this._otaServers = new Map();
     this._otaBusy = key;
-    this._renderDrawer();
+    if (this._drawerIeee) this._renderDrawer();
+    if (this._view === "devices") this._renderDevicesTab();
     try {
       this._otaServers.set(key, await this._api.otaServer(key));
     } catch (err) {
       this._otaServers.set(key, { status: "error", detail: extractErrorMessage(err) });
     } finally {
       this._otaBusy = null;
+      // Side panel, Devices tab column and banner all show the new answer
+      // straight away (1.12.0: the column used to need a page reload).
       if (this._drawerIeee) this._renderDrawer();
+      this._renderOtaBanner();
+      if (this._view === "devices") this._renderDevicesTab();
     }
   }
 
@@ -1585,7 +1590,7 @@ export class ZhaBindingMapCard extends HTMLElement {
             )}. Devices near it can pick it instead of the coordinator, and their firmware updates then time out. It's a firmware fault: report it to the maker.</p>`
           : ""
       }
-      <p>Gets its updates from: ${line}</p>
+      <p>OTA server: ${line}</p>
       <button class="btn btn-small" id="drawer-ota-check" ${busy ? "disabled" : ""} title="Reads where this device sends its firmware update requests (its OTA upgrade server)">Check</button>
     </div>`;
   }
@@ -10558,7 +10563,13 @@ export class ZhaBindingMapCard extends HTMLElement {
           <td>${r.scanHtml}</td>
           ${
             r.ota
-              ? `<td class="ota-cell ota-${escapeHtml(r.ota.level)}" title="${escapeHtml(r.ota.title)}">${escapeHtml(r.ota.text)}</td>`
+              ? `<td class="ota-cell ota-${escapeHtml(r.ota.level)}" title="${escapeHtml(r.ota.title)}">${
+                  this._otaBusy === normIeee(r.device.ieee)
+                    ? `<span class="muted">Checking…</span>`
+                    : r.ota.check
+                    ? `<a href="#" class="ota-cell-link" data-ota-ieee="${escapeHtml(r.device.ieee)}">${escapeHtml(r.ota.text)}</a>`
+                    : escapeHtml(r.ota.text)
+                }</td>`
               : ""
           }
         </tr>`
@@ -10569,6 +10580,12 @@ export class ZhaBindingMapCard extends HTMLElement {
       el.addEventListener("click", (e) => {
         e.preventDefault();
         this._openDeviceDrawer(this._devices.find((x) => x.ieee === el.dataset.ieee));
+      });
+    });
+    this._qa("#devices-table-body .ota-cell-link").forEach((el) => {
+      el.addEventListener("click", (e) => {
+        e.preventDefault();
+        if (!this._otaBusy) this._otaCheck(el.dataset.otaIeee);
       });
     });
     this._qa("#devices-table-body .scan-cell-btn").forEach((btn) => {

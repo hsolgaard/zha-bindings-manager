@@ -81,3 +81,40 @@ describe("groups only on devices", () => {
     expect(deviceOnlyGroups({ groups: [], bindings: [], classify: () => "control" })).toEqual([]);
   });
 });
+
+import { lostBindings, repairedDevices } from "../src/lost.js";
+
+describe("re-paired devices and lost rows (1.12.0)", () => {
+  const W = "44:9f:da:ff:fe:a4:a7:6d";
+  const L = "aa:aa:aa:aa:aa:aa:aa:09";
+  const res = {
+    devices: {
+      [W]: {
+        name: "ZB-LoungeBIG-Switch-Wall2",
+        policy: "notify",
+        lost: [
+          { key: "k1", sourceIeee: W, sourceEndpoint: 1, clusterId: 6, isGroup: false, targetIeee: L.toUpperCase(), targetEndpoint: 1, since: "2026-11-26T18:05:00Z", noticed_by: "repaired" },
+          { key: "k2", sourceIeee: W, sourceEndpoint: 2, clusterId: 6, isGroup: true, groupId: 5, since: "2026-11-26T18:05:00Z", noticed_by: "repaired" },
+        ],
+        repaired: { at: "2026-11-26T18:04:00Z", removed_at: "2026-11-26T13:15:00Z", missing_groups: [{ group_id: 5, endpoint_id: 1, name: "Lounge" }] },
+      },
+      [L]: { name: "Light", policy: "off", lost: [{ key: "x" }] },
+    },
+  };
+
+  it("lists lost bindings as rows with their own ids", () => {
+    const rows = lostBindings(res);
+    expect(rows.map((r) => r.id)).toEqual([`lost:${W}:k1`, `lost:${W}:k2`]);
+    expect(rows[0].targetIeee).toBe(L); // normalised for the device filter
+    expect(rows[1].isGroup).toBe(true);
+    expect(rows.every((r) => r.lost && r.ownerIeee === W)).toBe(true);
+  });
+
+  it("lists re-paired devices with what's missing", () => {
+    const rep = repairedDevices(res);
+    expect(rep).toEqual([
+      { ieee: W, name: "ZB-LoungeBIG-Switch-Wall2", at: "2026-11-26T18:04:00Z", removedAt: "2026-11-26T13:15:00Z", missingGroups: [{ group_id: 5, endpoint_id: 1, name: "Lounge" }], lost: 2 },
+    ]);
+    expect(lostFor(res, W).repaired.removed_at).toBe("2026-11-26T13:15:00Z");
+  });
+});

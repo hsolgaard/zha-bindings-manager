@@ -146,6 +146,7 @@ export const SHELL_HTML = `
 
   <div id="view-groups" class="view"></div>
   <div id="view-devices" class="view">
+    <div id="ota-banner" class="stale-banner ota-banner" style="display:none"></div>
     <div class="table-scroll">
     <table class="bindings-table">
       <thead><tr>

@@ -43,6 +43,47 @@ export class ZhaApi {
     return this.hass.callService("zha", "remove", { ieee });
   }
 
+  // --- Device configuration backups and update servers (integration 1.12.0) --
+
+  async settingsGet(ieee) {
+    return this.hass.callWS({ type: "zha_bindings_manager/settings_get", ieee });
+  }
+
+  async settingsBackup(ieee) {
+    return this.hass.callWS({ type: "zha_bindings_manager/settings_backup", ieee });
+  }
+
+  /** Compares a backup of `sourceIeee` with what `targetIeee` has now.
+   *  snapshotId: a backup's id or "after_reset"; before: newest backup
+   *  taken before this time (a re-paired device's removal). */
+  async settingsPlan(sourceIeee, targetIeee, { snapshotId, before, endpointMap } = {}) {
+    const msg = { type: "zha_bindings_manager/settings_plan", source_ieee: sourceIeee, target_ieee: targetIeee };
+    if (snapshotId) msg.snapshot_id = snapshotId;
+    if (before) msg.before = before;
+    if (endpointMap && Object.keys(endpointMap).length) msg.endpoint_map = endpointMap;
+    return this.hass.callWS(msg);
+  }
+
+  async settingsApply(targetIeee, items) {
+    return this.hass.callWS({ type: "zha_bindings_manager/settings_apply", target_ieee: targetIeee, items });
+  }
+
+  async settingsImport(ieee, snapshot) {
+    return this.hass.callWS({ type: "zha_bindings_manager/settings_import", ieee, snapshot });
+  }
+
+  async otaClaimants() {
+    return this.hass.callWS({ type: "zha_bindings_manager/ota_claimants" });
+  }
+
+  async otaServer(ieee) {
+    return this.hass.callWS({ type: "zha_bindings_manager/ota_server", ieee });
+  }
+
+  async watchRepairedDismiss(ieee) {
+    return this.hass.callWS({ type: "zha_bindings_manager/watch_repaired_dismiss", ieee });
+  }
+
   // --- Lost bindings (integration 1.8.0) -------------------------------------
 
   async watchGet() {

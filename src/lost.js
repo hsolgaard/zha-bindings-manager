@@ -57,10 +57,48 @@ export function lostFor(res, ieee) {
         lastCheck: d.last_check || null,
         expected: d.expected || 0,
         fallback: !!d.fallback,
+        repaired: d.repaired || null,
       };
     }
   }
-  return { policy: "notify", lost: [], queued: false, autoPaused: false, lastCheck: null, expected: 0, fallback: false };
+  return { policy: "notify", lost: [], queued: false, autoPaused: false, lastCheck: null, expected: 0, fallback: false, repaired: null };
+}
+
+/** 1.12.0: every lost binding as a table row, with the binding's own
+ *  fields (source, endpoint, cluster, target or group) so the Bindings tab
+ *  can filter and show it like any other binding. */
+export function lostBindings(res) {
+  const out = [];
+  for (const d of lostSummary(res).devices)
+    for (const b of d.lost)
+      out.push({
+        ...b,
+        sourceIeee: normIeee(b.sourceIeee || d.ieee),
+        targetIeee: b.targetIeee ? normIeee(b.targetIeee) : b.targetIeee,
+        id: `lost:${d.ieee}:${b.key}`,
+        lost: true,
+        ownerIeee: d.ieee,
+        ownerName: d.name,
+      });
+  return out;
+}
+
+/** 1.12.0: devices that were removed from ZHA and paired again, from
+ *  watch_get: [{ieee, name, at, removedAt, missingGroups, lost}]. */
+export function repairedDevices(res) {
+  const out = [];
+  for (const [ieee, d] of Object.entries((res && res.devices) || {})) {
+    if (!d || !d.repaired) continue;
+    out.push({
+      ieee: normIeee(ieee),
+      name: d.name || ieee,
+      at: d.repaired.at || null,
+      removedAt: d.repaired.removed_at || null,
+      missingGroups: d.repaired.missing_groups || [],
+      lost: d.policy === "off" ? 0 : (d.lost || []).length,
+    });
+  }
+  return out.sort((a, b) => String(a.name).localeCompare(String(b.name)));
 }
 
 /** One device's Put back result. The integration sends
@@ -127,4 +165,5 @@ export const NOTICED_BY = {
   check: "noticed by Check for lost bindings",
   put_back: "still missing after Put back",
   replace: "copied from a replaced device, waiting for it to wake up",
+  repaired: "noticed when it was paired again",
 };

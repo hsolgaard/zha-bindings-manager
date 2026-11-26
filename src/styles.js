@@ -397,6 +397,10 @@ a.health-chip-lost { text-decoration:none; cursor:pointer; }
 .mesh-node circle.unread { stroke-dasharray: 3 3; stroke: var(--secondary-text-color); }
 .mesh-node rect { fill: var(--primary-color); }
 .mesh-label { fill: var(--primary-text-color); paint-order: stroke; stroke: var(--card-background-color, #fff); stroke-width:3px; }
+/* 1.12.0: names that would overlap a more important one; shown when pointed at. */
+.mesh-label.mesh-label-hidden { visibility: hidden; }
+.mesh-node:hover .mesh-label.mesh-label-hidden { visibility: visible; }
+.mesh-node:hover { position: relative; }
 .mesh-kids { fill: var(--secondary-text-color); font-weight:600; }
 .mesh-legend { display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-top:6px; font-size:0.85em; }
 .mesh-tips { padding-left:18px; margin:0 0 12px; }

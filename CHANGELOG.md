@@ -34,6 +34,15 @@ Needs integration 1.12.0 for everything below except the lost-binding rows.
 - **Lost bindings as rows in the Bindings table**, with the lost target struck through, when it was noticed, **Put
   back** and **Removed on purpose**. They also show when the table is filtered on the device, and under Errors.
 
+### Changed
+
+- **Network tab (beta): names no longer pile on top of each other.** Where two names would overlap, or a name would run
+  under another device, the less important one is hidden: the coordinator, the route being shown and the routers with
+  the most links keep theirs. Zooming in makes room, so more names appear, and pointing at a device always shows its
+  name. A line under the picture says how many are hidden.
+- **Names: Small / Medium / Large** on the Network tab sets the size of names and devices, remembered in this browser.
+  Devices are drawn smaller than in 1.11.0 at every size.
+
 ### Fixed
 
 - A device's group bindings are now reported as lost after it's removed and paired again. Removing it took it out of

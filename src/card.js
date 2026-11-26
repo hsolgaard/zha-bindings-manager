@@ -7116,6 +7116,12 @@ export class ZhaBindingMapCard extends HTMLElement {
               <option value="all" ${this._meshShowMode() === "all" ? "selected" : ""}>Every link heard</option>
               <option value="routes" ${this._meshShowMode() === "routes" ? "selected" : ""}>Routes my bindings use</option>
             </select></label>
+          <label class="row">Names
+            <select id="mesh-size" title="Size of device names and circles. Names that would overlap are hidden: zoom in or point at a device to see them.">
+              ${["small", "medium", "large"]
+                .map((v) => `<option value="${v}" ${this._meshSizeChoice() === v ? "selected" : ""}>${v[0].toUpperCase()}${v.slice(1)}</option>`)
+                .join("")}
+            </select></label>
           <label class="row"><input type="checkbox" id="mesh-battery" ${this._meshShowBattery !== false ? "checked" : ""}> Battery devices</label>
         </div>
         <p class="hint mesh-show-hint">${escapeHtml(this._meshShowHint())}</p>
@@ -7248,7 +7254,10 @@ export class ZhaBindingMapCard extends HTMLElement {
         `<g class="mesh-link" data-link="${escapeHtml(l.a)}|${escapeHtml(l.b)}"><line x1="${pa.x}" y1="${pa.y}" x2="${pb.x}" y2="${pb.y}" stroke="${this._lqiColor(level)}" style="--sw:${(hi ? 3 : 1) * (1 + (l.lqi / 255) * 3) * k}" stroke-opacity="${hi ? 1 : level === "weak" ? 0.9 : 0.55}" ${level === "weak" ? `stroke-dasharray="${6 * k} ${4 * k}"` : ""}/><line class="mesh-link-hit" x1="${pa.x}" y1="${pa.y}" x2="${pb.x}" y2="${pb.y}" style="--sw:${16 * k}"><title>${escapeHtml(this._meshLinkTitle(l, nameOf))}</title></line></g>`
       );
     }
-    const r0 = 11 * k;
+    // 1.12.0: names and devices in three sizes (Names: Small / Medium /
+    // Large), and smaller circles than 1.11.0's 11 px.
+    const sz = this._meshSizes();
+    const r0 = sz.r * k;
     // 1.5.0b6: "Routes my bindings use" draws each binding's predicted hops
     // (deduplicated), with an arrow in the direction of travel.
     if (showMode === "routes") {
@@ -7312,17 +7321,17 @@ export class ZhaBindingMapCard extends HTMLElement {
         const tip = parent
           ? `${nameOf(i)} (battery): parent ${nameOf(parent.parent)}, ${level}${typeof parent.lqi === "number" ? ` ${parent.lqi}` : ""}`
           : `${nameOf(i)} (battery): parent unknown. No router listed it as a child in the last scan; it may have been asleep or moved.`;
-        batteryNodes.push(`<g class="mesh-node mesh-battery ${parent ? "" : "orphan"}${onRoute.has(i) ? " on-route" : ""}" data-ieee="${escapeHtml(i)}" transform="translate(${p.x},${p.y})"><g class="mesh-zs">${onRoute.has(i) ? `<circle r="${r0 * 1.2}" class="route-ring"/>` : ""}
+        batteryNodes.push(`<g class="mesh-node mesh-battery ${parent ? "" : "orphan"}${onRoute.has(i) ? " on-route" : ""}" data-ieee="${escapeHtml(i)}" data-pri="${onRoute.has(i) ? 500 : 0}" transform="translate(${p.x},${p.y})"><g class="mesh-zs">${onRoute.has(i) ? `<circle r="${r0 * 1.2}" class="route-ring"/>` : ""}
           <circle r="${r0 * 0.5}" style="stroke:${this._lqiColor(level)}"/><title>${escapeHtml(tip)}</title>
-          <text class="mesh-label mesh-battery-label" y="${r0 * 0.5 + 11 * k}" font-size="${10 * k}" text-anchor="middle">${escapeHtml(nameOf(i))}</text>
+          <text class="mesh-label mesh-battery-label" y="${r0 * 0.5 + (sz.battery + 1) * k}" font-size="${sz.battery * k}" text-anchor="middle">${escapeHtml(nameOf(i))}</text>
         </g></g>`);
       }
     }
     // 1.5.0b3: a label that would collide with an earlier one goes above its node.
     const placedLabels = [];
     const labelY = (p) => {
-      const below = p.y + r0 + 13 * k;
-      const clash = (y) => placedLabels.some((q) => Math.abs(q.x - p.x) < 110 * k && Math.abs(q.y - y) < 13 * k);
+      const below = p.y + r0 + (sz.label + 1) * k;
+      const clash = (y) => placedLabels.some((q) => Math.abs(q.x - p.x) < 110 * k && Math.abs(q.y - y) < (sz.label + 1) * k);
       const y = clash(below) ? p.y - r0 - 5 * k : below;
       placedLabels.push({ x: p.x, y });
       return y - p.y;
@@ -7353,11 +7362,15 @@ export class ZhaBindingMapCard extends HTMLElement {
       const viaCeiling = mode === "plan" && layout.floor && !sameFloorOk && up.length + down.length > 0;
       const floorBadge =
         up.length || down.length
-          ? `<text class="mesh-floor-badge" x="${-r0 * 1.15}" y="${-r0 * 0.6}" text-anchor="end" font-size="${15 * k}">${up.length ? `↑${up.length}` : ""}${down.length ? `↓${down.length}` : ""}<title>${escapeHtml(
+          ? `<text class="mesh-floor-badge" x="${-r0 * 1.15}" y="${-r0 * 0.6}" text-anchor="end" font-size="${(sz.label + 3) * k}">${up.length ? `↑${up.length}` : ""}${down.length ? `↓${down.length}` : ""}<title>${escapeHtml(
               [...up, ...down].join("\n")
             )}</title></text>`
           : "";
-      nodes.push(`<g class="mesh-node${onRoute.has(i) ? " on-route" : ""}" data-ieee="${escapeHtml(i)}" transform="translate(${p.x},${p.y})"><g class="mesh-zs">
+      // 1.12.0: which names stay when they'd overlap: the coordinator, the
+      // route being shown, then routers with the most links.
+      const degree = [...mesh.links.values()].filter((l) => l.a === i || l.b === i).length;
+      const pri = isCoord ? 1000 : onRoute.has(i) ? 500 : 100 + degree;
+      nodes.push(`<g class="mesh-node${onRoute.has(i) ? " on-route" : ""}" data-ieee="${escapeHtml(i)}" data-pri="${pri}" transform="translate(${p.x},${p.y})"><g class="mesh-zs">
         ${onRoute.has(i) ? `<circle r="${r0 * 1.7}" class="route-ring"/>` : ""}
         ${viaCeiling ? `<circle r="${r0 * 1.6}" class="via-ceiling"><title>${escapeHtml(`${nameOf(i)}: no usable link on this floor, only to other floors`)}</title></circle>` : ""}
         ${isCoord ? `<rect x="${-r0}" y="${-r0}" width="${2 * r0}" height="${2 * r0}" rx="${r0 / 3}"/>` : `<circle r="${r0}" class="${unread ? "unread" : ""}"/>`}
@@ -7370,7 +7383,7 @@ export class ZhaBindingMapCard extends HTMLElement {
               )}</title>`
             : ""
         }
-        <text class="mesh-label" y="${labelY(p)}" font-size="${12 * k}" text-anchor="middle">${escapeHtml(d ? this._deviceLabel(d) : i)}${unread ? " (not read)" : ""}</text>
+        <text class="mesh-label" y="${labelY(p)}" font-size="${sz.label * k}" text-anchor="middle">${escapeHtml(d ? this._deviceLabel(d) : i)}${unread ? " (not read)" : ""}</text>
       </g></g>`);
     }
     const img =
@@ -7400,6 +7413,7 @@ export class ZhaBindingMapCard extends HTMLElement {
       <svg class="mesh-svg" style="--mz:${this._meshGrowth(vb)}" viewBox="${vb.x} ${vb.y} ${vb.w} ${vb.h}" preserveAspectRatio="xMidYMid meet"><defs>${grad("good")}${grad("fair")}${grad("weak")}${["good", "fair", "weak", "unknown"]
         .map((lvl) => `<marker id="mesh-arrow-${lvl}" viewBox="0 0 10 10" refX="16" refY="5" markerWidth="5" markerHeight="5" orient="auto"><path d="M0 0L10 5L0 10z" fill="${this._lqiColor(lvl)}"/></marker>`)
         .join("")}</defs>${img}<g>${heat.join("")}</g><g>${lines.join("")}</g><g>${batteryNodes.join("")}</g><g>${nodes.join("")}</g></svg>
+      <p class="hint" id="mesh-hidden-note"></p>
       ${
         missing
           ? `<details class="mesh-unplaced muted"><summary>${missing} router${missing === 1 ? "" : "s"} not on this layout</summary>${escapeHtml(missingNames.join(", "))}. ${
@@ -7716,7 +7730,70 @@ export class ZhaBindingMapCard extends HTMLElement {
       // zooming. 1.11.0: they grow gently instead (square root of the zoom),
       // so they become readable without getting huge (issue #49).
       svg.style.setProperty("--mz", String(this._meshGrowth(vb)));
+      if (typeof requestAnimationFrame === "function") {
+        if (!this._meshDeclutterQueued) {
+          this._meshDeclutterQueued = true;
+          requestAnimationFrame(() => {
+            this._meshDeclutterQueued = false;
+            this._meshDeclutter();
+          });
+        }
+      } else this._meshDeclutter();
     }
+  }
+
+  /** 1.12.0: label and circle sizes in screen pixels. */
+  _meshSizeChoice() {
+    if (!this._meshSize) {
+      try {
+        this._meshSize = localStorage.getItem("zbm-mesh-size") || "medium";
+      } catch (e) {
+        this._meshSize = "medium";
+      }
+    }
+    return ["small", "medium", "large"].includes(this._meshSize) ? this._meshSize : "medium";
+  }
+
+  _meshSizes() {
+    return { small: { label: 10, battery: 9, r: 7 }, medium: { label: 12, battery: 10, r: 9 }, large: { label: 14, battery: 12, r: 11 } }[this._meshSizeChoice()];
+  }
+
+  /** 1.12.0: hides names that would overlap a more important one. Run after
+   *  drawing and after each zoom (zooming in makes room, so more appear).
+   *  Pointing at a device always shows its name (CSS). */
+  _meshDeclutter() {
+    const svg = this._q("#view-mesh .mesh-svg");
+    if (!svg) return;
+    const items = [...svg.querySelectorAll(".mesh-node")]
+      .map((g, n) => ({ g, t: g.querySelector(".mesh-label"), pri: Number(g.dataset.pri || 0), n }))
+      .filter((x) => x.t);
+    items.forEach((x) => x.t.classList.remove("mesh-label-hidden"));
+    items.sort((a, b) => b.pri - a.pri || a.n - b.n);
+    // Other devices' circles count too: a name running under one can't be read.
+    const shapes = items.map((x) => {
+      const c = x.g.querySelector(":scope > .mesh-zs > circle:not(.route-ring):not(.via-ceiling), :scope > .mesh-zs > rect");
+      return { g: x.g, r: c ? c.getBoundingClientRect() : null };
+    });
+    const kept = [];
+    let hidden = 0;
+    const overlaps = (r, q, pad) => r.left < q.right + pad && r.right > q.left - pad && r.top < q.bottom + pad && r.bottom > q.top - pad;
+    for (const x of items) {
+      const r = x.t.getBoundingClientRect();
+      if (!r.width) continue;
+      const pad = 2;
+      if (
+        kept.some((q) => overlaps(r, q, pad)) ||
+        shapes.some((sh) => sh.g !== x.g && sh.r && sh.r.width && overlaps(r, sh.r, -1))
+      ) {
+        x.t.classList.add("mesh-label-hidden");
+        hidden++;
+      } else kept.push(r);
+    }
+    const note = this._q("#mesh-hidden-note");
+    if (note)
+      note.textContent = hidden
+        ? `${hidden} name${hidden === 1 ? "" : "s"} hidden where they'd overlap: zoom in, or point at a device, to see ${hidden === 1 ? "it" : "them"}.`
+        : "";
   }
 
   /** Scale for devices and labels at the current zoom (1 when the whole plan shows). */
@@ -7911,11 +7988,27 @@ export class ZhaBindingMapCard extends HTMLElement {
       this._meshShowBattery = e.target.checked;
       this._renderMesh();
     });
+    on("#mesh-size", "change", (e) => {
+      this._meshSize = e.target.value;
+      try {
+        localStorage.setItem("zbm-mesh-size", this._meshSize);
+      } catch (err) {
+        /* a remembered choice is a convenience only */
+      }
+      this._renderMesh();
+    });
     this._qa("#view-mesh [data-mesh-read]").forEach((b) => b.addEventListener("click", () => this._meshReadOne(b.dataset.meshRead)));
     on("#mesh-layout", "change", (e) => {
       this._meshLayoutChoice = e.target.value;
       this._renderMesh();
     });
+    // 1.12.0: the device pointed at comes to the front, so its name (shown
+    // even when hidden for overlapping) isn't covered by other devices.
+    this._qa("#view-mesh .mesh-node").forEach((g) =>
+      g.addEventListener("mouseenter", () => {
+        if (g.parentNode && g.parentNode.lastChild !== g) g.parentNode.appendChild(g);
+      })
+    );
     this._qa("#view-mesh .mesh-node").forEach((g) =>
       g.addEventListener("click", () => {
         if (this._meshDragged) return;
@@ -7937,13 +8030,21 @@ export class ZhaBindingMapCard extends HTMLElement {
       });
     this._wireMeshZoom();
     this._wireMeshCoordRoute();
-    if (typeof requestAnimationFrame === "function") requestAnimationFrame(() => this._meshMeasure());
+    if (typeof requestAnimationFrame === "function")
+      requestAnimationFrame(() => {
+        this._meshMeasure();
+        this._meshDeclutter();
+      });
     if (!this._meshResizeBound && typeof window !== "undefined") {
       this._meshResizeBound = true;
       let t = null;
       window.addEventListener("resize", () => {
         clearTimeout(t);
-        t = setTimeout(() => this._view === "mesh" && this._meshMeasure(), 250);
+        t = setTimeout(() => {
+          if (this._view !== "mesh") return;
+          this._meshMeasure();
+          this._meshDeclutter();
+        }, 250);
       });
     }
     this._qa("#view-mesh tr[data-link]").forEach((tr) =>
